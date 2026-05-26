@@ -106,7 +106,7 @@ class TrainDP3Workspace:
             RUN_CKPT = True
             verbose = False
         
-        RUN_VALIDATION = False # reduce time cost
+        RUN_VALIDATION = bool(getattr(cfg.training, 'run_validation', True))
         
         # resume training
         if cfg.training.resume:
