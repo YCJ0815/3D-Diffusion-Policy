@@ -21,7 +21,16 @@ trajectory_video.mp4
 isaacgym/
 *.html
 nohup.out
-data/
+# Track curated training datasets under data/, but keep raw/intermediate files local.
+data/*
+!data/*.zarr/
+!data/*.zarr/**
+!data/*.zip
+!data/*.npz
+!data/*.npy
+!data/README.md
+data/raw_data/
+data/**/.DS_Store
 config/transition_*.npz
 config/transition_*_q_plan*.npy
 config/transition_*_delta*.npy
