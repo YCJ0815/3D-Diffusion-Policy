@@ -6,11 +6,20 @@ shape_meta: &shape_meta
   # acceptable types: rgb, low_dim
   obs:
     point_cloud:
-      shape: [1024, 3]
+      shape: [2048, 3]
       type: point_cloud
-    agent_pos:
-      shape: [7]
-      type: low_dimx
+    start_pos:
+      shape: [3]
+      type: low_dim
+    goal_pos:
+      shape: [3]
+      type: low_dim
+    start_rot:
+      shape: [4]
+      type: low_dim
+    goal_rot:
+      shape: [4]
+      type: low_dim
   action:
     shape: [7]
 
@@ -25,3 +34,11 @@ dataset:
   seed: 42
   val_ratio: 0.02
   max_train_episodes: 90
+  point_cloud_key: point_cloud
+  obs_keys: [point_cloud, start_pos, goal_pos, start_rot, goal_rot]
+  fallback_state_key: state
+  state_slices:
+    start_pos: [0, 3]
+    goal_pos: [3, 6]
+    start_rot: [6, 10]
+    goal_rot: [10, 14]

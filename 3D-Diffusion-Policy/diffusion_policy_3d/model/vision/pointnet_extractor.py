@@ -213,14 +213,23 @@ class DP3Encoder(nn.Module):
                  ):
         super().__init__()
         self.imagination_key = 'imagin_robot'
-        self.state_key = 'agent_pos'
         self.point_cloud_key = 'point_cloud'
         self.rgb_image_key = 'image'
         self.n_output_channels = out_channel
+        self.excluded_obs_keys = {
+            self.point_cloud_key,
+            self.imagination_key,
+            self.rgb_image_key,
+        }
         
         self.use_imagined_robot = self.imagination_key in observation_space.keys()
         self.point_cloud_shape = observation_space[self.point_cloud_key]
-        self.state_shape = observation_space[self.state_key]
+        self.lowdim_keys = [
+            key for key in observation_space.keys()
+            if key not in self.excluded_obs_keys
+        ]
+        if len(self.lowdim_keys) == 0:
+            raise RuntimeError("DP3Encoder requires at least one low-dimensional observation key.")
         if self.use_imagined_robot:
             self.imagination_shape = observation_space[self.imagination_key]
         else:
@@ -229,7 +238,7 @@ class DP3Encoder(nn.Module):
         
         
         cprint(f"[DP3Encoder] point cloud shape: {self.point_cloud_shape}", "yellow")
-        cprint(f"[DP3Encoder] state shape: {self.state_shape}", "yellow")
+        cprint(f"[DP3Encoder] lowdim keys: {self.lowdim_keys}", "yellow")
         cprint(f"[DP3Encoder] imagination point shape: {self.imagination_shape}", "yellow")
         
 
@@ -254,8 +263,13 @@ class DP3Encoder(nn.Module):
             net_arch = state_mlp_size[:-1]
         output_dim = state_mlp_size[-1]
 
-        self.n_output_channels  += output_dim
-        self.state_mlp = nn.Sequential(*create_mlp(self.state_shape[0], output_dim, net_arch, state_mlp_activation_fn))
+        self.lowdim_mlps = nn.ModuleDict()
+        for key in self.lowdim_keys:
+            key_shape = observation_space[key]
+            self.lowdim_mlps[key] = nn.Sequential(
+                *create_mlp(key_shape[0], output_dim, net_arch, state_mlp_activation_fn)
+            )
+            self.n_output_channels += output_dim
 
         cprint(f"[DP3Encoder] output dim: {self.n_output_channels}", "red")
 
@@ -271,9 +285,11 @@ class DP3Encoder(nn.Module):
         # points: B * 3 * (N + sum(Ni))
         pn_feat = self.extractor(points)    # B * out_channel
             
-        state = observations[self.state_key]
-        state_feat = self.state_mlp(state)  # B * 64
-        final_feat = torch.cat([pn_feat, state_feat], dim=-1)
+        lowdim_feats = []
+        for key in self.lowdim_keys:
+            lowdim_value = observations[key]
+            lowdim_feats.append(self.lowdim_mlps[key](lowdim_value))
+        final_feat = torch.cat([pn_feat] + lowdim_feats, dim=-1)
         return final_feat
 
 

@@ -1,0 +1,42 @@
+name: realdex_transition
+
+task_name: transition
+
+shape_meta: &shape_meta
+  obs:
+    point_cloud:
+      shape: [1024, 3]
+      type: point_cloud
+    goal_position:
+      shape: [3]
+      type: low_dim
+    goal_direction:
+      shape: [3]
+      type: low_dim
+    first_joint_angles_normalized:
+      shape: [6]
+      type: low_dim
+    last_joint_angles_normalized:
+      shape: [6]
+      type: low_dim
+  action:
+    shape: [6]
+
+env_runner: null
+
+dataset:
+  _target_: diffusion_policy_3d.dataset.transition_dataset.TransitionTrajectoryDataset
+  zarr_path: data/realdex_transition.zarr
+  horizon: ${horizon}
+  pad_before: 0
+  pad_after: 0
+  seed: 42
+  val_ratio: 0.02
+  max_train_episodes: null
+  point_cloud_key: point_cloud
+  obs_keys:
+    - point_cloud
+    - goal_position
+    - goal_direction
+    - first_joint_angles_normalized
+    - last_joint_angles_normalized

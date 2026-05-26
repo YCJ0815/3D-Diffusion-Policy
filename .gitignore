@@ -22,6 +22,10 @@ isaacgym/
 *.html
 nohup.out
 data/
+config/transition_*.npz
+config/transition_*_q_plan*.npy
+config/transition_*_delta*.npy
+.vscode/
 _C.cpython-38-x86_64-linux-gnu.so
 _C.cpython-39-x86_64-linux-gnu.so
 *_temp.xml
