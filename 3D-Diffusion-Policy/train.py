@@ -8,6 +8,7 @@ if __name__ == "__main__":
     os.chdir(ROOT_DIR)
 
 import os
+import json
 import hydra
 import torch
 import dill
@@ -33,6 +34,24 @@ from diffusion_policy_3d.model.diffusion.ema_model import EMAModel
 from diffusion_policy_3d.model.common.lr_scheduler import get_scheduler
 
 OmegaConf.register_new_resolver("eval", eval, replace=True)
+
+
+def _json_safe(value):
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, torch.Tensor):
+        if value.numel() == 1:
+            return value.item()
+        return value.detach().cpu().tolist()
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    return str(value)
 
 class TrainDP3Workspace:
     include_keys = ['global_step', 'epoch']
@@ -329,6 +348,9 @@ class TrainDP3Workspace:
             # end of epoch
             # log of last step is combined with validation and rollout
             wandb_run.log(step_log, step=self.global_step)
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write(json.dumps(_json_safe(step_log), ensure_ascii=True) + '\n')
+                f.flush()
             self.global_step += 1
             self.epoch += 1
             del step_log
