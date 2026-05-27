@@ -9,12 +9,14 @@ PACKAGE_ROOT = PROJECT_ROOT / "3D-Diffusion-Policy"
 if str(PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_ROOT))
 
-from diffusion_policy_3d.common.increment import build_normalized_increment_trajectory
+from diffusion_policy_3d.common.increment import (
+    build_normalized_increment_trajectory,
+    save_increment_stats,
+)
 from diffusion_policy_3d.common.input_data import load_planning_input_data
 from diffusion_policy_3d.common.pointcloud_roi import (
     extract_normalized_xy_radius_height_roi_from_stl_and_npz,
 )
-from diffusion_policy_3d.common.replay_buffer import ReplayBuffer
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -43,7 +45,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--stats-path",
         type=str,
         default="data/raw_data/results/job_000_increment_stats.npz",
-        help="Path to the increment mean/std statistics file.",
+        help="Path to the increment mean/std statistics file. Rebuilt on every run.",
+    )
+    parser.add_argument(
+        "--force-rebuild-stats",
+        action="store_true",
+        help="Deprecated: increment statistics are rebuilt on every run.",
+    )
+    parser.add_argument(
+        "--stats-std-eps",
+        type=float,
+        default=1e-6,
+        help="Minimum std used when computing increment statistics.",
     )
     parser.add_argument(
         "--norm-m",
@@ -61,6 +74,28 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--urdf-path", type=str, default=None)
     parser.add_argument("--use-poisson-disk", action="store_true")
     return parser
+
+
+def ensure_increment_stats(
+    npz_files: list[pathlib.Path],
+    stats_path: str,
+    trajectory_key: str,
+    target_steps: int,
+    std_eps: float,
+) -> pathlib.Path:
+    resolved_stats_path = pathlib.Path(stats_path)
+    stats = save_increment_stats(
+        npz_paths=[str(path) for path in npz_files],
+        output_path=str(resolved_stats_path),
+        trajectory_key=trajectory_key,
+        target_steps=target_steps,
+        std_eps=std_eps,
+    )
+    print(f"built_stats: {resolved_stats_path}")
+    print(f"stats_delta_count: {int(stats['count'])}")
+    print(f"stats_mean: {stats['mean']}")
+    print(f"stats_std: {stats['std']}")
+    return resolved_stats_path
 
 
 def build_sample(
@@ -127,12 +162,22 @@ def main() -> None:
     if not npz_files:
         raise FileNotFoundError(f"No .npz files found under {args.input_dir}")
 
+    stats_path = ensure_increment_stats(
+        npz_files=npz_files,
+        stats_path=args.stats_path,
+        trajectory_key=args.trajectory_key,
+        target_steps=args.target_steps,
+        std_eps=args.stats_std_eps,
+    )
+
+    from diffusion_policy_3d.common.replay_buffer import ReplayBuffer
+
     buffer = ReplayBuffer.create_empty_numpy()
     for npz_path in npz_files:
         sample = build_sample(
             npz_path=npz_path,
             stl_path=args.stl_path,
-            stats_path=args.stats_path,
+            stats_path=str(stats_path),
             norm_m=args.norm_m,
             radius_m=args.radius_m,
             height_m=args.height_m,
@@ -155,6 +200,7 @@ def main() -> None:
     print(f"steps: {buffer.n_steps}")
     for key, value in buffer.items():
         print(f"{key}: {value.shape}")
+    print(f"stats_path: {stats_path}")
     print(f"saved_zarr: {output_zarr}")
 
 
