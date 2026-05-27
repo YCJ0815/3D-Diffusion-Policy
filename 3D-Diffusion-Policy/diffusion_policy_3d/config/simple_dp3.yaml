@@ -1,5 +1,6 @@
 defaults:
   - task: adroit_hammer
+  - _self_
 
 name: train_simple_dp3
 
@@ -107,6 +108,7 @@ training:
   seed: 42
   debug: False
   resume: True
+  run_validation: True
   lr_scheduler: cosine
   lr_warmup_steps: 500
   num_epochs: 3000
