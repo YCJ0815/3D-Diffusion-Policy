@@ -42,7 +42,7 @@ python scripts/build_transition_zarr.py \
 在仓库根目录运行：
 
 ```bash
-bash scripts/train_policy.sh dp3 realdex_transition 0527 42 0
+python train.py --config-name=dp3.yaml   task=realdex_transition   task.dataset.zarr_path=/root/autodl-tmp/3D-Diffusion-Policy/data/job_000_transition.zarr   hydra.run.dir=/root/autodl-tmp/3D-Diffusion-Policy/3D-Diffusion-Policy/outputs/debug_realdex_transition_dp3_seed42   training.debug=True   training.seed=42   training.device=cuda:0   logging.mode=offline   exp_name=debug-realdex-transition-dp3   dataloader.num_workers=0   val_dataloader.num_workers=0   dataloader.batch_size=4   val_dataloader.batch_size=4
 ```
 
 参数含义：
