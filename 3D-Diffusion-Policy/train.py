@@ -196,6 +196,14 @@ class TrainDP3Workspace:
 
         # training loop
         log_path = os.path.join(self.output_dir, 'logs.json.txt')
+        gap_cfg = OmegaConf.select(cfg, "checkpoint.generalization_gap", default={})
+        gap_enabled = bool(gap_cfg.get("enabled", False))
+        gap_target = float(gap_cfg.get("target", 0.25))
+        gap_tolerance = float(gap_cfg.get("tolerance", 0.02))
+        gap_window = int(gap_cfg.get("window", 5))
+        gap_dirname = str(gap_cfg.get("dirname", "generalization_gap_checkpoints"))
+        gap_history = []
+        saved_gap_source_epochs = set()
         for local_epoch_idx in range(cfg.training.num_epochs):
             step_log = dict()
             # ========= train for this epoch ==========
@@ -298,6 +306,50 @@ class TrainDP3Workspace:
                         val_loss = torch.mean(torch.tensor(val_losses)).item()
                         # log epoch average validation loss
                         step_log['val_loss'] = val_loss
+
+            if gap_enabled and ('val_loss' in step_log) and train_loss != 0:
+                gap_value = (step_log['val_loss'] - train_loss) / train_loss
+                step_log['generalization_gap'] = gap_value
+
+                gap_root = pathlib.Path(self.output_dir).joinpath(gap_dirname)
+                candidate_dir = gap_root.joinpath(".window_candidates")
+                candidate_dir.mkdir(parents=True, exist_ok=True)
+                candidate_path = candidate_dir.joinpath(
+                    f"epoch={self.epoch:04d}-val_loss={step_log['val_loss']:.6f}"
+                    f"-gap={gap_value:.6f}.ckpt"
+                )
+                self.save_checkpoint(path=candidate_path)
+
+                gap_history.append({
+                    "epoch": self.epoch,
+                    "gap": gap_value,
+                    "val_loss": step_log['val_loss'],
+                    "path": candidate_path,
+                })
+                if len(gap_history) > gap_window:
+                    stale = gap_history.pop(0)
+                    stale_path = stale["path"]
+                    if stale_path.exists():
+                        stale_path.unlink()
+
+                if len(gap_history) == gap_window:
+                    close_to_target = [
+                        abs(item["gap"] - gap_target) <= gap_tolerance
+                        for item in gap_history
+                    ]
+                    if all(close_to_target):
+                        best_item = min(gap_history, key=lambda item: item["val_loss"])
+                        if best_item["epoch"] not in saved_gap_source_epochs:
+                            final_path = gap_root.joinpath(
+                                f"gap_window_best-epoch={best_item['epoch']:04d}"
+                                f"-window_end={self.epoch:04d}"
+                                f"-val_loss={best_item['val_loss']:.6f}"
+                                f"-gap={best_item['gap']:.6f}.ckpt"
+                            )
+                            final_path.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copy2(best_item["path"], final_path)
+                            saved_gap_source_epochs.add(best_item["epoch"])
+                            step_log['generalization_gap_ckpt'] = str(final_path)
 
             # run diffusion sampling on a training batch
             if (self.epoch % cfg.training.sample_every) == 0:

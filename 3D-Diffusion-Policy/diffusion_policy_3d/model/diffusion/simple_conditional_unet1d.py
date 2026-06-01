@@ -282,7 +282,12 @@ class ConditionalUnet1D(nn.Module):
 
 
         for idx, (resnet, upsample) in enumerate(self.up_modules):
-            x = torch.cat((x, h.pop()), dim=1)
+            skip = h.pop()
+            if x.shape[-1] != skip.shape[-1]:
+                target_length = min(x.shape[-1], skip.shape[-1])
+                x = x[..., :target_length]
+                skip = skip[..., :target_length]
+            x = torch.cat((x, skip), dim=1)
             if self.use_up_condition:
                 x = resnet(x, global_feature)
                 # print(f'up1 {idx}: {x.shape}')
@@ -303,4 +308,3 @@ class ConditionalUnet1D(nn.Module):
 
         x = einops.rearrange(x, 'b t h -> b h t')
         return x
-

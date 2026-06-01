@@ -29,8 +29,9 @@ policy:
   
   diffusion_step_embed_dim: 128
   down_dims:
+  - 64
   - 128
-  - 256
+  - 128
   crop_shape:
   - 80
   - 80
@@ -134,6 +135,12 @@ logging:
 
 checkpoint:
   save_ckpt: False # if True, save checkpoint every checkpoint_every
+  generalization_gap:
+    enabled: True
+    target: 0.25
+    tolerance: 0.02
+    window: 5
+    dirname: generalization_gap_checkpoints
   topk:
     monitor_key: test_mean_score
     mode: max
