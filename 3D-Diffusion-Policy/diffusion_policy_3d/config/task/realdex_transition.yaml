@@ -11,7 +11,7 @@ shape_meta: &shape_meta
       shape: [3]
       type: low_dim
     goal_direction:
-      shape: [3]
+      shape: [6]
       type: low_dim
     first_joint_angles_normalized:
       shape: [6]
