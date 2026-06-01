@@ -72,6 +72,21 @@ def _rotate_direction_to_start_tcp_frame(direction_world: np.ndarray, start_tf: 
     return (direction_start_tcp / norm).astype(np.float32)
 
 
+def _goal_rotation_first_two_columns_in_start_tcp_frame(
+    goal_rotation_world: np.ndarray,
+    start_tf: np.ndarray,
+) -> np.ndarray:
+    goal_rotation_world = _as_float32_array(goal_rotation_world, expected_shape=(3, 3))
+    rotation_world_from_start = _as_float32_array(start_tf[:3, :3], expected_shape=(3, 3))
+    goal_rotation_start_tcp = rotation_world_from_start.T @ goal_rotation_world
+    first_two_columns = goal_rotation_start_tcp[:, :2].reshape(-1)
+    if first_two_columns.shape != (6,):
+        raise ValueError(
+            f"Expected flattened first two rotation columns to have shape (6,), got {first_two_columns.shape}"
+        )
+    return first_two_columns.astype(np.float32)
+
+
 def _load_start_transform(data: np.lib.npyio.NpzFile) -> np.ndarray:
     _require_keys(data, ("start_tf",), "in-memory npz")
     return _as_float32_array(data["start_tf"], expected_shape=(4, 4))
@@ -205,4 +220,39 @@ def load_planning_input_data(
         first_joint_angles_normalized=first_joint_angles_normalized.astype(np.float32),
         last_joint_angles_normalized=last_joint_angles_normalized.astype(np.float32),
         trajectory_key=trajectory_key,
+    )
+
+
+def load_bspline_planning_input_data(
+    npz_path: str,
+    norm: float,
+    urdf_path: str | None = None,
+) -> PlanningInputData:
+    planning_data = load_planning_input_data(
+        npz_path=npz_path,
+        norm=norm,
+        urdf_path=urdf_path,
+    )
+    data = np.load(npz_path)
+    start_tf = _load_start_transform(data)
+    goal_direction = _goal_rotation_first_two_columns_in_start_tcp_frame(
+        planning_data.goal_rotation,
+        start_tf,
+    )
+
+    return PlanningInputData(
+        goal_position_world=planning_data.goal_position_world,
+        goal_position_start_tcp_frame=planning_data.goal_position_start_tcp_frame,
+        goal_position=planning_data.goal_position,
+        goal_rotation=planning_data.goal_rotation,
+        goal_direction_world=planning_data.goal_direction_world,
+        goal_direction=goal_direction.astype(np.float32),
+        joint_names=planning_data.joint_names,
+        joint_lower_limits=planning_data.joint_lower_limits,
+        joint_upper_limits=planning_data.joint_upper_limits,
+        first_joint_angles=planning_data.first_joint_angles,
+        last_joint_angles=planning_data.last_joint_angles,
+        first_joint_angles_normalized=planning_data.first_joint_angles_normalized,
+        last_joint_angles_normalized=planning_data.last_joint_angles_normalized,
+        trajectory_key=planning_data.trajectory_key,
     )

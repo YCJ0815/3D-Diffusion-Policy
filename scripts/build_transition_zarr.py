@@ -61,7 +61,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--norm-m",
         type=float,
-        required=True,
+        default=0.1,
         help="Normalization divisor used by point cloud and goal position preprocessing.",
     )
     parser.add_argument("--radius-m", type=float, default=0.1)
