@@ -36,6 +36,7 @@ policy:
   - 80
   - 80
   encoder_output_dim: 64
+  encoder_dropout_prob: 0.1
   state_mlp_size: [32, 32]
   horizon: ${horizon}
   kernel_size: 5

@@ -208,6 +208,7 @@ class DP3Encoder(nn.Module):
                  out_channel=256,
                  state_mlp_size=(64, 64), state_mlp_activation_fn=nn.ReLU,
                  pointcloud_encoder_cfg=None,
+                 encoder_dropout_prob: float = 0.0,
                  use_pc_color=False,
                  pointnet_type='pointnet',
                  ):
@@ -244,6 +245,7 @@ class DP3Encoder(nn.Module):
 
         self.use_pc_color = use_pc_color
         self.pointnet_type = pointnet_type
+        self.encoder_dropout = nn.Dropout(p=float(encoder_dropout_prob))
         if pointnet_type == "pointnet":
             if use_pc_color:
                 pointcloud_encoder_cfg.in_channels = 6
@@ -272,6 +274,7 @@ class DP3Encoder(nn.Module):
             self.n_output_channels += output_dim
 
         cprint(f"[DP3Encoder] output dim: {self.n_output_channels}", "red")
+        cprint(f"[DP3Encoder] encoder dropout: {encoder_dropout_prob}", "yellow")
 
 
     def forward(self, observations: Dict) -> torch.Tensor:
@@ -290,6 +293,7 @@ class DP3Encoder(nn.Module):
             lowdim_value = observations[key]
             lowdim_feats.append(self.lowdim_mlps[key](lowdim_value))
         final_feat = torch.cat([pn_feat] + lowdim_feats, dim=-1)
+        final_feat = self.encoder_dropout(final_feat)
         return final_feat
 
 
