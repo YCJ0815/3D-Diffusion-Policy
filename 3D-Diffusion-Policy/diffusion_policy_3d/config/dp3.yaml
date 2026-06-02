@@ -137,6 +137,12 @@ logging:
 
 checkpoint:
   save_ckpt: True # if True, save checkpoint every checkpoint_every and top-k checkpoints
+  generalization_gap:
+    enabled: True
+    target: 0.2
+    tolerance: 0.02
+    window: 3
+    dirname: generalization_gap_checkpoints
   topk:
     monitor_key: val_loss
     mode: min

@@ -208,9 +208,9 @@ class TrainDP3Workspace:
         log_path = os.path.join(self.output_dir, 'logs.json.txt')
         gap_cfg = OmegaConf.select(cfg, "checkpoint.generalization_gap", default={})
         gap_enabled = bool(gap_cfg.get("enabled", False))
-        gap_target = float(gap_cfg.get("target", 0.25))
+        gap_target = float(gap_cfg.get("target", 0.2))
         gap_tolerance = float(gap_cfg.get("tolerance", 0.02))
-        gap_window = int(gap_cfg.get("window", 5))
+        gap_window = int(gap_cfg.get("window", 3))
         gap_dirname = str(gap_cfg.get("dirname", "generalization_gap_checkpoints"))
         gap_history = []
         saved_gap_source_epochs = set()
