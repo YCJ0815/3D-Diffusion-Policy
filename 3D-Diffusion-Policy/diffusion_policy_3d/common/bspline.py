@@ -510,6 +510,118 @@ def normalize_delta_w(
     return normalized.astype(np.float32)
 
 
+def unnormalize_joint_trajectory_with_urdf_limits(
+    normalized_trajectory: np.ndarray,
+    lower_limits: np.ndarray,
+    upper_limits: np.ndarray,
+) -> np.ndarray:
+    normalized_trajectory = np.asarray(normalized_trajectory, dtype=np.float32)
+    lower_limits = np.asarray(lower_limits, dtype=np.float32).reshape(1, -1)
+    upper_limits = np.asarray(upper_limits, dtype=np.float32).reshape(1, -1)
+    if normalized_trajectory.ndim != 2 or normalized_trajectory.shape[1] != lower_limits.shape[1]:
+        raise ValueError(
+            "normalized_trajectory must have shape [T, J] matching joint limits, "
+            f"got trajectory {normalized_trajectory.shape}, limits {lower_limits.shape}"
+        )
+    spans = upper_limits - lower_limits
+    if np.any(spans <= 0):
+        raise ValueError("Invalid URDF joint limits: upper limits must be greater than lower limits.")
+    normalized_01 = (normalized_trajectory + 1.0) * 0.5
+    return (lower_limits + normalized_01 * spans).astype(np.float32)
+
+
+def _resolve_free_control_point_slice(num_control_points: int) -> slice:
+    if num_control_points < 6:
+        raise ValueError(
+            f"num_control_points must be at least 6 to pin the first/last three control points, "
+            f"got {num_control_points}"
+        )
+    return slice(3, num_control_points - 3)
+
+
+def reconstruct_delta_w_from_normalized_free_residual(
+    normalized_free_delta_w: np.ndarray,
+    mean: np.ndarray,
+    std: np.ndarray,
+    num_control_points: int = 16,
+) -> tuple[np.ndarray, np.ndarray]:
+    free_slice = _resolve_free_control_point_slice(num_control_points)
+    normalized_free_delta_w = np.asarray(normalized_free_delta_w, dtype=np.float32)
+    mean = np.asarray(mean, dtype=np.float32).reshape(1, 6)
+    std = np.asarray(std, dtype=np.float32).reshape(1, 6)
+
+    expected_shape = (free_slice.stop - free_slice.start, 6)
+    if normalized_free_delta_w.shape != expected_shape:
+        raise ValueError(
+            f"normalized_free_delta_w must have shape {expected_shape}, got {normalized_free_delta_w.shape}"
+        )
+
+    normalized_delta_w = np.zeros((num_control_points, 6), dtype=np.float32)
+    normalized_delta_w[free_slice] = normalized_free_delta_w.astype(np.float32)
+
+    delta_w = np.zeros_like(normalized_delta_w, dtype=np.float32)
+    delta_w[free_slice] = (normalized_free_delta_w * std + mean).astype(np.float32)
+    return normalized_delta_w.astype(np.float32), delta_w.astype(np.float32)
+
+
+def reconstruct_control_points_from_normalized_free_residual(
+    normalized_free_delta_w: np.ndarray,
+    start_state: np.ndarray,
+    end_state: np.ndarray,
+    mean: np.ndarray,
+    std: np.ndarray,
+    num_control_points: int = 16,
+) -> dict[str, np.ndarray]:
+    normalized_delta_w, delta_w = reconstruct_delta_w_from_normalized_free_residual(
+        normalized_free_delta_w=normalized_free_delta_w,
+        mean=mean,
+        std=std,
+        num_control_points=num_control_points,
+    )
+    w_line = build_linear_control_points(
+        start_state=start_state,
+        end_state=end_state,
+        num_control_points=num_control_points,
+    )
+    w_star = (w_line + delta_w).astype(np.float32)
+    return {
+        "normalized_delta_w": normalized_delta_w.astype(np.float32),
+        "delta_w": delta_w.astype(np.float32),
+        "w_line": w_line.astype(np.float32),
+        "w_star": w_star.astype(np.float32),
+        "control_points": w_star.astype(np.float32),
+    }
+
+
+def reconstruct_trajectory_from_normalized_free_residual(
+    normalized_free_delta_w: np.ndarray,
+    start_state: np.ndarray,
+    end_state: np.ndarray,
+    mean: np.ndarray,
+    std: np.ndarray,
+    num_control_points: int = 16,
+    num_steps: int = 64,
+    degree: int = 5,
+    knot_vector: np.ndarray | None = None,
+) -> dict[str, np.ndarray]:
+    control_point_result = reconstruct_control_points_from_normalized_free_residual(
+        normalized_free_delta_w=normalized_free_delta_w,
+        start_state=start_state,
+        end_state=end_state,
+        mean=mean,
+        std=std,
+        num_control_points=num_control_points,
+    )
+    fitted_trajectory = evaluate_quintic_bspline(
+        control_points=control_point_result["w_star"],
+        num_steps=num_steps,
+        degree=degree,
+        knot_vector=knot_vector,
+    )
+    control_point_result["fitted_trajectory"] = fitted_trajectory.astype(np.float32)
+    return control_point_result
+
+
 def build_normalized_delta_w_from_npz(
     npz_path: str,
     stats_path: str,
