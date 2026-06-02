@@ -23,7 +23,6 @@ from diffusion_policy_3d.common.input_data import PlanningInputData, load_bsplin
 from diffusion_policy_3d.common.pointcloud_roi import (
     convert_points_mm_to_m,
     crop_xy_radius_height_point_cloud,
-    extract_normalized_xy_radius_height_roi_from_stl_and_npz,
     load_stl_mesh,
     offset_points,
     sample_mesh_surface,
@@ -207,14 +206,8 @@ def sample_crop_parameters(
     return radius_m, height_m
 
 
-def build_normalized_point_cloud_from_geometry(
+def build_raw_mesh_points_world_m(
     stl_path: str,
-    start_tf_m: np.ndarray,
-    goal_xyz_world_m: np.ndarray,
-    norm_m: float,
-    radius_m: float,
-    height_m: float,
-    num_output_points: int,
     num_mesh_sample_points: int,
     stl_x_offset_mm: float,
     use_poisson_disk: bool,
@@ -227,7 +220,18 @@ def build_normalized_point_cloud_from_geometry(
     )
     stl_offset_mm = np.array([stl_x_offset_mm, 0.0, 0.0], dtype=np.float32)
     raw_mesh_points_mm = offset_points(raw_mesh_points_mm, stl_offset_mm)
-    raw_mesh_points_world_m = convert_points_mm_to_m(raw_mesh_points_mm)
+    return convert_points_mm_to_m(raw_mesh_points_mm).astype(np.float32)
+
+
+def build_normalized_point_cloud_from_geometry(
+    raw_mesh_points_world_m: np.ndarray,
+    start_tf_m: np.ndarray,
+    goal_xyz_world_m: np.ndarray,
+    norm_m: float,
+    radius_m: float,
+    height_m: float,
+    num_output_points: int,
+) -> np.ndarray:
     cropped_points_world_m = crop_xy_radius_height_point_cloud(
         points=raw_mesh_points_world_m,
         start=start_tf_m[:3, 3],
@@ -244,6 +248,27 @@ def build_normalized_point_cloud_from_geometry(
         num_output_points,
     ) / norm_m
     return normalized_points.astype(np.float32)
+
+
+def assemble_sample(
+    point_cloud: np.ndarray,
+    planning_result: PlanningInputData,
+    action: np.ndarray,
+) -> dict[str, np.ndarray]:
+    episode_length = action.shape[0]
+
+    def repeat_obs(value: np.ndarray) -> np.ndarray:
+        value = np.asarray(value, dtype=np.float32).reshape(1, *value.shape)
+        return np.repeat(value, episode_length, axis=0).astype(np.float32)
+
+    return {
+        "point_cloud": np.repeat(point_cloud[None].astype(np.float32), episode_length, axis=0),
+        "goal_position": repeat_obs(planning_result.goal_position),
+        "goal_direction": repeat_obs(planning_result.goal_direction),
+        "first_joint_angles_normalized": repeat_obs(planning_result.first_joint_angles_normalized),
+        "last_joint_angles_normalized": repeat_obs(planning_result.last_joint_angles_normalized),
+        "action": action.astype(np.float32),
+    }
 
 
 def build_reversed_planning_data(
@@ -432,34 +457,16 @@ def build_bspline_control_point_residuals(
     return fit_result["normalized_delta_w"][FREE_CONTROL_POINT_SLICE].astype(np.float32)
 
 
-def build_sample(
+def build_forward_invariants(
     npz_path: pathlib.Path,
-    stl_path: str,
     stats_path: str,
     norm_m: float,
-    radius_m: float,
-    height_m: float,
-    num_output_points: int,
-    num_mesh_sample_points: int,
-    stl_x_offset_mm: float,
     trajectory_key: str,
     target_steps: int,
     spline_degree: int,
     num_control_points: int,
     urdf_path: str | None,
-    use_poisson_disk: bool,
-) -> dict[str, np.ndarray]:
-    pointcloud_result = extract_normalized_xy_radius_height_roi_from_stl_and_npz(
-        stl_path=stl_path,
-        npz_path=str(npz_path),
-        radius_m=radius_m,
-        height_m=height_m,
-        norm_m=norm_m,
-        num_output_points=num_output_points,
-        num_mesh_sample_points=num_mesh_sample_points,
-        use_poisson_disk=use_poisson_disk,
-        stl_x_offset_mm=stl_x_offset_mm,
-    )
+) -> tuple[PlanningInputData, np.ndarray]:
     planning_result = load_bspline_planning_input_data(
         npz_path=str(npz_path),
         norm=norm_m,
@@ -474,58 +481,19 @@ def build_sample(
         num_control_points=num_control_points,
         urdf_path=urdf_path,
     )
-    episode_length = action.shape[0]
-
-    def repeat_obs(value: np.ndarray) -> np.ndarray:
-        value = np.asarray(value, dtype=np.float32).reshape(1, *value.shape)
-        return np.repeat(value, episode_length, axis=0).astype(np.float32)
-
-    return {
-        "point_cloud": np.repeat(
-            pointcloud_result.point_cloud[None].astype(np.float32),
-            episode_length,
-            axis=0,
-        ),
-        "goal_position": repeat_obs(planning_result.goal_position),
-        "goal_direction": repeat_obs(planning_result.goal_direction),
-        "first_joint_angles_normalized": repeat_obs(planning_result.first_joint_angles_normalized),
-        "last_joint_angles_normalized": repeat_obs(planning_result.last_joint_angles_normalized),
-        "action": action.astype(np.float32),
-    }
+    return planning_result, action.astype(np.float32)
 
 
-def build_reversed_sample(
+def build_reversed_invariants(
     npz_path: pathlib.Path,
-    stl_path: str,
     stats_path: str,
     norm_m: float,
-    radius_m: float,
-    height_m: float,
-    num_output_points: int,
-    num_mesh_sample_points: int,
-    stl_x_offset_mm: float,
     trajectory_key: str,
     target_steps: int,
     spline_degree: int,
     num_control_points: int,
     urdf_path: str | None,
-    use_poisson_disk: bool,
-) -> dict[str, np.ndarray]:
-    data = np.load(npz_path)
-    reversed_start_tf = np.asarray(data["goal_tf"], dtype=np.float32)
-    reversed_goal_xyz_world = np.asarray(data["start_tf"], dtype=np.float32)[:3, 3].astype(np.float32)
-    point_cloud = build_normalized_point_cloud_from_geometry(
-        stl_path=stl_path,
-        start_tf_m=reversed_start_tf,
-        goal_xyz_world_m=reversed_goal_xyz_world,
-        norm_m=norm_m,
-        radius_m=radius_m,
-        height_m=height_m,
-        num_output_points=num_output_points,
-        num_mesh_sample_points=num_mesh_sample_points,
-        stl_x_offset_mm=stl_x_offset_mm,
-        use_poisson_disk=use_poisson_disk,
-    )
+) -> tuple[PlanningInputData, np.ndarray]:
     planning_result = build_reversed_planning_data(
         npz_path=npz_path,
         norm_m=norm_m,
@@ -540,20 +508,7 @@ def build_reversed_sample(
         num_control_points=num_control_points,
         urdf_path=urdf_path,
     )
-    episode_length = action.shape[0]
-
-    def repeat_obs(value: np.ndarray) -> np.ndarray:
-        value = np.asarray(value, dtype=np.float32).reshape(1, *value.shape)
-        return np.repeat(value, episode_length, axis=0).astype(np.float32)
-
-    return {
-        "point_cloud": np.repeat(point_cloud[None].astype(np.float32), episode_length, axis=0),
-        "goal_position": repeat_obs(planning_result.goal_position),
-        "goal_direction": repeat_obs(planning_result.goal_direction),
-        "first_joint_angles_normalized": repeat_obs(planning_result.first_joint_angles_normalized),
-        "last_joint_angles_normalized": repeat_obs(planning_result.last_joint_angles_normalized),
-        "action": action.astype(np.float32),
-    }
+    return planning_result, action.astype(np.float32)
 
 
 def main() -> None:
@@ -599,11 +554,52 @@ def main() -> None:
     rng = np.random.default_rng(args.augment_seed)
 
     buffer = ReplayBuffer.create_empty_numpy()
+    raw_mesh_points_cache: dict[str, np.ndarray] = {}
     workpiece_ids = []
     is_reversed_episode = []
     for npz_path in progress(npz_files, desc="build zarr episodes", unit="file"):
         stl_path = stl_mapping[str(npz_path)]
         workpiece_id = resolve_workpiece_id_from_npz(npz_path)
+        if stl_path not in raw_mesh_points_cache:
+            raw_mesh_points_cache[stl_path] = build_raw_mesh_points_world_m(
+                stl_path=stl_path,
+                num_mesh_sample_points=args.num_mesh_sample_points,
+                stl_x_offset_mm=args.stl_x_offset_mm,
+                use_poisson_disk=args.use_poisson_disk,
+            )
+
+        raw_mesh_points_world_m = raw_mesh_points_cache[stl_path]
+        npz_data = np.load(npz_path)
+        forward_start_tf = np.asarray(npz_data["start_tf"], dtype=np.float32)
+        forward_goal_xyz_world = np.asarray(npz_data["end_xyz"], dtype=np.float32)
+        forward_planning_result, forward_action = build_forward_invariants(
+            npz_path=npz_path,
+            stats_path=args.stats_path,
+            norm_m=args.norm_m,
+            trajectory_key=args.trajectory_key,
+            target_steps=args.target_steps,
+            spline_degree=args.spline_degree,
+            num_control_points=args.num_control_points,
+            urdf_path=args.urdf_path,
+        )
+
+        reversed_planning_result = None
+        reversed_action = None
+        reversed_start_tf = None
+        reversed_goal_xyz_world = None
+        if args.add_reversed_copy:
+            reversed_start_tf = np.asarray(npz_data["goal_tf"], dtype=np.float32)
+            reversed_goal_xyz_world = forward_start_tf[:3, 3].astype(np.float32)
+            reversed_planning_result, reversed_action = build_reversed_invariants(
+                npz_path=npz_path,
+                stats_path=args.stats_path,
+                norm_m=args.norm_m,
+                trajectory_key=args.trajectory_key,
+                target_steps=args.target_steps,
+                spline_degree=args.spline_degree,
+                num_control_points=args.num_control_points,
+                urdf_path=args.urdf_path,
+            )
         for copy_idx in range(args.augment_copies):
             radius_m, height_m = sample_crop_parameters(
                 rng=rng,
@@ -613,43 +609,37 @@ def main() -> None:
                 radius_bounds=radius_bounds,
                 height_bounds=height_bounds,
             )
-            sample = build_sample(
-                npz_path=npz_path,
-                stl_path=stl_path,
-                stats_path=args.stats_path,
+            point_cloud = build_normalized_point_cloud_from_geometry(
+                raw_mesh_points_world_m=raw_mesh_points_world_m,
+                start_tf_m=forward_start_tf,
+                goal_xyz_world_m=forward_goal_xyz_world,
                 norm_m=args.norm_m,
                 radius_m=radius_m,
                 height_m=height_m,
                 num_output_points=args.num_output_points,
-                num_mesh_sample_points=args.num_mesh_sample_points,
-                stl_x_offset_mm=args.stl_x_offset_mm,
-                trajectory_key=args.trajectory_key,
-                target_steps=args.target_steps,
-                spline_degree=args.spline_degree,
-                num_control_points=args.num_control_points,
-                urdf_path=args.urdf_path,
-                use_poisson_disk=args.use_poisson_disk,
+            )
+            sample = assemble_sample(
+                point_cloud=point_cloud,
+                planning_result=forward_planning_result,
+                action=forward_action,
             )
             buffer.add_episode(sample)
             workpiece_ids.append(workpiece_id)
             is_reversed_episode.append(0)
             if args.add_reversed_copy:
-                reversed_sample = build_reversed_sample(
-                    npz_path=npz_path,
-                    stl_path=stl_path,
-                    stats_path=args.stats_path,
+                reversed_point_cloud = build_normalized_point_cloud_from_geometry(
+                    raw_mesh_points_world_m=raw_mesh_points_world_m,
+                    start_tf_m=reversed_start_tf,
+                    goal_xyz_world_m=reversed_goal_xyz_world,
                     norm_m=args.norm_m,
                     radius_m=radius_m,
                     height_m=height_m,
                     num_output_points=args.num_output_points,
-                    num_mesh_sample_points=args.num_mesh_sample_points,
-                    stl_x_offset_mm=args.stl_x_offset_mm,
-                    trajectory_key=args.trajectory_key,
-                    target_steps=args.target_steps,
-                    spline_degree=args.spline_degree,
-                    num_control_points=args.num_control_points,
-                    urdf_path=args.urdf_path,
-                    use_poisson_disk=args.use_poisson_disk,
+                )
+                reversed_sample = assemble_sample(
+                    point_cloud=reversed_point_cloud,
+                    planning_result=reversed_planning_result,
+                    action=reversed_action,
                 )
                 buffer.add_episode(reversed_sample)
                 workpiece_ids.append(workpiece_id)
@@ -677,6 +667,7 @@ def main() -> None:
     print(f"basis_matrix: {stats['basis_matrix'].shape}")
     print(f"stl_mode: strict per-job auto-resolve")
     print(f"resolved_stl_jobs: {len(set(stl_mapping.values()))}")
+    print(f"cached_meshes: {len(raw_mesh_points_cache)}")
     print(f"augment_copies: {args.augment_copies}")
     print(f"radius_bounds_m: {radius_bounds}")
     print(f"height_bounds_m: {height_bounds}")
