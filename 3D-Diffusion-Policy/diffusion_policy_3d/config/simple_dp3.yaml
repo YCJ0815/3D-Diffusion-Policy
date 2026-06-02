@@ -58,6 +58,7 @@ policy:
   num_inference_steps: 10
   obs_as_global_cond: true
   shape_meta: ${shape_meta}
+  action_loss_mask_indices: [5]
 
 
 

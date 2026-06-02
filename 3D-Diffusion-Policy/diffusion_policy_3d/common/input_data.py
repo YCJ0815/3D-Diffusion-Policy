@@ -7,7 +7,10 @@ import xml.etree.ElementTree as ET
 
 import numpy as np
 
-from diffusion_policy_3d.common.pointcloud_roi import world_to_local_point
+from diffusion_policy_3d.common.pointcloud_roi import (
+    canonicalize_axis_symmetric_tcp_transform,
+    world_to_local_point,
+)
 
 
 @dataclass
@@ -184,10 +187,12 @@ def load_planning_input_data(
     resolved_urdf_path = urdf_path if urdf_path is not None else str(_default_urdf_path())
 
     goal_position_world = _load_goal_position(data)
-    start_tf = _load_start_transform(data)
+    start_tf = canonicalize_axis_symmetric_tcp_transform(_load_start_transform(data))
+    goal_rotation = canonicalize_axis_symmetric_tcp_transform(
+        _as_float32_array(data["goal_tf"], expected_shape=(4, 4))
+    )[:3, :3].astype(np.float32)
     goal_position_start_tcp_frame = world_to_local_point(goal_position_world, start_tf)
     goal_position = goal_position_start_tcp_frame / float(norm)
-    goal_rotation = _load_goal_rotation(data)
     goal_direction_world = _load_goal_direction(data, goal_rotation)
     goal_direction = _rotate_direction_to_start_tcp_frame(goal_direction_world, start_tf)
     trajectory_key, trajectory = _select_trajectory(data)
@@ -234,7 +239,7 @@ def load_bspline_planning_input_data(
         urdf_path=urdf_path,
     )
     data = np.load(npz_path)
-    start_tf = _load_start_transform(data)
+    start_tf = canonicalize_axis_symmetric_tcp_transform(_load_start_transform(data))
     goal_direction = _goal_rotation_first_two_columns_in_start_tcp_frame(
         planning_data.goal_rotation,
         start_tf,

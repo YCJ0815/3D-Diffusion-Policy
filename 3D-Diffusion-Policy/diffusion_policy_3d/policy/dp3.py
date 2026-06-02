@@ -40,6 +40,7 @@ class DP3(BasePolicy):
             use_pc_color=False,
             pointnet_type="pointnet",
             pointcloud_encoder_cfg=None,
+            action_loss_mask_indices=None,
             # parameters passed to step
             **kwargs):
         super().__init__()
@@ -119,6 +120,10 @@ class DP3(BasePolicy):
         self.horizon = horizon
         self.obs_feature_dim = obs_feature_dim
         self.action_dim = action_dim
+        self.action_loss_mask_indices = self._normalize_action_loss_mask_indices(
+            action_loss_mask_indices,
+            action_dim,
+        )
         self.n_action_steps = n_action_steps
         self.n_obs_steps = n_obs_steps
         self.obs_as_global_cond = obs_as_global_cond
@@ -130,6 +135,32 @@ class DP3(BasePolicy):
 
 
         print_params(self)
+
+    @staticmethod
+    def _normalize_action_loss_mask_indices(action_loss_mask_indices, action_dim):
+        if action_loss_mask_indices is None:
+            return tuple()
+
+        normalized_indices = []
+        for index in action_loss_mask_indices:
+            normalized_index = int(index)
+            if normalized_index < 0:
+                normalized_index += action_dim
+            if normalized_index < 0 or normalized_index >= action_dim:
+                raise ValueError(
+                    f"Action loss mask index {index} is out of range for action_dim={action_dim}"
+                )
+            normalized_indices.append(normalized_index)
+        return tuple(sorted(set(normalized_indices)))
+
+    def _apply_action_loss_mask(self, loss_mask: torch.Tensor) -> torch.Tensor:
+        if not self.action_loss_mask_indices:
+            return loss_mask
+
+        masked_loss = loss_mask.clone()
+        for action_index in self.action_loss_mask_indices:
+            masked_loss[..., action_index] = False
+        return masked_loss
         
     # ========= inference  ============
     def conditional_sample(self, 
@@ -324,6 +355,7 @@ class DP3(BasePolicy):
 
         # compute loss mask
         loss_mask = ~condition_mask
+        loss_mask = self._apply_action_loss_mask(loss_mask)
 
         # apply conditioning
         noisy_trajectory[condition_mask] = cond_data[condition_mask]
@@ -373,4 +405,3 @@ class DP3(BasePolicy):
         # print(f"t6-t5: {t6-t5:.3f}")
         
         return loss, loss_dict
-

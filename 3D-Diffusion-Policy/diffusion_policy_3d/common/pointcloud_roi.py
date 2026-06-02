@@ -140,6 +140,45 @@ def transform_point(point: np.ndarray, transform: np.ndarray) -> np.ndarray:
     return transform_points(point, transform)[0]
 
 
+def canonicalize_axis_symmetric_tcp_transform(
+    tcp_transform: np.ndarray,
+    preferred_horizontal_axis: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    tcp_transform = np.asarray(tcp_transform, dtype=np.float32)
+    if tcp_transform.shape != (4, 4):
+        raise ValueError(f"tcp_transform must have shape [4, 4], got {tcp_transform.shape}")
+
+    z_axis = tcp_transform[:3, 2].astype(np.float32)
+    z_norm = float(np.linalg.norm(z_axis))
+    if z_norm <= 1e-12:
+        raise ValueError("TCP z-axis is near-zero and cannot be canonicalized.")
+    z_axis = z_axis / z_norm
+
+    horizontal_y = np.array([-z_axis[1], z_axis[0], 0.0], dtype=np.float32)
+    horizontal_norm = float(np.linalg.norm(horizontal_y))
+    if horizontal_norm <= 1e-8:
+        if preferred_horizontal_axis is None:
+            preferred_horizontal_axis = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+        horizontal_y = np.asarray(preferred_horizontal_axis, dtype=np.float32).reshape(3)
+        horizontal_y[2] = 0.0
+        horizontal_norm = float(np.linalg.norm(horizontal_y))
+        if horizontal_norm <= 1e-12:
+            raise ValueError("Preferred horizontal axis is invalid for TCP canonicalization.")
+    y_axis = horizontal_y / horizontal_norm
+
+    x_axis = np.cross(y_axis, z_axis).astype(np.float32)
+    x_norm = float(np.linalg.norm(x_axis))
+    if x_norm <= 1e-12:
+        raise ValueError("Canonical x-axis becomes near-zero during TCP canonicalization.")
+    x_axis = x_axis / x_norm
+    y_axis = np.cross(z_axis, x_axis).astype(np.float32)
+    y_axis = y_axis / float(np.linalg.norm(y_axis))
+
+    canonical = tcp_transform.copy().astype(np.float32)
+    canonical[:3, :3] = np.stack([x_axis, y_axis, z_axis], axis=1)
+    return canonical
+
+
 def world_to_local_points(points: np.ndarray, tcp_transform: np.ndarray) -> np.ndarray:
     tcp_transform = np.asarray(tcp_transform, dtype=np.float32)
     tcp_inv = np.linalg.inv(tcp_transform)
@@ -490,7 +529,9 @@ def extract_normalized_xy_radius_height_roi_from_stl_and_npz(
     raw_mesh_points_mm = offset_points(raw_mesh_points_mm, stl_offset_mm)
 
     raw_mesh_points_world_m = convert_points_mm_to_m(raw_mesh_points_mm)
-    start_tcp_transform_m = transition["start_tf"].astype(np.float32)
+    start_tcp_transform_m = canonicalize_axis_symmetric_tcp_transform(
+        transition["start_tf"].astype(np.float32)
+    )
     goal_xyz_world_m = transition["end_xyz"].astype(np.float32)
 
     cropped_points_world_m = crop_xy_radius_height_point_cloud(

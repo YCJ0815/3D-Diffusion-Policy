@@ -21,6 +21,7 @@ from diffusion_policy_3d.common.bspline import (
 )
 from diffusion_policy_3d.common.input_data import PlanningInputData, load_bspline_planning_input_data
 from diffusion_policy_3d.common.pointcloud_roi import (
+    canonicalize_axis_symmetric_tcp_transform,
     convert_points_mm_to_m,
     crop_xy_radius_height_point_cloud,
     load_stl_mesh,
@@ -282,8 +283,8 @@ def build_reversed_planning_data(
         urdf_path=urdf_path,
     )
     data = np.load(npz_path)
-    start_tf = np.asarray(data["start_tf"], dtype=np.float32)
-    goal_tf = np.asarray(data["goal_tf"], dtype=np.float32)
+    start_tf = canonicalize_axis_symmetric_tcp_transform(np.asarray(data["start_tf"], dtype=np.float32))
+    goal_tf = canonicalize_axis_symmetric_tcp_transform(np.asarray(data["goal_tf"], dtype=np.float32))
 
     reversed_start_tf = goal_tf
     reversed_goal_position_world = start_tf[:3, 3].astype(np.float32)
@@ -570,7 +571,9 @@ def main() -> None:
 
         raw_mesh_points_world_m = raw_mesh_points_cache[stl_path]
         npz_data = np.load(npz_path)
-        forward_start_tf = np.asarray(npz_data["start_tf"], dtype=np.float32)
+        forward_start_tf = canonicalize_axis_symmetric_tcp_transform(
+            np.asarray(npz_data["start_tf"], dtype=np.float32)
+        )
         forward_goal_xyz_world = np.asarray(npz_data["end_xyz"], dtype=np.float32)
         forward_planning_result, forward_action = build_forward_invariants(
             npz_path=npz_path,
@@ -588,7 +591,9 @@ def main() -> None:
         reversed_start_tf = None
         reversed_goal_xyz_world = None
         if args.add_reversed_copy:
-            reversed_start_tf = np.asarray(npz_data["goal_tf"], dtype=np.float32)
+            reversed_start_tf = canonicalize_axis_symmetric_tcp_transform(
+                np.asarray(npz_data["goal_tf"], dtype=np.float32)
+            )
             reversed_goal_xyz_world = forward_start_tf[:3, 3].astype(np.float32)
             reversed_planning_result, reversed_action = build_reversed_invariants(
                 npz_path=npz_path,
