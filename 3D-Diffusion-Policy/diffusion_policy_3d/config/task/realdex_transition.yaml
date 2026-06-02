@@ -31,7 +31,9 @@ dataset:
   pad_before: 0
   pad_after: 0
   seed: 42
-  val_ratio: 0.02
+  val_ratio: 0.1
+  train_workpiece_ids: [0, 1, 2, 3, 4, 5, 6, 7]
+  val_workpiece_ids: [8]
   max_train_episodes: null
   point_cloud_key: point_cloud
   obs_keys:

@@ -36,6 +36,7 @@ class SimpleDP3(BasePolicy):
             use_mid_condition=True,
             use_up_condition=True,
             encoder_output_dim=256,
+            state_mlp_size=(64, 64),
             crop_shape=None,
             use_pc_color=False,
             pointnet_type="pointnet",
@@ -63,6 +64,7 @@ class SimpleDP3(BasePolicy):
         obs_encoder = DP3Encoder(observation_space=obs_dict,
                                                    img_crop_shape=crop_shape,
                                                 out_channel=encoder_output_dim,
+                                                state_mlp_size=state_mlp_size,
                                                 pointcloud_encoder_cfg=pointcloud_encoder_cfg,
                                                 use_pc_color=use_pc_color,
                                                 pointnet_type=pointnet_type,
@@ -372,4 +374,3 @@ class SimpleDP3(BasePolicy):
         # print(f"t6-t5: {t6-t5:.3f}")
         
         return loss, loss_dict
-

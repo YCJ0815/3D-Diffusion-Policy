@@ -38,6 +38,53 @@ class TransitionTrajectoryDataset(BaseDataset):
         'last_joint_angles_normalized',
     )
 
+    @staticmethod
+    def _resolve_workpiece_split_mask(
+            replay_buffer: ReplayBuffer,
+            train_workpiece_ids=None,
+            val_workpiece_ids=None):
+        if train_workpiece_ids is None and val_workpiece_ids is None:
+            return None
+        if 'workpiece_ids' not in replay_buffer.meta:
+            raise KeyError(
+                "Dataset split by workpiece was requested, but `meta/workpiece_ids` "
+                "is missing from the zarr dataset. Rebuild the dataset with workpiece metadata."
+            )
+
+        episode_workpiece_ids = np.asarray(replay_buffer.meta['workpiece_ids'][:], dtype=np.int64)
+        if episode_workpiece_ids.shape != (replay_buffer.n_episodes,):
+            raise ValueError(
+                f"`meta/workpiece_ids` must have shape ({replay_buffer.n_episodes},), "
+                f"got {episode_workpiece_ids.shape}"
+            )
+
+        train_mask = np.zeros_like(episode_workpiece_ids, dtype=bool)
+        val_mask = np.zeros_like(episode_workpiece_ids, dtype=bool)
+
+        if train_workpiece_ids is not None:
+            train_ids = np.asarray(train_workpiece_ids, dtype=np.int64).reshape(-1)
+            train_mask = np.isin(episode_workpiece_ids, train_ids)
+        if val_workpiece_ids is not None:
+            val_ids = np.asarray(val_workpiece_ids, dtype=np.int64).reshape(-1)
+            val_mask = np.isin(episode_workpiece_ids, val_ids)
+
+        if train_workpiece_ids is None:
+            train_mask = ~val_mask
+        if val_workpiece_ids is None:
+            val_mask = ~train_mask
+
+        if np.any(train_mask & val_mask):
+            overlapping = np.unique(episode_workpiece_ids[train_mask & val_mask])
+            raise ValueError(
+                f"Train/validation workpiece ids overlap in split configuration: {overlapping.tolist()}"
+            )
+        if not np.any(train_mask):
+            raise ValueError("No training episodes remain after applying workpiece split.")
+        if not np.any(val_mask):
+            raise ValueError("No validation episodes remain after applying workpiece split.")
+
+        return train_mask.astype(bool)
+
     def __init__(self,
             zarr_path,
             horizon=64,
@@ -49,6 +96,8 @@ class TransitionTrajectoryDataset(BaseDataset):
             task_name=None,
             point_cloud_key='point_cloud',
             obs_keys=None,
+            train_workpiece_ids=None,
+            val_workpiece_ids=None,
             ):
         super().__init__()
         self.task_name = task_name
@@ -56,11 +105,17 @@ class TransitionTrajectoryDataset(BaseDataset):
         self.obs_keys = tuple(obs_keys) if obs_keys is not None else self.DEFAULT_OBS_KEYS
 
         self.replay_buffer = ReplayBuffer.copy_from_path(zarr_path, keys=None)
-        val_mask = get_val_mask(
-            n_episodes=self.replay_buffer.n_episodes,
-            val_ratio=val_ratio,
-            seed=seed)
-        train_mask = ~val_mask
+        train_mask = self._resolve_workpiece_split_mask(
+            replay_buffer=self.replay_buffer,
+            train_workpiece_ids=train_workpiece_ids,
+            val_workpiece_ids=val_workpiece_ids,
+        )
+        if train_mask is None:
+            val_mask = get_val_mask(
+                n_episodes=self.replay_buffer.n_episodes,
+                val_ratio=val_ratio,
+                seed=seed)
+            train_mask = ~val_mask
         train_mask = downsample_mask(
             mask=train_mask,
             max_n=max_train_episodes,

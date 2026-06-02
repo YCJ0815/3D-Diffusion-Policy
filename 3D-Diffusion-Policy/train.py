@@ -53,6 +53,16 @@ def _json_safe(value):
         return [_json_safe(v) for v in value]
     return str(value)
 
+
+def _is_better_metric(value, best_value, mode, min_delta):
+    if best_value is None:
+        return True
+    if mode == "min":
+        return value < (best_value - min_delta)
+    if mode == "max":
+        return value > (best_value + min_delta)
+    raise ValueError(f"Unsupported metric mode: {mode}")
+
 class TrainDP3Workspace:
     include_keys = ['global_step', 'epoch']
     exclude_keys = tuple()
@@ -204,7 +214,23 @@ class TrainDP3Workspace:
         gap_dirname = str(gap_cfg.get("dirname", "generalization_gap_checkpoints"))
         gap_history = []
         saved_gap_source_epochs = set()
+
+        early_stop_cfg = OmegaConf.select(cfg, "training.early_stop", default={}) or {}
+        early_stop_enabled = bool(early_stop_cfg.get("enabled", False))
+        early_stop_monitor_key = str(early_stop_cfg.get("monitor_key", "val_loss"))
+        early_stop_mode = str(early_stop_cfg.get("mode", "min"))
+        early_stop_patience = int(early_stop_cfg.get("patience", 50))
+        early_stop_min_delta = float(early_stop_cfg.get("min_delta", 0.0))
+        early_stop_warmup_epochs = int(early_stop_cfg.get("warmup_epochs", 0))
+        if early_stop_mode not in ("min", "max"):
+            raise ValueError(f"training.early_stop.mode must be `min` or `max`, got {early_stop_mode}")
+        if early_stop_patience <= 0:
+            raise ValueError(f"training.early_stop.patience must be positive, got {early_stop_patience}")
+        best_early_stop_value = None
+        early_stop_bad_epochs = 0
+
         for local_epoch_idx in range(cfg.training.num_epochs):
+            stop_training = False
             step_log = dict()
             # ========= train for this epoch ==========
             train_losses = list()
@@ -374,26 +400,46 @@ class TrainDP3Workspace:
                 step_log['test_mean_score'] = - train_loss
                 
             # checkpoint
-            if (self.epoch % cfg.training.checkpoint_every) == 0 and cfg.checkpoint.save_ckpt:
-                # checkpointing
+            if cfg.checkpoint.save_ckpt:
                 if cfg.checkpoint.save_last_ckpt:
-                    self.save_checkpoint()
+                    if (self.epoch % cfg.training.checkpoint_every) == 0:
+                        self.save_checkpoint()
                 if cfg.checkpoint.save_last_snapshot:
-                    self.save_snapshot()
+                    if (self.epoch % cfg.training.checkpoint_every) == 0:
+                        self.save_snapshot()
 
                 # sanitize metric names
                 metric_dict = dict()
                 for key, value in step_log.items():
                     new_key = key.replace('/', '_')
                     metric_dict[new_key] = value
-                
-                # We can't copy the last checkpoint here
-                # since save_checkpoint uses threads.
-                # therefore at this point the file might have been empty!
-                topk_ckpt_path = topk_manager.get_ckpt_path(metric_dict)
+                monitor_key = cfg.checkpoint.topk.monitor_key
+                if monitor_key in metric_dict:
+                    # Save best validation checkpoints as soon as the monitored metric is logged,
+                    # instead of waiting for checkpoint_every and missing the true best epoch.
+                    topk_ckpt_path = topk_manager.get_ckpt_path(metric_dict)
 
-                if topk_ckpt_path is not None:
-                    self.save_checkpoint(path=topk_ckpt_path)
+                    if topk_ckpt_path is not None:
+                        self.save_checkpoint(path=topk_ckpt_path)
+
+            if early_stop_enabled and early_stop_monitor_key in step_log \
+                    and self.epoch >= early_stop_warmup_epochs:
+                current_value = float(step_log[early_stop_monitor_key])
+                if _is_better_metric(
+                        current_value,
+                        best_early_stop_value,
+                        early_stop_mode,
+                        early_stop_min_delta):
+                    best_early_stop_value = current_value
+                    early_stop_bad_epochs = 0
+                else:
+                    early_stop_bad_epochs += 1
+                step_log["early_stop_best_value"] = best_early_stop_value
+                step_log["early_stop_bad_epochs"] = early_stop_bad_epochs
+                if early_stop_bad_epochs >= early_stop_patience:
+                    step_log["early_stop"] = True
+                    stop_training = True
+
             # ========= eval end for this epoch ==========
             policy.train()
 
@@ -406,6 +452,13 @@ class TrainDP3Workspace:
             self.global_step += 1
             self.epoch += 1
             del step_log
+            if stop_training:
+                cprint(
+                    f"Early stopping triggered after {early_stop_bad_epochs} epochs "
+                    f"without {early_stop_monitor_key} improvement.",
+                    "yellow",
+                )
+                break
 
     def eval(self):
         # load the latest checkpoint
