@@ -27,6 +27,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to save the increment statistics .npz file.",
     )
     parser.add_argument(
+        "--input-dirs",
+        type=str,
+        nargs="+",
+        default=None,
+        help=(
+            "Optional list of directories containing transition NPZ files. "
+            "When provided, all directories are scanned and merged."
+        ),
+    )
+    parser.add_argument(
         "--trajectory-key",
         type=str,
         default="q_plan",
@@ -47,11 +57,25 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def collect_npz_paths(input_dir: str, input_dirs: list[str] | None) -> list[str]:
+    search_dirs = list(input_dirs) if input_dirs else [input_dir]
+    npz_paths: list[str] = []
+    for directory in search_dirs:
+        npz_paths.extend(
+            sorted(str(path) for path in pathlib.Path(directory).rglob("transition_*.npz"))
+        )
+    return sorted(set(npz_paths))
+
+
 def main() -> None:
     args = build_parser().parse_args()
-    npz_paths = sorted(str(path) for path in pathlib.Path(args.input_dir).rglob("*.npz"))
+    npz_paths = collect_npz_paths(
+        input_dir=args.input_dir,
+        input_dirs=args.input_dirs,
+    )
     if not npz_paths:
-        raise FileNotFoundError(f"No .npz files found under {args.input_dir}")
+        searched = args.input_dirs if args.input_dirs else [args.input_dir]
+        raise FileNotFoundError(f"No transition_*.npz files found under: {searched}")
 
     stats = save_increment_stats(
         npz_paths=npz_paths,
@@ -66,6 +90,7 @@ def main() -> None:
     print(f"mean: {stats['mean']}")
     print(f"std: {stats['std']}")
     print(f"var: {stats['var']}")
+    print(f"input_dirs: {args.input_dirs if args.input_dirs else [args.input_dir]}")
     print(f"saved_stats: {args.output_stats}")
 
 

@@ -32,8 +32,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--stl-path",
         type=str,
-        required=True,
-        help="Path to the STL file used to generate point clouds.",
+        default=None,
+        help=(
+            "Fallback STL path used when automatic per-job STL resolution is unavailable. "
+            "For mixed inputs such as results/simple_results, the script prefers "
+            "job-specific workpiece STLs automatically."
+        ),
+    )
+    parser.add_argument(
+        "--input-dirs",
+        type=str,
+        nargs="+",
+        default=None,
+        help=(
+            "Optional list of directories containing transition NPZ files. "
+            "When provided, all directories are scanned and merged."
+        ),
     )
     parser.add_argument(
         "--output-zarr",
@@ -74,6 +88,109 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--urdf-path", type=str, default=None)
     parser.add_argument("--use-poisson-disk", action="store_true")
     return parser
+
+
+def collect_npz_files(input_dir: str, input_dirs: list[str] | None) -> list[pathlib.Path]:
+    search_dirs = list(input_dirs) if input_dirs else [input_dir]
+    npz_files: list[pathlib.Path] = []
+    for directory in search_dirs:
+        npz_files.extend(sorted(pathlib.Path(directory).rglob("transition_*.npz")))
+    return sorted({path.resolve() for path in npz_files})
+
+
+def resolve_job_name_from_npz(npz_path: pathlib.Path) -> str | None:
+    for parent in npz_path.parents:
+        if parent.name.startswith("job_"):
+            return parent.name
+    return None
+
+
+def infer_jobs_dir_from_results_dir(results_dir: pathlib.Path) -> pathlib.Path:
+    name = results_dir.name
+    if name == "results":
+        return results_dir.parent / "jobs"
+    if name == "simple_results":
+        return results_dir.parent / "simple_jobs"
+    if name.startswith("results_"):
+        return results_dir.parent / name.replace("results_", "jobs_", 1)
+    if name.startswith("simple_results_"):
+        return results_dir.parent / name.replace("simple_results_", "simple_jobs_", 1)
+    if "results" in name:
+        return results_dir.parent / name.replace("results", "jobs", 1)
+    return results_dir.parent / "jobs"
+
+
+def resolve_stl_path_for_npz(
+    npz_path: pathlib.Path,
+    input_dirs: list[pathlib.Path],
+    fallback_stl_path: str | None,
+) -> pathlib.Path:
+    job_name = resolve_job_name_from_npz(npz_path)
+    candidate_paths: list[pathlib.Path] = []
+
+    if job_name is not None:
+        for parent in npz_path.parents:
+            if parent.name == job_name and "results" in parent.parent.name:
+                candidate_paths.append(
+                    infer_jobs_dir_from_results_dir(parent.parent) / job_name / "workpiece.stl"
+                )
+                break
+
+        if not candidate_paths:
+            candidate_roots: list[pathlib.Path] = []
+            for input_dir in input_dirs:
+                resolved_input_dir = input_dir.resolve()
+                candidate_roots.extend(
+                    [
+                        resolved_input_dir.parent
+                        if resolved_input_dir.name.startswith("job_")
+                        else resolved_input_dir,
+                        resolved_input_dir.parents[1]
+                        if len(resolved_input_dir.parents) >= 2
+                        else resolved_input_dir,
+                    ]
+                )
+            seen_roots: set[pathlib.Path] = set()
+            for results_root in candidate_roots:
+                resolved_root = results_root.resolve()
+                if resolved_root in seen_roots:
+                    continue
+                seen_roots.add(resolved_root)
+                candidate_paths.append(
+                    infer_jobs_dir_from_results_dir(resolved_root) / job_name / "workpiece.stl"
+                )
+
+        for candidate_path in candidate_paths:
+            if candidate_path.is_file():
+                return candidate_path
+
+    if fallback_stl_path is not None:
+        candidate_path = pathlib.Path(fallback_stl_path)
+        if candidate_path.is_file():
+            return candidate_path
+        raise FileNotFoundError(f"Fallback STL path does not exist: {fallback_stl_path}")
+
+    raise FileNotFoundError(
+        f"Unable to resolve STL for NPZ {npz_path}. "
+        f"Tried: {[str(path) for path in candidate_paths]}"
+    )
+
+
+def validate_stl_npz_mapping(
+    npz_files: list[pathlib.Path],
+    input_dirs: list[pathlib.Path],
+    fallback_stl_path: str | None,
+) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for npz_path in npz_files:
+        mapping[str(npz_path)] = str(
+            resolve_stl_path_for_npz(
+                npz_path=npz_path,
+                input_dirs=input_dirs,
+                fallback_stl_path=fallback_stl_path,
+            )
+        )
+    return mapping
 
 
 def ensure_increment_stats(
@@ -157,10 +274,20 @@ def build_sample(
 
 def main() -> None:
     args = build_parser().parse_args()
+    search_dirs = [pathlib.Path(path) for path in (args.input_dirs if args.input_dirs else [args.input_dir])]
 
-    npz_files = sorted(pathlib.Path(args.input_dir).rglob("*.npz"))
+    npz_files = collect_npz_files(
+        input_dir=args.input_dir,
+        input_dirs=args.input_dirs,
+    )
     if not npz_files:
-        raise FileNotFoundError(f"No .npz files found under {args.input_dir}")
+        searched = args.input_dirs if args.input_dirs else [args.input_dir]
+        raise FileNotFoundError(f"No transition_*.npz files found under: {searched}")
+    stl_mapping = validate_stl_npz_mapping(
+        npz_files=npz_files,
+        input_dirs=search_dirs,
+        fallback_stl_path=args.stl_path,
+    )
 
     stats_path = ensure_increment_stats(
         npz_files=npz_files,
@@ -176,7 +303,7 @@ def main() -> None:
     for npz_path in npz_files:
         sample = build_sample(
             npz_path=npz_path,
-            stl_path=args.stl_path,
+            stl_path=stl_mapping[str(npz_path)],
             stats_path=str(stats_path),
             norm_m=args.norm_m,
             radius_m=args.radius_m,
@@ -200,6 +327,8 @@ def main() -> None:
     print(f"steps: {buffer.n_steps}")
     for key, value in buffer.items():
         print(f"{key}: {value.shape}")
+    print(f"input_dirs: {args.input_dirs if args.input_dirs else [args.input_dir]}")
+    print(f"resolved_stl_jobs: {len(set(stl_mapping.values()))}")
     print(f"stats_path: {stats_path}")
     print(f"saved_zarr: {output_zarr}")
 

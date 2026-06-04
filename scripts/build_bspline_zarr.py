@@ -55,6 +55,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Directory containing transition NPZ files.",
     )
     parser.add_argument(
+        "--input-dirs",
+        type=str,
+        nargs="+",
+        default=None,
+        help=(
+            "Optional list of directories containing transition NPZ files. "
+            "When provided, all directories are scanned and merged."
+        ),
+    )
+    parser.add_argument(
         "--stl-path",
         type=str,
         default=None,
@@ -172,6 +182,14 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     return parser
+
+
+def collect_npz_files(input_dir: str, input_dirs: list[str] | None) -> list[pathlib.Path]:
+    search_dirs = list(input_dirs) if input_dirs else [input_dir]
+    npz_files: list[pathlib.Path] = []
+    for directory in search_dirs:
+        npz_files.extend(sorted(pathlib.Path(directory).rglob("transition_*.npz")))
+    return sorted({path.resolve() for path in npz_files})
 
 
 def resolve_augmentation_bounds(
@@ -359,44 +377,93 @@ def resolve_job_name_from_npz(npz_path: pathlib.Path) -> str | None:
     return None
 
 
-def resolve_workpiece_id_from_npz(npz_path: pathlib.Path) -> int:
+def resolve_results_dir_name_from_npz(npz_path: pathlib.Path) -> str | None:
+    for parent in npz_path.parents:
+        if "results" in parent.name:
+            return parent.name
+    return None
+
+
+def encode_workpiece_id(local_workpiece_id: int, results_dir_name: str | None) -> int:
+    if results_dir_name == "simple_results":
+        return 1000 + int(local_workpiece_id)
+    return int(local_workpiece_id)
+
+
+def resolve_workpiece_metadata_from_npz(npz_path: pathlib.Path) -> tuple[int, int, int]:
     job_name = resolve_job_name_from_npz(npz_path)
     if job_name is None:
         raise ValueError(f"Unable to infer workpiece id from NPZ path: {npz_path}")
     try:
-        return int(job_name.split("_")[-1])
+        local_workpiece_id = int(job_name.split("_")[-1])
     except ValueError as exc:
         raise ValueError(f"Invalid job/workpiece name format: {job_name}") from exc
+    results_dir_name = resolve_results_dir_name_from_npz(npz_path)
+    encoded_workpiece_id = encode_workpiece_id(
+        local_workpiece_id=local_workpiece_id,
+        results_dir_name=results_dir_name,
+    )
+    workpiece_source_id = 1 if results_dir_name == "simple_results" else 0
+    return encoded_workpiece_id, local_workpiece_id, workpiece_source_id
 
 
 def resolve_stl_path_for_npz(
     npz_path: pathlib.Path,
-    input_dir: pathlib.Path,
+    input_dirs: list[pathlib.Path],
     fallback_stl_path: str | None,
 ) -> pathlib.Path:
     job_name = resolve_job_name_from_npz(npz_path)
     candidate_paths: list[pathlib.Path] = []
 
+    def infer_jobs_dir_from_results_dir(results_dir: pathlib.Path) -> pathlib.Path:
+        name = results_dir.name
+        if name == "results":
+            return results_dir.parent / "jobs"
+        if name == "simple_results":
+            return results_dir.parent / "simple_jobs"
+        if name.startswith("results_"):
+            return results_dir.parent / name.replace("results_", "jobs_", 1)
+        if name.startswith("simple_results_"):
+            return results_dir.parent / name.replace("simple_results_", "simple_jobs_", 1)
+        if "results" in name:
+            return results_dir.parent / name.replace("results", "jobs", 1)
+        return results_dir.parent / "jobs"
+
     if job_name is not None:
         for parent in npz_path.parents:
-            if parent.name == job_name and parent.parent.name == "results":
-                candidate_paths.append(parent.parent.parent / "jobs" / job_name / "workpiece.stl")
+            if parent.name == job_name and "results" in parent.parent.name:
+                candidate_paths.append(
+                    infer_jobs_dir_from_results_dir(parent.parent) / job_name / "workpiece.stl"
+                )
                 break
 
         if not candidate_paths:
-            input_dir = input_dir.resolve()
-            candidate_roots = [
-                input_dir.parent if input_dir.name.startswith("job_") else input_dir,
-                input_dir.parents[1] if len(input_dir.parents) >= 2 else input_dir,
-                PROJECT_ROOT / "data" / "raw_data" / "results",
-            ]
+            candidate_roots: list[pathlib.Path] = []
+            for input_dir in input_dirs:
+                resolved_input_dir = input_dir.resolve()
+                candidate_roots.extend(
+                    [
+                        resolved_input_dir.parent
+                        if resolved_input_dir.name.startswith("job_")
+                        else resolved_input_dir,
+                        resolved_input_dir.parents[1]
+                        if len(resolved_input_dir.parents) >= 2
+                        else resolved_input_dir,
+                    ]
+                )
+            candidate_roots.extend(
+                [
+                    PROJECT_ROOT / "data" / "raw_data" / "results",
+                    PROJECT_ROOT / "data" / "raw_data" / "simple_results",
+                ]
+            )
             seen_roots: set[pathlib.Path] = set()
             for results_root in candidate_roots:
                 resolved_root = results_root.resolve()
                 if resolved_root in seen_roots:
                     continue
                 seen_roots.add(resolved_root)
-                jobs_root = resolved_root.parent / "jobs"
+                jobs_root = infer_jobs_dir_from_results_dir(resolved_root)
                 candidate_paths.append(jobs_root / job_name / "workpiece.stl")
 
         for candidate_path in candidate_paths:
@@ -423,14 +490,14 @@ def resolve_stl_path_for_npz(
 
 def validate_stl_npz_mapping(
     npz_files: list[pathlib.Path],
-    input_dir: pathlib.Path,
+    input_dirs: list[pathlib.Path],
     fallback_stl_path: str | None,
 ) -> dict[str, str]:
     mapping: dict[str, str] = {}
     for npz_path in npz_files:
         stl_path = resolve_stl_path_for_npz(
             npz_path=npz_path,
-            input_dir=input_dir,
+            input_dirs=input_dirs,
             fallback_stl_path=fallback_stl_path,
         )
         mapping[str(npz_path)] = str(stl_path)
@@ -517,13 +584,16 @@ def main() -> None:
     if args.augment_copies <= 0:
         raise ValueError(f"--augment-copies must be positive, got {args.augment_copies}")
 
-    input_dir = pathlib.Path(args.input_dir)
-    npz_files = sorted(input_dir.rglob("transition_*.npz"))
+    search_dirs = [pathlib.Path(path) for path in (args.input_dirs if args.input_dirs else [args.input_dir])]
+    npz_files = collect_npz_files(
+        input_dir=args.input_dir,
+        input_dirs=args.input_dirs,
+    )
     if not npz_files:
-        raise FileNotFoundError(f"No .npz files found under {args.input_dir}")
+        raise FileNotFoundError(f"No transition_*.npz files found under: {search_dirs}")
     stl_mapping = validate_stl_npz_mapping(
         npz_files=npz_files,
-        input_dir=input_dir,
+        input_dirs=search_dirs,
         fallback_stl_path=args.stl_path,
     )
 
@@ -557,10 +627,12 @@ def main() -> None:
     buffer = ReplayBuffer.create_empty_numpy()
     raw_mesh_points_cache: dict[str, np.ndarray] = {}
     workpiece_ids = []
+    workpiece_local_ids = []
+    workpiece_source_ids = []
     is_reversed_episode = []
     for npz_path in progress(npz_files, desc="build zarr episodes", unit="file"):
         stl_path = stl_mapping[str(npz_path)]
-        workpiece_id = resolve_workpiece_id_from_npz(npz_path)
+        workpiece_id, local_workpiece_id, workpiece_source_id = resolve_workpiece_metadata_from_npz(npz_path)
         if stl_path not in raw_mesh_points_cache:
             raw_mesh_points_cache[stl_path] = build_raw_mesh_points_world_m(
                 stl_path=stl_path,
@@ -630,6 +702,8 @@ def main() -> None:
             )
             buffer.add_episode(sample)
             workpiece_ids.append(workpiece_id)
+            workpiece_local_ids.append(local_workpiece_id)
+            workpiece_source_ids.append(workpiece_source_id)
             is_reversed_episode.append(0)
             if args.add_reversed_copy:
                 reversed_point_cloud = build_normalized_point_cloud_from_geometry(
@@ -648,11 +722,15 @@ def main() -> None:
                 )
                 buffer.add_episode(reversed_sample)
                 workpiece_ids.append(workpiece_id)
+                workpiece_local_ids.append(local_workpiece_id)
+                workpiece_source_ids.append(workpiece_source_id)
                 is_reversed_episode.append(1)
 
     buffer.update_meta(
         {
             "workpiece_ids": np.asarray(workpiece_ids, dtype=np.int64),
+            "workpiece_local_ids": np.asarray(workpiece_local_ids, dtype=np.int64),
+            "workpiece_source_ids": np.asarray(workpiece_source_ids, dtype=np.int64),
             "is_reversed_episode": np.asarray(is_reversed_episode, dtype=np.int64),
         }
     )
@@ -672,12 +750,14 @@ def main() -> None:
     print(f"basis_matrix: {stats['basis_matrix'].shape}")
     print(f"stl_mode: strict per-job auto-resolve")
     print(f"resolved_stl_jobs: {len(set(stl_mapping.values()))}")
+    print(f"workpiece_id_encoding: results=0-999, simple_results=1000+local_id")
     print(f"cached_meshes: {len(raw_mesh_points_cache)}")
     print(f"augment_copies: {args.augment_copies}")
     print(f"radius_bounds_m: {radius_bounds}")
     print(f"height_bounds_m: {height_bounds}")
     print(f"augment_seed: {args.augment_seed}")
     print(f"add_reversed_copy: {args.add_reversed_copy}")
+    print(f"input_dirs: {[str(path) for path in search_dirs]}")
     print(f"stats_path: {args.stats_path}")
     print(f"saved_zarr: {output_zarr}")
 

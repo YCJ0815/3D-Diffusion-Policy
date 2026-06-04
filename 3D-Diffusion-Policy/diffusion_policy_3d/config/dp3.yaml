@@ -125,6 +125,29 @@ training:
     patience: 50
     min_delta: 1.0e-4
     warmup_epochs: 20
+  pybullet_eval:
+    enabled: False
+    stats_path: null
+    stats_mode: auto
+    jobs_root: data/raw_data/jobs
+    simple_jobs_root: data/raw_data/simple_jobs
+    simple_workpiece_id_offset: 1000
+    job_name_template: job_{workpiece_id:03d}
+    workpiece_filename: workpiece.stl
+    urdf_path: null
+    urdf_package_roots: []
+    tcp_link_name: tool0
+    stl_x_offset_m: 0.5
+    collision_distance_threshold: 0.0
+    interpolate_for_collision: True
+    max_joint_step_rad: 0.01
+    min_interpolated_steps_per_segment: 1
+    goal_position_norm_m: 0.1
+    goal_tolerance_m: 0.01
+    num_control_points: 16
+    spline_degree: 5
+    target_steps: 64
+    max_episodes: null
 
 logging:
   group: ${exp_name}
