@@ -5,7 +5,9 @@ DEVICE="${1:-cuda:0}"
 STATS_PATH="${2:-data/raw_data/realdex_bspline_stats.npz}"
 RUN_DIR="${3:-data/outputs/pybullet_eval_smoke}"
 
-python 3D-Diffusion-Policy/train.py \
+cd "$(dirname "$0")/../3D-Diffusion-Policy"
+
+python train.py \
   --config-name=simple_dp3.yaml \
   task=realdex_transition \
   task.dataset.zarr_path=data/realdex_bspline_free10.zarr \
