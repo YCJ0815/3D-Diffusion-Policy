@@ -93,11 +93,37 @@ def _resolve_mesh_filename(filename: str, package_roots: list[Path]) -> str:
     )
 
 
-def _rewrite_urdf_package_uris(urdf_path: str, package_roots: list[str]) -> str:
-    if not package_roots:
-        return urdf_path
+def _expand_urdf_package_roots(urdf_path: str, package_roots: list[str]) -> list[Path]:
+    urdf_parent = Path(urdf_path).expanduser().resolve().parent
+    candidates: list[Path] = []
+    for root in package_roots:
+        root_path = Path(root).expanduser()
+        if root_path.is_absolute():
+            candidates.append(root_path.resolve())
+        else:
+            candidates.extend([
+                root_path.resolve(),
+                (urdf_parent / root_path).resolve(),
+                (urdf_parent.parent / root_path).resolve(),
+            ])
+    candidates.extend([
+        urdf_parent.resolve(),
+        (urdf_parent / "robot-model").resolve(),
+        urdf_parent.parent.resolve(),
+    ])
 
-    roots = [Path(root).expanduser().resolve() for root in package_roots]
+    unique_roots = []
+    seen = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        unique_roots.append(candidate)
+    return unique_roots
+
+
+def _rewrite_urdf_package_uris(urdf_path: str, package_roots: list[str]) -> str:
+    roots = _expand_urdf_package_roots(urdf_path, package_roots)
     tree = ET.parse(urdf_path)
     root = tree.getroot()
     changed = False
