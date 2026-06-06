@@ -41,6 +41,26 @@ def _resolve_workpiece_stl_path(
     job_name_template: str,
     workpiece_filename: str,
 ) -> Path:
+    return _resolve_workpiece_file_path(
+        workpiece_id=workpiece_id,
+        jobs_root=jobs_root,
+        simple_jobs_root=simple_jobs_root,
+        simple_workpiece_id_offset=simple_workpiece_id_offset,
+        job_name_template=job_name_template,
+        filename=workpiece_filename,
+        file_label="STL",
+    )
+
+
+def _resolve_workpiece_file_path(
+    workpiece_id: int,
+    jobs_root: str,
+    simple_jobs_root: str | None,
+    simple_workpiece_id_offset: int,
+    job_name_template: str,
+    filename: str,
+    file_label: str,
+) -> Path:
     workpiece_id = int(workpiece_id)
     resolved_jobs_root = Path(jobs_root).expanduser().resolve()
     local_workpiece_id = workpiece_id
@@ -48,10 +68,10 @@ def _resolve_workpiece_stl_path(
         resolved_jobs_root = Path(simple_jobs_root).expanduser().resolve()
         local_workpiece_id = workpiece_id - int(simple_workpiece_id_offset)
     job_name = job_name_template.format(workpiece_id=int(local_workpiece_id))
-    stl_path = resolved_jobs_root / job_name / workpiece_filename
-    if not stl_path.is_file():
-        raise FileNotFoundError(f"Workpiece STL not found for workpiece_id={workpiece_id}: {stl_path}")
-    return stl_path
+    file_path = resolved_jobs_root / job_name / filename
+    if not file_path.is_file():
+        raise FileNotFoundError(f"Workpiece {file_label} not found for workpiece_id={workpiece_id}: {file_path}")
+    return file_path
 
 
 def _resolve_mesh_filename(filename: str, package_roots: list[Path]) -> str:
@@ -97,6 +117,119 @@ def _rewrite_urdf_package_uris(urdf_path: str, package_roots: list[str]) -> str:
     return str(resolved_path)
 
 
+def _parse_float_vector(value: str | None, default: tuple[float, ...]) -> np.ndarray:
+    if value is None:
+        return np.asarray(default, dtype=np.float32)
+    parsed = [float(item) for item in value.split()]
+    return np.asarray(parsed, dtype=np.float32)
+
+
+def _rpy_to_matrix(rpy: np.ndarray) -> np.ndarray:
+    roll, pitch, yaw = [float(item) for item in rpy.reshape(3)]
+    cr, sr = np.cos(roll), np.sin(roll)
+    cp, sp = np.cos(pitch), np.sin(pitch)
+    cy, sy = np.cos(yaw), np.sin(yaw)
+    rx = np.asarray([[1.0, 0.0, 0.0], [0.0, cr, -sr], [0.0, sr, cr]], dtype=np.float32)
+    ry = np.asarray([[cp, 0.0, sp], [0.0, 1.0, 0.0], [-sp, 0.0, cp]], dtype=np.float32)
+    rz = np.asarray([[cy, -sy, 0.0], [sy, cy, 0.0], [0.0, 0.0, 1.0]], dtype=np.float32)
+    return (rz @ ry @ rx).astype(np.float32)
+
+
+def _apply_origin_transform(points: np.ndarray, origin_elem) -> np.ndarray:
+    if origin_elem is None:
+        return points.astype(np.float32)
+    xyz = _parse_float_vector(origin_elem.get("xyz"), (0.0, 0.0, 0.0))
+    rpy = _parse_float_vector(origin_elem.get("rpy"), (0.0, 0.0, 0.0))
+    rotation = _rpy_to_matrix(rpy)
+    return (points @ rotation.T + xyz.reshape(1, 3)).astype(np.float32)
+
+
+def _select_deterministic_surface_points(points: np.ndarray, max_points: int) -> np.ndarray:
+    points = np.asarray(points, dtype=np.float32).reshape(-1, 3)
+    if points.shape[0] <= max_points:
+        return points
+    indices = np.linspace(0, points.shape[0] - 1, num=max_points, dtype=np.int64)
+    return points[indices].astype(np.float32)
+
+
+@dataclass
+class SDFGrid:
+    sdf: np.ndarray
+    x: np.ndarray
+    y: np.ndarray
+    z: np.ndarray
+    out_of_bounds_value_m: float | None = None
+
+    @classmethod
+    def load(cls, path: Path, out_of_bounds_value_m: float | None = None) -> "SDFGrid":
+        data = np.load(path)
+        missing = [key for key in ("sdf", "x", "y", "z") if key not in data.files]
+        if missing:
+            raise KeyError(f"SDF file {path} is missing required keys: {missing}")
+        return cls(
+            sdf=np.asarray(data["sdf"], dtype=np.float32),
+            x=np.asarray(data["x"], dtype=np.float32),
+            y=np.asarray(data["y"], dtype=np.float32),
+            z=np.asarray(data["z"], dtype=np.float32),
+            out_of_bounds_value_m=out_of_bounds_value_m,
+        )
+
+    def query(self, points: np.ndarray) -> np.ndarray:
+        points = np.asarray(points, dtype=np.float32).reshape(-1, 3)
+        if self.sdf.shape != (self.x.shape[0], self.y.shape[0], self.z.shape[0]):
+            raise ValueError(
+                "SDF grid shape must match x/y/z axes, got "
+                f"sdf={self.sdf.shape}, axes={(self.x.shape[0], self.y.shape[0], self.z.shape[0])}"
+            )
+        valid = (
+            (points[:, 0] >= self.x[0]) & (points[:, 0] <= self.x[-1]) &
+            (points[:, 1] >= self.y[0]) & (points[:, 1] <= self.y[-1]) &
+            (points[:, 2] >= self.z[0]) & (points[:, 2] <= self.z[-1])
+        )
+        values = np.full(points.shape[0], np.nan, dtype=np.float32)
+        if self.out_of_bounds_value_m is not None:
+            values[~valid] = float(self.out_of_bounds_value_m)
+        if not np.any(valid):
+            return values
+
+        valid_points = points[valid]
+        ix0, ix1, tx = self._axis_indices(self.x, valid_points[:, 0])
+        iy0, iy1, ty = self._axis_indices(self.y, valid_points[:, 1])
+        iz0, iz1, tz = self._axis_indices(self.z, valid_points[:, 2])
+
+        c000 = self.sdf[ix0, iy0, iz0]
+        c100 = self.sdf[ix1, iy0, iz0]
+        c010 = self.sdf[ix0, iy1, iz0]
+        c110 = self.sdf[ix1, iy1, iz0]
+        c001 = self.sdf[ix0, iy0, iz1]
+        c101 = self.sdf[ix1, iy0, iz1]
+        c011 = self.sdf[ix0, iy1, iz1]
+        c111 = self.sdf[ix1, iy1, iz1]
+
+        c00 = c000 * (1.0 - tx) + c100 * tx
+        c10 = c010 * (1.0 - tx) + c110 * tx
+        c01 = c001 * (1.0 - tx) + c101 * tx
+        c11 = c011 * (1.0 - tx) + c111 * tx
+        c0 = c00 * (1.0 - ty) + c10 * ty
+        c1 = c01 * (1.0 - ty) + c11 * ty
+        values[valid] = (c0 * (1.0 - tz) + c1 * tz).astype(np.float32)
+        return values
+
+    @staticmethod
+    def _axis_indices(axis: np.ndarray, values: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        upper = np.searchsorted(axis, values, side="right")
+        upper = np.clip(upper, 1, axis.shape[0] - 1)
+        lower = upper - 1
+        span = axis[upper] - axis[lower]
+        weights = np.divide(
+            values - axis[lower],
+            span,
+            out=np.zeros_like(values, dtype=np.float32),
+            where=span > 0,
+        )
+        return lower.astype(np.int64), upper.astype(np.int64), weights.astype(np.float32)
+
+
 @dataclass
 class PyBulletValidationConfig:
     enabled: bool = False
@@ -108,7 +241,7 @@ class PyBulletValidationConfig:
     job_name_template: str = "job_{workpiece_id:03d}"
     workpiece_filename: str = "workpiece.stl"
     urdf_path: str | None = None
-    urdf_package_roots: tuple[str, ...] = tuple()
+    urdf_package_roots: tuple[str, ...] = ("config/robot-model",)
     tcp_link_name: str = "tool0"
     stl_x_offset_m: float = 0.5
     collision_distance_threshold: float = 0.0
@@ -121,9 +254,15 @@ class PyBulletValidationConfig:
     spline_degree: int = 5
     target_steps: int = 64
     max_episodes: int | None = None
+    sdf_filename: str = "workpiece_sdf.npz"
+    sdf_required: bool = True
+    robot_surface_points_per_link: int = 256
+    sdf_out_of_bounds_value_m: float | None = None
+    log_legacy_pybullet_metrics: bool = True
 
     @classmethod
     def from_omegaconf(cls, cfg) -> "PyBulletValidationConfig":
+        sdf_out_of_bounds_value_m = cfg.get("sdf_out_of_bounds_value_m", None)
         return cls(
             enabled=bool(cfg.get("enabled", False)),
             stats_path=cfg.get("stats_path"),
@@ -134,7 +273,7 @@ class PyBulletValidationConfig:
             job_name_template=str(cfg.get("job_name_template", "job_{workpiece_id:03d}")),
             workpiece_filename=str(cfg.get("workpiece_filename", "workpiece.stl")),
             urdf_path=cfg.get("urdf_path"),
-            urdf_package_roots=tuple(cfg.get("urdf_package_roots", [])),
+            urdf_package_roots=tuple(cfg.get("urdf_package_roots", ["config/robot-model"])),
             tcp_link_name=str(cfg.get("tcp_link_name", "tool0")),
             stl_x_offset_m=float(cfg.get("stl_x_offset_m", 0.5)),
             collision_distance_threshold=float(cfg.get("collision_distance_threshold", 0.0)),
@@ -147,6 +286,13 @@ class PyBulletValidationConfig:
             spline_degree=int(cfg.get("spline_degree", 5)),
             target_steps=int(cfg.get("target_steps", 64)),
             max_episodes=cfg.get("max_episodes"),
+            sdf_filename=str(cfg.get("sdf_filename", "workpiece_sdf.npz")),
+            sdf_required=bool(cfg.get("sdf_required", True)),
+            robot_surface_points_per_link=int(cfg.get("robot_surface_points_per_link", 256)),
+            sdf_out_of_bounds_value_m=(
+                None if sdf_out_of_bounds_value_m is None else float(sdf_out_of_bounds_value_m)
+            ),
+            log_legacy_pybullet_metrics=bool(cfg.get("log_legacy_pybullet_metrics", True)),
         )
 
 
@@ -212,7 +358,17 @@ class PyBulletCollisionValidator:
             self.stats_mean, self.stats_std = load_delta_w_stats(self.cfg.stats_path)
         else:
             self.stats_mean, self.stats_std = load_increment_stats(self.cfg.stats_path)
+        if self.cfg.robot_surface_points_per_link <= 0:
+            raise ValueError(
+                "training.pybullet_eval.robot_surface_points_per_link must be positive, "
+                f"got {self.cfg.robot_surface_points_per_link}"
+            )
         self.workpiece_cache: dict[int, int] = {}
+        self.sdf_cache: dict[int, SDFGrid] = {}
+        self.robot_surface_points_by_link = self._build_robot_collision_surface_points(
+            resolved_urdf_path=self.resolved_urdf_path,
+            points_per_link=self.cfg.robot_surface_points_per_link,
+        )
         if self.cfg.max_joint_step_rad <= 0:
             raise ValueError(
                 f"training.pybullet_eval.max_joint_step_rad must be positive, got {self.cfg.max_joint_step_rad}"
@@ -269,6 +425,153 @@ class PyBulletCollisionValidator:
         )
         self.workpiece_cache[workpiece_id] = body_id
         return body_id
+
+    def _load_workpiece_sdf(self, workpiece_id: int) -> SDFGrid | None:
+        workpiece_id = int(workpiece_id)
+        if workpiece_id in self.sdf_cache:
+            return self.sdf_cache[workpiece_id]
+        try:
+            sdf_path = _resolve_workpiece_file_path(
+                workpiece_id=workpiece_id,
+                jobs_root=self.cfg.jobs_root,
+                simple_jobs_root=self.cfg.simple_jobs_root,
+                simple_workpiece_id_offset=self.cfg.simple_workpiece_id_offset,
+                job_name_template=self.cfg.job_name_template,
+                filename=self.cfg.sdf_filename,
+                file_label="SDF",
+            )
+        except FileNotFoundError:
+            if self.cfg.sdf_required:
+                raise
+            return None
+        sdf_grid = SDFGrid.load(
+            sdf_path,
+            out_of_bounds_value_m=self.cfg.sdf_out_of_bounds_value_m,
+        )
+        self.sdf_cache[workpiece_id] = sdf_grid
+        return sdf_grid
+
+    def _build_robot_collision_surface_points(
+        self,
+        resolved_urdf_path: str,
+        points_per_link: int,
+    ) -> dict[int, np.ndarray]:
+        try:
+            import trimesh
+        except ModuleNotFoundError as exc:
+            raise ModuleNotFoundError(
+                "SDF validation requires `trimesh` to sample robot collision geometry."
+            ) from exc
+
+        package_roots = [Path(root).expanduser().resolve() for root in self.cfg.urdf_package_roots]
+        package_roots.append(Path(resolved_urdf_path).expanduser().resolve().parent)
+        tree = ET.parse(resolved_urdf_path)
+        root = tree.getroot()
+        points_by_link: dict[int, list[np.ndarray]] = {}
+
+        for link_elem in root.findall("link"):
+            link_name = link_elem.get("name")
+            if not link_name:
+                continue
+            if link_name in self.link_name_to_index:
+                link_index = self.link_name_to_index[link_name]
+            elif link_name == "base_link":
+                link_index = -1
+            else:
+                continue
+
+            link_candidates = []
+            for collision_elem in link_elem.findall("collision"):
+                geometry_elem = collision_elem.find("geometry")
+                if geometry_elem is None:
+                    continue
+                mesh_elem = geometry_elem.find("mesh")
+                box_elem = geometry_elem.find("box")
+                local_points = None
+                if mesh_elem is not None:
+                    filename = mesh_elem.get("filename")
+                    if filename is None:
+                        continue
+                    mesh_path = _resolve_mesh_filename(filename, package_roots)
+                    mesh = trimesh.load_mesh(mesh_path, force="mesh")
+                    scale = _parse_float_vector(mesh_elem.get("scale"), (1.0, 1.0, 1.0)).reshape(1, 3)
+                    vertices = np.asarray(mesh.vertices, dtype=np.float32) * scale
+                    face_centers = np.asarray(mesh.triangles_center, dtype=np.float32) * scale
+                    local_points = np.concatenate([vertices, face_centers], axis=0)
+                elif box_elem is not None:
+                    size = _parse_float_vector(box_elem.get("size"), (0.0, 0.0, 0.0)).reshape(3)
+                    half = size * 0.5
+                    corners = np.asarray(
+                        [
+                            [sx * half[0], sy * half[1], sz * half[2]]
+                            for sx in (-1.0, 1.0)
+                            for sy in (-1.0, 1.0)
+                            for sz in (-1.0, 1.0)
+                        ],
+                        dtype=np.float32,
+                    )
+                    face_centers = np.asarray(
+                        [
+                            [half[0], 0.0, 0.0], [-half[0], 0.0, 0.0],
+                            [0.0, half[1], 0.0], [0.0, -half[1], 0.0],
+                            [0.0, 0.0, half[2]], [0.0, 0.0, -half[2]],
+                        ],
+                        dtype=np.float32,
+                    )
+                    local_points = np.concatenate([corners, face_centers], axis=0)
+                if local_points is None or local_points.size == 0:
+                    continue
+                local_points = _apply_origin_transform(local_points, collision_elem.find("origin"))
+                link_candidates.append(local_points.astype(np.float32))
+
+            if link_candidates:
+                merged = np.concatenate(link_candidates, axis=0)
+                selected = _select_deterministic_surface_points(merged, points_per_link)
+                points_by_link.setdefault(link_index, []).append(selected)
+
+        return {
+            link_index: np.concatenate(point_chunks, axis=0).astype(np.float32)
+            for link_index, point_chunks in points_by_link.items()
+        }
+
+    def _get_link_pose(self, link_index: int) -> tuple[np.ndarray, np.ndarray]:
+        if link_index == -1:
+            position, orientation = self.pb.getBasePositionAndOrientation(
+                self.robot_id,
+                physicsClientId=self.client_id,
+            )
+            return np.asarray(position, dtype=np.float32), np.asarray(orientation, dtype=np.float32)
+        link_state = self.pb.getLinkState(
+            self.robot_id,
+            link_index,
+            computeForwardKinematics=True,
+            physicsClientId=self.client_id,
+        )
+        return np.asarray(link_state[4], dtype=np.float32), np.asarray(link_state[5], dtype=np.float32)
+
+    def _robot_surface_points_world(self) -> np.ndarray:
+        world_points = []
+        for link_index, local_points in self.robot_surface_points_by_link.items():
+            position, orientation = self._get_link_pose(link_index)
+            rotation = np.asarray(
+                self.pb.getMatrixFromQuaternion(orientation),
+                dtype=np.float32,
+            ).reshape(3, 3)
+            world_points.append(local_points @ rotation.T + position.reshape(1, 3))
+        if not world_points:
+            return np.empty((0, 3), dtype=np.float32)
+        return np.concatenate(world_points, axis=0).astype(np.float32)
+
+    def _min_sdf_distance_for_current_robot_state(self, sdf_grid: SDFGrid | None) -> float:
+        if sdf_grid is None:
+            return float("nan")
+        robot_points = self._robot_surface_points_world()
+        if robot_points.size == 0:
+            return float("nan")
+        sdf_values = sdf_grid.query(robot_points)
+        if np.all(np.isnan(sdf_values)):
+            return float("nan")
+        return float(np.nanmin(sdf_values))
 
     def _set_robot_joints(self, joint_state: np.ndarray) -> None:
         joint_state = np.asarray(joint_state, dtype=np.float32).reshape(-1)
@@ -380,12 +683,24 @@ class PyBulletCollisionValidator:
         goal_position_normalized: np.ndarray,
     ) -> dict[str, float | bool]:
         workpiece_body_id = self._load_workpiece_body(workpiece_id)
+        sdf_grid = self._load_workpiece_sdf(workpiece_id)
         target_world_position = self._target_world_position(start_joint_state, goal_position_normalized)
-        joint_trajectory = self.densify_joint_trajectory(joint_trajectory)
+        joint_trajectory = np.asarray(joint_trajectory, dtype=np.float32)
+        if joint_trajectory.ndim != 2 or joint_trajectory.shape[1] != len(self.revolute_joint_indices):
+            raise ValueError(
+                "joint_trajectory must have shape [T, J] matching robot joints, "
+                f"got {joint_trajectory.shape}"
+            )
+        if joint_trajectory.shape[0] != self.cfg.target_steps:
+            raise ValueError(
+                f"PyBullet validation expects exactly {self.cfg.target_steps} reconstructed joint states, "
+                f"got {joint_trajectory.shape[0]}. Adjust training.pybullet_eval.target_steps or action reconstruction."
+            )
         has_collision = False
-        collision_steps = 0
+        segment_collision_steps = 0
+        min_sdf_distance_m = float("nan")
         final_tcp_position = None
-        for joint_state in np.asarray(joint_trajectory, dtype=np.float32):
+        for joint_state in joint_trajectory:
             self._set_robot_joints(joint_state)
             self.pb.performCollisionDetection(physicsClientId=self.client_id)
             contacts = self.pb.getClosestPoints(
@@ -396,17 +711,45 @@ class PyBulletCollisionValidator:
             )
             if contacts:
                 has_collision = True
-                collision_steps += 1
+                segment_collision_steps += 1
+            step_min_sdf_distance_m = self._min_sdf_distance_for_current_robot_state(sdf_grid)
+            if not np.isnan(step_min_sdf_distance_m):
+                if np.isnan(min_sdf_distance_m):
+                    min_sdf_distance_m = step_min_sdf_distance_m
+                else:
+                    min_sdf_distance_m = min(min_sdf_distance_m, step_min_sdf_distance_m)
             final_tcp_position, _ = self._get_tcp_pose()
         if final_tcp_position is None:
             raise ValueError("Empty joint trajectory is not valid for pybullet validation.")
+
+        legacy_collision_steps = float(segment_collision_steps)
+        legacy_trajectory_steps = float(joint_trajectory.shape[0])
+        if self.cfg.interpolate_for_collision and self.cfg.log_legacy_pybullet_metrics:
+            dense_joint_trajectory = self.densify_joint_trajectory(joint_trajectory)
+            legacy_collision_steps = 0.0
+            for joint_state in dense_joint_trajectory:
+                self._set_robot_joints(joint_state)
+                self.pb.performCollisionDetection(physicsClientId=self.client_id)
+                contacts = self.pb.getClosestPoints(
+                    bodyA=self.robot_id,
+                    bodyB=workpiece_body_id,
+                    distance=self.cfg.collision_distance_threshold,
+                    physicsClientId=self.client_id,
+                )
+                if contacts:
+                    legacy_collision_steps += 1.0
+            legacy_trajectory_steps = float(dense_joint_trajectory.shape[0])
+
         goal_error = float(np.linalg.norm(final_tcp_position - target_world_position))
         goal_reached = goal_error <= self.cfg.goal_tolerance_m
         success = bool(goal_reached and not has_collision)
         return {
             "has_collision": bool(has_collision),
-            "collision_steps": float(collision_steps),
-            "trajectory_steps": float(joint_trajectory.shape[0]),
+            "segment_collision_steps": float(segment_collision_steps),
+            "segment_steps": float(joint_trajectory.shape[0]),
+            "min_sdf_distance_m": float(min_sdf_distance_m),
+            "legacy_collision_steps": float(legacy_collision_steps),
+            "legacy_trajectory_steps": float(legacy_trajectory_steps),
             "goal_error_m": goal_error,
             "goal_reached": bool(goal_reached),
             "success": success,
@@ -498,14 +841,42 @@ class PyBulletValidationRunner:
         collision_count = sum(1.0 for item in sample_metrics if item["has_collision"])
         success_count = sum(1.0 for item in sample_metrics if item["success"])
         goal_reached_count = sum(1.0 for item in sample_metrics if item["goal_reached"])
-        total_collision_steps = sum(float(item["collision_steps"]) for item in sample_metrics)
-        total_steps = sum(float(item["trajectory_steps"]) for item in sample_metrics)
+        total_segment_collision_steps = sum(float(item["segment_collision_steps"]) for item in sample_metrics)
+        total_segment_steps = sum(float(item["segment_steps"]) for item in sample_metrics)
+        total_legacy_collision_steps = sum(float(item["legacy_collision_steps"]) for item in sample_metrics)
+        total_legacy_steps = sum(float(item["legacy_trajectory_steps"]) for item in sample_metrics)
         mean_goal_error = sum(float(item["goal_error_m"]) for item in sample_metrics) / total
-        return {
-            "val_pybullet_collision_rate": collision_count / total,
-            "val_pybullet_success_rate": success_count / total,
-            "val_pybullet_goal_reached_rate": goal_reached_count / total,
-            "val_pybullet_collision_step_rate": (total_collision_steps / total_steps) if total_steps > 0 else 0.0,
-            "val_pybullet_mean_goal_error_m": mean_goal_error,
+        min_sdf_distances = np.asarray(
+            [float(item["min_sdf_distance_m"]) for item in sample_metrics],
+            dtype=np.float32,
+        )
+        valid_sdf_mask = ~np.isnan(min_sdf_distances)
+        mean_min_sdf_distance_m = (
+            float(np.mean(min_sdf_distances[valid_sdf_mask]))
+            if np.any(valid_sdf_mask)
+            else float("nan")
+        )
+        log_data = {
+            "val_traj_collision_rate": collision_count / total,
+            "val_segment_collision_rate": (
+                total_segment_collision_steps / total_segment_steps
+                if total_segment_steps > 0
+                else 0.0
+            ),
+            "val_mean_min_sdf_distance_m": mean_min_sdf_distance_m,
             "val_pybullet_eval_episodes": total,
+            "val_sdf_valid_rate": float(np.mean(valid_sdf_mask.astype(np.float32))),
         }
+        if self.cfg.log_legacy_pybullet_metrics:
+            log_data.update({
+                "val_pybullet_collision_rate": collision_count / total,
+                "val_pybullet_success_rate": success_count / total,
+                "val_pybullet_goal_reached_rate": goal_reached_count / total,
+                "val_pybullet_collision_step_rate": (
+                    total_legacy_collision_steps / total_legacy_steps
+                    if total_legacy_steps > 0
+                    else 0.0
+                ),
+                "val_pybullet_mean_goal_error_m": mean_goal_error,
+            })
+        return log_data

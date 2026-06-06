@@ -135,7 +135,7 @@ training:
     job_name_template: job_{workpiece_id:03d}
     workpiece_filename: workpiece.stl
     urdf_path: null
-    urdf_package_roots: []
+    urdf_package_roots: [config/robot-model]
     tcp_link_name: tool0
     stl_x_offset_m: 0.5
     collision_distance_threshold: 0.0
@@ -148,6 +148,11 @@ training:
     spline_degree: 5
     target_steps: 64
     max_episodes: null
+    sdf_filename: workpiece_sdf.npz
+    sdf_required: True
+    robot_surface_points_per_link: 256
+    sdf_out_of_bounds_value_m: null
+    log_legacy_pybullet_metrics: True
 
 logging:
   group: ${exp_name}
