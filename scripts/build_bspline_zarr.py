@@ -868,13 +868,42 @@ def resolve_results_dir_name_from_npz(npz_path: pathlib.Path) -> str | None:
     return None
 
 
-def encode_workpiece_id(local_workpiece_id: int, results_dir_name: str | None) -> int:
-    if results_dir_name == "simple_results":
+def infer_source_kind_from_input_dirs(
+    npz_path: pathlib.Path,
+    input_dirs: list[pathlib.Path] | None = None,
+) -> str:
+    resolved_npz_path = npz_path.expanduser().resolve()
+    if input_dirs:
+        matches: list[pathlib.Path] = []
+        for input_dir in input_dirs:
+            resolved_input_dir = input_dir.expanduser().resolve()
+            try:
+                resolved_npz_path.relative_to(resolved_input_dir)
+                matches.append(resolved_input_dir)
+            except ValueError:
+                continue
+        if matches:
+            matched_root = max(matches, key=lambda path: len(path.parts))
+            if "simple" in matched_root.name.lower():
+                return "simple"
+            return "regular"
+
+    for parent in resolved_npz_path.parents:
+        if "simple" in parent.name.lower():
+            return "simple"
+    return "regular"
+
+
+def encode_workpiece_id(local_workpiece_id: int, source_kind: str) -> int:
+    if source_kind == "simple":
         return 1000 + int(local_workpiece_id)
     return int(local_workpiece_id)
 
 
-def resolve_workpiece_metadata_from_npz(npz_path: pathlib.Path) -> tuple[int, int, int]:
+def resolve_workpiece_metadata_from_npz(
+    npz_path: pathlib.Path,
+    input_dirs: list[pathlib.Path] | None = None,
+) -> tuple[int, int, int]:
     job_name = resolve_job_name_from_npz(npz_path)
     if job_name is None:
         raise ValueError(f"Unable to infer workpiece id from NPZ path: {npz_path}")
@@ -882,12 +911,12 @@ def resolve_workpiece_metadata_from_npz(npz_path: pathlib.Path) -> tuple[int, in
         local_workpiece_id = int(job_name.split("_")[-1])
     except ValueError as exc:
         raise ValueError(f"Invalid job/workpiece name format: {job_name}") from exc
-    results_dir_name = resolve_results_dir_name_from_npz(npz_path)
+    source_kind = infer_source_kind_from_input_dirs(npz_path=npz_path, input_dirs=input_dirs)
     encoded_workpiece_id = encode_workpiece_id(
         local_workpiece_id=local_workpiece_id,
-        results_dir_name=results_dir_name,
+        source_kind=source_kind,
     )
-    workpiece_source_id = 1 if results_dir_name == "simple_results" else 0
+    workpiece_source_id = 1 if source_kind == "simple" else 0
     return encoded_workpiece_id, local_workpiece_id, workpiece_source_id
 
 
@@ -899,7 +928,7 @@ def resolve_stl_path_for_npz(
     fallback_stl_path: str | None,
 ) -> pathlib.Path:
     job_name = resolve_job_name_from_npz(npz_path)
-    results_dir_name = resolve_results_dir_name_from_npz(npz_path)
+    source_kind = infer_source_kind_from_input_dirs(npz_path=npz_path, input_dirs=input_dirs)
     candidate_paths: list[pathlib.Path] = []
 
     def infer_jobs_dir_from_results_dir(results_dir: pathlib.Path) -> pathlib.Path:
@@ -917,9 +946,9 @@ def resolve_stl_path_for_npz(
         return results_dir.parent / "jobs"
 
     if job_name is not None:
-        if results_dir_name == "simple_results" and simple_jobs_root is not None:
+        if source_kind == "simple" and simple_jobs_root is not None:
             candidate_paths.append(pathlib.Path(simple_jobs_root).expanduser().resolve() / job_name / "workpiece.stl")
-        elif results_dir_name != "simple_results" and jobs_root is not None:
+        elif source_kind != "simple" and jobs_root is not None:
             candidate_paths.append(pathlib.Path(jobs_root).expanduser().resolve() / job_name / "workpiece.stl")
 
         for parent in npz_path.parents:
@@ -1140,7 +1169,10 @@ def main() -> None:
     is_reversed_episode = []
     for npz_path in progress(npz_files, desc="build zarr episodes", unit="file"):
         stl_path = stl_mapping[str(npz_path)]
-        workpiece_id, local_workpiece_id, workpiece_source_id = resolve_workpiece_metadata_from_npz(npz_path)
+        workpiece_id, local_workpiece_id, workpiece_source_id = resolve_workpiece_metadata_from_npz(
+            npz_path=npz_path,
+            input_dirs=search_dirs,
+        )
         if stl_path not in raw_mesh_points_cache:
             raw_mesh_points_cache[stl_path] = load_or_build_raw_mesh_points_world_m(
                 stl_path=stl_path,
