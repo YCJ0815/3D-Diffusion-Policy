@@ -29,8 +29,13 @@
 ```bash
 /Users/ycj/miniconda3/envs/pybullet/bin/python scripts/build_bspline_zarr.py \
   --input-dirs data/raw_data/results data/raw_data/simple_results \
+  --jobs-root data/raw_data/jobs \
+  --simple-jobs-root data/raw_data/simple_jobs \
   --output-zarr data/realdex_bspline_free10.zarr \
   --stats-path data/raw_data/realdex_bspline_stats.npz \
+  --mesh-cache-dir data/cache/mesh_points \
+  --bspline-cache-dir data/cache/bspline_artifacts \
+  --reuse-stats-if-exists \
   --norm-m 0.1 \
   --radius-m 0.1 \
   --height-m 0.1 \
@@ -65,6 +70,10 @@
 - `--num-control-points 16`：拟合 16 个控制点。
 - 当前脚本只把中间 `10` 个自由控制点残差写入 zarr。
 - `--input-dirs ...`：支持同时扫描多个结果目录；`results -> jobs`、`simple_results -> simple_jobs` 会自动匹配对应 STL。
+- `--jobs-root` / `--simple-jobs-root`：可显式指定常规工件和 simple 工件的 STL 根目录；适合结果目录和工件目录不在同一父目录下的情况。
+- `--mesh-cache-dir`：缓存每个 STL 采样后的世界系点云，重复构建时不再重新采样网格。
+- `--bspline-cache-dir`：缓存每个 transition 的 B-spline 拟合和 planning artifacts，stats 阶段和 zarr 阶段会复用。
+- `--reuse-stats-if-exists`：当 `--stats-path` 中的构建元数据和当前输入完全匹配时，直接复用统计文件。
 - `--augment-copies 4`：每个 transition 生成 4 份样本，第一份用基准裁剪参数，其余 3 份在设定范围内随机增强。
 - `--add-reversed-copy`：为每条轨迹额外生成一份起终点互换的反向样本。
 - `--num-output-points 512`：每帧点云固定采样到 512 点。
