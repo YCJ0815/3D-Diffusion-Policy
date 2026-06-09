@@ -32,6 +32,7 @@ dataset:
   pad_after: 0
   seed: 42
   val_ratio: 0.1
+  split_by_workpiece: true
   train_workpiece_ids: null
   val_workpiece_ids: null
   max_train_episodes: null

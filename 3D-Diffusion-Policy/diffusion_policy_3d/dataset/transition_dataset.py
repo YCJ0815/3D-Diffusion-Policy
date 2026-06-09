@@ -85,6 +85,41 @@ class TransitionTrajectoryDataset(BaseDataset):
 
         return train_mask.astype(bool), val_mask.astype(bool)
 
+    @staticmethod
+    def _resolve_ratio_split_masks(
+            replay_buffer: ReplayBuffer,
+            val_ratio: float,
+            seed: int,
+            split_by_workpiece: bool):
+        if not split_by_workpiece:
+            val_mask = get_val_mask(
+                n_episodes=replay_buffer.n_episodes,
+                val_ratio=val_ratio,
+                seed=seed)
+            return ~val_mask, val_mask
+
+        if 'workpiece_ids' not in replay_buffer.meta:
+            raise KeyError(
+                "Dataset split by workpiece was requested, but `meta/workpiece_ids` "
+                "is missing from the zarr dataset. Rebuild the dataset with workpiece metadata."
+            )
+        episode_workpiece_ids = np.asarray(replay_buffer.meta['workpiece_ids'][:], dtype=np.int64)
+        if episode_workpiece_ids.shape != (replay_buffer.n_episodes,):
+            raise ValueError(
+                f"`meta/workpiece_ids` must have shape ({replay_buffer.n_episodes},), "
+                f"got {episode_workpiece_ids.shape}"
+            )
+
+        workpiece_ids = np.unique(episode_workpiece_ids)
+        val_workpiece_mask = get_val_mask(
+            n_episodes=len(workpiece_ids),
+            val_ratio=val_ratio,
+            seed=seed)
+        val_workpiece_ids = workpiece_ids[val_workpiece_mask]
+        val_mask = np.isin(episode_workpiece_ids, val_workpiece_ids)
+        train_mask = ~val_mask
+        return train_mask.astype(bool), val_mask.astype(bool)
+
     def __init__(self,
             zarr_path,
             horizon=64,
@@ -98,6 +133,7 @@ class TransitionTrajectoryDataset(BaseDataset):
             obs_keys=None,
             train_workpiece_ids=None,
             val_workpiece_ids=None,
+            split_by_workpiece=False,
             ):
         super().__init__()
         self.task_name = task_name
@@ -111,11 +147,11 @@ class TransitionTrajectoryDataset(BaseDataset):
             val_workpiece_ids=val_workpiece_ids,
         )
         if split_masks is None:
-            val_mask = get_val_mask(
-                n_episodes=self.replay_buffer.n_episodes,
+            train_mask, val_mask = self._resolve_ratio_split_masks(
+                replay_buffer=self.replay_buffer,
                 val_ratio=val_ratio,
-                seed=seed)
-            train_mask = ~val_mask
+                seed=seed,
+                split_by_workpiece=split_by_workpiece)
         else:
             train_mask, val_mask = split_masks
         train_mask = downsample_mask(
