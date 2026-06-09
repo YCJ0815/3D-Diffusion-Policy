@@ -39,7 +39,7 @@ class TransitionTrajectoryDataset(BaseDataset):
     )
 
     @staticmethod
-    def _resolve_workpiece_split_mask(
+    def _resolve_workpiece_split_masks(
             replay_buffer: ReplayBuffer,
             train_workpiece_ids=None,
             val_workpiece_ids=None):
@@ -83,7 +83,7 @@ class TransitionTrajectoryDataset(BaseDataset):
         if not np.any(val_mask):
             raise ValueError("No validation episodes remain after applying workpiece split.")
 
-        return train_mask.astype(bool)
+        return train_mask.astype(bool), val_mask.astype(bool)
 
     def __init__(self,
             zarr_path,
@@ -105,17 +105,19 @@ class TransitionTrajectoryDataset(BaseDataset):
         self.obs_keys = tuple(obs_keys) if obs_keys is not None else self.DEFAULT_OBS_KEYS
 
         self.replay_buffer = ReplayBuffer.copy_from_path(zarr_path, keys=None)
-        train_mask = self._resolve_workpiece_split_mask(
+        split_masks = self._resolve_workpiece_split_masks(
             replay_buffer=self.replay_buffer,
             train_workpiece_ids=train_workpiece_ids,
             val_workpiece_ids=val_workpiece_ids,
         )
-        if train_mask is None:
+        if split_masks is None:
             val_mask = get_val_mask(
                 n_episodes=self.replay_buffer.n_episodes,
                 val_ratio=val_ratio,
                 seed=seed)
             train_mask = ~val_mask
+        else:
+            train_mask, val_mask = split_masks
         train_mask = downsample_mask(
             mask=train_mask,
             max_n=max_train_episodes,
@@ -128,6 +130,7 @@ class TransitionTrajectoryDataset(BaseDataset):
             pad_after=pad_after,
             episode_mask=train_mask)
         self.train_mask = train_mask
+        self.val_mask = val_mask
         self.horizon = horizon
         self.pad_before = pad_before
         self.pad_after = pad_after
@@ -139,9 +142,10 @@ class TransitionTrajectoryDataset(BaseDataset):
             sequence_length=self.horizon,
             pad_before=self.pad_before,
             pad_after=self.pad_after,
-            episode_mask=~self.train_mask
+            episode_mask=self.val_mask
         )
-        val_set.train_mask = ~self.train_mask
+        val_set.train_mask = self.val_mask
+        val_set.val_mask = self.val_mask
         return val_set
 
     def get_normalizer(self, **kwargs):
