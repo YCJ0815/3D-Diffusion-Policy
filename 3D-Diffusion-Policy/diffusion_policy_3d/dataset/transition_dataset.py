@@ -92,7 +92,8 @@ class TransitionTrajectoryDataset(BaseDataset):
             seed: int,
             split_by_workpiece: bool,
             stratify_workpiece_split: bool,
-            simple_workpiece_id_offset: int):
+            simple_workpiece_id_offset: int,
+            workpiece_split_strategy: str):
         if not split_by_workpiece:
             val_mask = get_val_mask(
                 n_episodes=replay_buffer.n_episodes,
@@ -113,9 +114,22 @@ class TransitionTrajectoryDataset(BaseDataset):
             )
 
         workpiece_ids = np.unique(episode_workpiece_ids)
+        if workpiece_split_strategy not in ('random', 'tail'):
+            raise ValueError(
+                f"workpiece_split_strategy must be `random` or `tail`, got {workpiece_split_strategy}"
+            )
+
+        def select_val_workpieces(group):
+            n_val = min(max(1, round(len(group) * val_ratio)), len(group) - 1)
+            if n_val <= 0:
+                return np.asarray([], dtype=group.dtype)
+            if workpiece_split_strategy == 'tail':
+                return group[-n_val:]
+            rng = np.random.default_rng(seed=seed)
+            return rng.choice(group, size=n_val, replace=False)
+
         if stratify_workpiece_split:
             val_workpiece_ids = []
-            rng = np.random.default_rng(seed=seed)
             groups = (
                 workpiece_ids[workpiece_ids < simple_workpiece_id_offset],
                 workpiece_ids[workpiece_ids >= simple_workpiece_id_offset],
@@ -123,20 +137,13 @@ class TransitionTrajectoryDataset(BaseDataset):
             for group in groups:
                 if len(group) == 0:
                     continue
-                n_val = min(max(1, round(len(group) * val_ratio)), len(group) - 1)
-                if n_val <= 0:
-                    continue
-                val_workpiece_ids.append(rng.choice(group, size=n_val, replace=False))
+                val_workpiece_ids.append(select_val_workpieces(group))
             if len(val_workpiece_ids) == 0:
                 val_workpiece_ids = np.asarray([], dtype=workpiece_ids.dtype)
             else:
                 val_workpiece_ids = np.concatenate(val_workpiece_ids)
         else:
-            val_workpiece_mask = get_val_mask(
-                n_episodes=len(workpiece_ids),
-                val_ratio=val_ratio,
-                seed=seed)
-            val_workpiece_ids = workpiece_ids[val_workpiece_mask]
+            val_workpiece_ids = select_val_workpieces(workpiece_ids)
         val_mask = np.isin(episode_workpiece_ids, val_workpiece_ids)
         train_mask = ~val_mask
         return train_mask.astype(bool), val_mask.astype(bool)
@@ -157,6 +164,7 @@ class TransitionTrajectoryDataset(BaseDataset):
             split_by_workpiece=False,
             stratify_workpiece_split=False,
             simple_workpiece_id_offset=1000,
+            workpiece_split_strategy='random',
             ):
         super().__init__()
         self.task_name = task_name
@@ -176,7 +184,8 @@ class TransitionTrajectoryDataset(BaseDataset):
                 seed=seed,
                 split_by_workpiece=split_by_workpiece,
                 stratify_workpiece_split=stratify_workpiece_split,
-                simple_workpiece_id_offset=simple_workpiece_id_offset)
+                simple_workpiece_id_offset=simple_workpiece_id_offset,
+                workpiece_split_strategy=workpiece_split_strategy)
         else:
             train_mask, val_mask = split_masks
         train_mask = downsample_mask(

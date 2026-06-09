@@ -35,6 +35,7 @@ dataset:
   split_by_workpiece: true
   stratify_workpiece_split: true
   simple_workpiece_id_offset: 1000
+  workpiece_split_strategy: tail
   train_workpiece_ids: null
   val_workpiece_ids: null
   max_train_episodes: null
