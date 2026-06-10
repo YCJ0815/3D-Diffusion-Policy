@@ -23,8 +23,6 @@ isaacgym/
 nohup.out
 # Track curated training datasets under data/, but keep raw/intermediate files local.
 data/*
-!data/*.zarr/
-!data/*.zarr/**
 !data/*.zip
 !data/*.npz
 !data/*.npy
