@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
 import copy
+from pathlib import Path
 
 from typing import Optional, Dict, Tuple, Union, List, Type
 from termcolor import cprint
@@ -198,6 +199,118 @@ class PointNetEncoderXYZ(nn.Module):
         """
         self.input_pointcloud = input[0].detach()
 
+
+class PretrainedPointNetEncoderXYZ(nn.Module):
+    def __init__(
+            self,
+            in_channels: int = 3,
+            out_channels: int = 64,
+            pretrained_checkpoint_path: Optional[str] = None,
+            freeze_pretrained: bool = True,
+            **kwargs
+            ):
+        super().__init__()
+        if in_channels != 3:
+            raise ValueError(
+                f"PretrainedPointNetEncoderXYZ only supports 3-channel XYZ point clouds, got {in_channels}"
+            )
+        if out_channels != 64:
+            raise ValueError(
+                f"PretrainedPointNetEncoderXYZ requires out_channels=64 to match the pretrained projection head, got {out_channels}"
+            )
+        if not pretrained_checkpoint_path:
+            raise ValueError("pretrained_checkpoint_path must be provided for pretrained pointnet")
+
+        self.conv1 = nn.Conv1d(3, 64, kernel_size=1)
+        self.conv2 = nn.Conv1d(64, 128, kernel_size=1)
+        self.conv3 = nn.Conv1d(128, 1024, kernel_size=1)
+        self.bn1 = nn.BatchNorm1d(64)
+        self.bn2 = nn.BatchNorm1d(128)
+        self.bn3 = nn.BatchNorm1d(1024)
+        self.projection = nn.Linear(1024, 64)
+        self.projection_norm = nn.LayerNorm(64)
+
+        self.pretrained_checkpoint_path = str(pretrained_checkpoint_path)
+        self.freeze_pretrained = bool(freeze_pretrained)
+
+        self._load_pretrained_weights()
+        if self.freeze_pretrained:
+            for parameter in self.parameters():
+                parameter.requires_grad = False
+
+        cprint(
+            f"[PretrainedPointNetEncoderXYZ] checkpoint: {self.pretrained_checkpoint_path}",
+            "cyan",
+        )
+        cprint(
+            f"[PretrainedPointNetEncoderXYZ] frozen: {self.freeze_pretrained}",
+            "cyan",
+        )
+
+    @staticmethod
+    def _to_channel_first(point_cloud: torch.Tensor) -> torch.Tensor:
+        if point_cloud.ndim != 3:
+            raise ValueError(
+                "point_cloud must have shape [B, N, 3] or [B, 3, N], "
+                f"got {tuple(point_cloud.shape)}"
+            )
+        if point_cloud.shape[-1] == 3:
+            point_cloud = point_cloud.transpose(1, 2)
+        elif point_cloud.shape[1] != 3:
+            raise ValueError(
+                "point_cloud must have coordinate dimension 3, "
+                f"got {tuple(point_cloud.shape)}"
+            )
+        if point_cloud.shape[2] == 0:
+            raise ValueError("point_cloud must contain at least one point")
+        return point_cloud.contiguous()
+
+    def _load_pretrained_weights(self):
+        checkpoint_path = Path(self.pretrained_checkpoint_path)
+        if not checkpoint_path.is_file():
+            raise FileNotFoundError(
+                f"Pretrained pointnet checkpoint not found: {checkpoint_path}"
+            )
+
+        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        if "model_state_dict" not in checkpoint:
+            raise KeyError(
+                f"Checkpoint {checkpoint_path} does not contain `model_state_dict`."
+            )
+
+        source_state_dict = checkpoint["model_state_dict"]
+        point_encoder_prefix = "point_encoder."
+        point_encoder_state_dict = {
+            key[len(point_encoder_prefix):]: value
+            for key, value in source_state_dict.items()
+            if key.startswith(point_encoder_prefix)
+        }
+        if not point_encoder_state_dict:
+            raise KeyError(
+                f"Checkpoint {checkpoint_path} does not contain any `point_encoder.*` weights."
+            )
+
+        incompatible_keys = self.load_state_dict(point_encoder_state_dict, strict=True)
+        if incompatible_keys.missing_keys or incompatible_keys.unexpected_keys:
+            raise RuntimeError(
+                "Failed to strictly load pretrained pointnet weights. "
+                f"missing={incompatible_keys.missing_keys}, "
+                f"unexpected={incompatible_keys.unexpected_keys}"
+            )
+
+        cprint(
+            f"[PretrainedPointNetEncoderXYZ] loaded {len(point_encoder_state_dict)} tensors",
+            "cyan",
+        )
+
+    def forward(self, point_cloud: torch.Tensor) -> torch.Tensor:
+        x = self._to_channel_first(point_cloud)
+        x = F.relu(self.bn1(self.conv1(x)))
+        x = F.relu(self.bn2(self.conv2(x)))
+        x = self.bn3(self.conv3(x))
+        x = torch.max(x, dim=2).values
+        return F.relu(self.projection_norm(self.projection(x)))
+
     
 
 
@@ -253,6 +366,13 @@ class DP3Encoder(nn.Module):
             else:
                 pointcloud_encoder_cfg.in_channels = 3
                 self.extractor = PointNetEncoderXYZ(**pointcloud_encoder_cfg)
+        elif pointnet_type == "pointnet_pretrained_joint_collision_distance":
+            if use_pc_color:
+                raise ValueError(
+                    "pointnet_pretrained_joint_collision_distance does not support point cloud color input."
+                )
+            pointcloud_encoder_cfg.in_channels = 3
+            self.extractor = PretrainedPointNetEncoderXYZ(**pointcloud_encoder_cfg)
         else:
             raise NotImplementedError(f"pointnet_type: {pointnet_type}")
 

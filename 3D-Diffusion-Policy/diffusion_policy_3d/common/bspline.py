@@ -14,7 +14,7 @@ from diffusion_policy_3d.common.input_data import (
 )
 
 
-FREE_CONTROL_POINT_SLICE = slice(3, 13)
+FREE_CONTROL_POINT_SLICE = slice(2, 14)
 
 
 def _progress(iterable, **kwargs):
@@ -228,9 +228,9 @@ def fit_quintic_bspline_control_points(
         num_control_points=num_control_points,
         degree=degree,
     )
-    if num_control_points < 6:
+    if num_control_points < 4:
         raise ValueError(
-            f"num_control_points must be at least 6 to pin the first/last three control points, "
+            f"num_control_points must be at least 4 to pin the first/last two control points, "
             f"got {num_control_points}"
         )
 
@@ -238,15 +238,15 @@ def fit_quintic_bspline_control_points(
     end_state = normalized_trajectory[-1].astype(np.float64)
 
     control_points = np.empty((num_control_points, normalized_trajectory.shape[1]), dtype=np.float64)
-    control_points[:3] = start_state[None, :]
-    control_points[-3:] = end_state[None, :]
+    control_points[:2] = start_state[None, :]
+    control_points[-2:] = end_state[None, :]
 
-    num_free_control_points = num_control_points - 6
+    num_free_control_points = num_control_points - 4
     if num_free_control_points > 0:
         fixed_basis = np.concatenate(
             [
-                basis[:, :3].sum(axis=1, keepdims=True),
-                basis[:, -3:].sum(axis=1, keepdims=True),
+                basis[:, :2].sum(axis=1, keepdims=True),
+                basis[:, -2:].sum(axis=1, keepdims=True),
             ],
             axis=1,
         )
@@ -255,13 +255,13 @@ def fit_quintic_bspline_control_points(
             + fixed_basis[:, 1:] * end_state[None, :]
         )
         residual_targets = normalized_trajectory.astype(np.float64) - fixed_contribution
-        free_basis = basis[:, 3:-3]
+        free_basis = basis[:, 2:-2]
         free_control_points, _, _, _ = np.linalg.lstsq(
             free_basis,
             residual_targets,
             rcond=None,
         )
-        control_points[3:-3] = free_control_points
+        control_points[2:-2] = free_control_points
     return control_points.astype(np.float32), build_open_uniform_knot_vector(
         num_control_points=num_control_points,
         degree=degree,
@@ -279,17 +279,17 @@ def build_linear_control_points(
         raise ValueError(
             f"start_state and end_state must both have shape (6,), got {start_state.shape} and {end_state.shape}"
         )
-    if num_control_points < 6:
+    if num_control_points < 4:
         raise ValueError(
-            f"num_control_points must be at least 6 to pin the first/last three control points, "
+            f"num_control_points must be at least 4 to pin the first/last two control points, "
             f"got {num_control_points}"
         )
 
     control_points = np.empty((num_control_points, 6), dtype=np.float32)
-    control_points[:3] = start_state[None, :]
-    control_points[-3:] = end_state[None, :]
+    control_points[:2] = start_state[None, :]
+    control_points[-2:] = end_state[None, :]
 
-    num_free_control_points = num_control_points - 6
+    num_free_control_points = num_control_points - 4
     if num_free_control_points > 0:
         interpolation_weights = np.linspace(
             0.0,
@@ -297,7 +297,7 @@ def build_linear_control_points(
             num_free_control_points + 2,
             dtype=np.float32,
         )[1:-1]
-        control_points[3:-3] = (
+        control_points[2:-2] = (
             (1.0 - interpolation_weights[:, None]) * start_state[None, :]
             + interpolation_weights[:, None] * end_state[None, :]
         )
@@ -531,12 +531,12 @@ def unnormalize_joint_trajectory_with_urdf_limits(
 
 
 def _resolve_free_control_point_slice(num_control_points: int) -> slice:
-    if num_control_points < 6:
+    if num_control_points < 4:
         raise ValueError(
-            f"num_control_points must be at least 6 to pin the first/last three control points, "
+            f"num_control_points must be at least 4 to pin the first/last two control points, "
             f"got {num_control_points}"
         )
-    return slice(3, num_control_points - 3)
+    return slice(2, num_control_points - 2)
 
 
 def reconstruct_delta_w_from_normalized_free_residual(
