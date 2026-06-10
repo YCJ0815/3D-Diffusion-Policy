@@ -199,6 +199,16 @@ class TransitionTrajectoryDataset(BaseDataset):
             pad_before=pad_before,
             pad_after=pad_after,
             episode_mask=train_mask)
+        if len(self.sampler) == 0:
+            train_lengths = self.replay_buffer.episode_lengths[train_mask]
+            raise ValueError(
+                "TransitionTrajectoryDataset produced zero training windows. "
+                f"horizon={horizon}, pad_before={pad_before}, pad_after={pad_after}, "
+                f"selected_train_episodes={int(np.sum(train_mask))}, "
+                f"train_episode_lengths={train_lengths.tolist()}. "
+                "This usually means the selected episodes are shorter than the configured horizon, "
+                "or the split removed all usable episodes."
+            )
         self.train_mask = train_mask
         self.val_mask = val_mask
         self.horizon = horizon
@@ -214,6 +224,15 @@ class TransitionTrajectoryDataset(BaseDataset):
             pad_after=self.pad_after,
             episode_mask=self.val_mask
         )
+        if len(val_set.sampler) == 0:
+            val_lengths = self.replay_buffer.episode_lengths[self.val_mask]
+            raise ValueError(
+                "TransitionTrajectoryDataset produced zero validation windows. "
+                f"horizon={self.horizon}, pad_before={self.pad_before}, pad_after={self.pad_after}, "
+                f"selected_val_episodes={int(np.sum(self.val_mask))}, "
+                f"val_episode_lengths={val_lengths.tolist()}. "
+                "Reduce horizon, change the split, or rebuild the dataset with longer episodes."
+            )
         val_set.train_mask = self.val_mask
         val_set.val_mask = self.val_mask
         return val_set

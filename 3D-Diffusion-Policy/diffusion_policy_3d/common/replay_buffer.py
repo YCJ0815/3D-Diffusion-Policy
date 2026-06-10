@@ -96,6 +96,12 @@ class ReplayBuffer:
         assert('data' in root)
         assert('meta' in root)
         assert('episode_ends' in root['meta'])
+        if len(root['meta']['episode_ends']) == 0:
+            raise ValueError(
+                "ReplayBuffer received a zarr dataset with no episodes. "
+                "Check whether dataset building finished successfully and "
+                "whether any input trajectories were actually written."
+            )
         for key, value in root['data'].items():
             assert(value.shape[0] == root['meta']['episode_ends'][-1])
         self.root = root

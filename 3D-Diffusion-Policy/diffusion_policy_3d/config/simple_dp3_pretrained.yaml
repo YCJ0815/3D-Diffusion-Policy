@@ -101,6 +101,7 @@ training:
   seed: 42
   debug: False
   resume: True
+  resume_override_lr: null
   run_validation: True
   lr_scheduler: cosine
   lr_warmup_steps: 500

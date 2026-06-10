@@ -68,6 +68,14 @@ def _is_better_metric(value, best_value, mode, min_delta):
         return value > (best_value + min_delta)
     raise ValueError(f"Unsupported metric mode: {mode}")
 
+
+def _override_optimizer_lr(optimizer, lr: float):
+    lr = float(lr)
+    for param_group in optimizer.param_groups:
+        param_group["lr"] = lr
+        # Keep scheduler initialization consistent with the overridden LR.
+        param_group["initial_lr"] = lr
+
 class TrainDP3Workspace:
     include_keys = ['global_step', 'epoch']
     exclude_keys = tuple()
@@ -129,6 +137,14 @@ class TrainDP3Workspace:
             if lastest_ckpt_path.is_file():
                 print(f"Resuming from checkpoint {lastest_ckpt_path}")
                 self.load_checkpoint(path=lastest_ckpt_path)
+                resume_override_lr = OmegaConf.select(
+                    cfg, "training.resume_override_lr", default=None)
+                if resume_override_lr is not None:
+                    _override_optimizer_lr(self.optimizer, resume_override_lr)
+                    cprint(
+                        f"Overriding resumed optimizer lr to {float(resume_override_lr):.6g}",
+                        "yellow",
+                    )
 
         # configure dataset
         dataset: BaseDataset
