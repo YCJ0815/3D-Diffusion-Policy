@@ -237,6 +237,8 @@ class PretrainedPointNetEncoderXYZ(nn.Module):
         if self.freeze_pretrained:
             for parameter in self.parameters():
                 parameter.requires_grad = False
+            # Keep BatchNorm running stats frozen during outer policy training.
+            super().train(False)
 
         cprint(
             f"[PretrainedPointNetEncoderXYZ] checkpoint: {self.pretrained_checkpoint_path}",
@@ -246,6 +248,12 @@ class PretrainedPointNetEncoderXYZ(nn.Module):
             f"[PretrainedPointNetEncoderXYZ] frozen: {self.freeze_pretrained}",
             "cyan",
         )
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if self.freeze_pretrained:
+            super().train(False)
+        return self
 
     @staticmethod
     def _to_channel_first(point_cloud: torch.Tensor) -> torch.Tensor:
