@@ -207,6 +207,7 @@ class PretrainedPointNetEncoderXYZ(nn.Module):
             out_channels: int = 64,
             pretrained_checkpoint_path: Optional[str] = None,
             freeze_pretrained: bool = True,
+            unfreeze_last_layer: bool = False,
             **kwargs
             ):
         super().__init__()
@@ -232,13 +233,10 @@ class PretrainedPointNetEncoderXYZ(nn.Module):
 
         self.pretrained_checkpoint_path = str(pretrained_checkpoint_path)
         self.freeze_pretrained = bool(freeze_pretrained)
+        self.unfreeze_last_layer = bool(unfreeze_last_layer)
 
         self._load_pretrained_weights()
-        if self.freeze_pretrained:
-            for parameter in self.parameters():
-                parameter.requires_grad = False
-            # Keep BatchNorm running stats frozen during outer policy training.
-            super().train(False)
+        self._configure_trainable_parameters()
 
         cprint(
             f"[PretrainedPointNetEncoderXYZ] checkpoint: {self.pretrained_checkpoint_path}",
@@ -248,12 +246,45 @@ class PretrainedPointNetEncoderXYZ(nn.Module):
             f"[PretrainedPointNetEncoderXYZ] frozen: {self.freeze_pretrained}",
             "cyan",
         )
+        cprint(
+            f"[PretrainedPointNetEncoderXYZ] unfreeze_last_layer: {self.unfreeze_last_layer}",
+            "cyan",
+        )
 
     def train(self, mode: bool = True):
         super().train(mode)
         if self.freeze_pretrained:
-            super().train(False)
+            if self.unfreeze_last_layer:
+                self.conv1.train(False)
+                self.conv2.train(False)
+                self.conv3.train(False)
+                self.bn1.train(False)
+                self.bn2.train(False)
+                self.bn3.train(False)
+                self.projection.train(mode)
+                self.projection_norm.train(mode)
+            else:
+                super().train(False)
         return self
+
+    def _configure_trainable_parameters(self):
+        for parameter in self.parameters():
+            parameter.requires_grad = False
+
+        if self.freeze_pretrained:
+            if self.unfreeze_last_layer:
+                for module in (self.projection, self.projection_norm):
+                    for parameter in module.parameters():
+                        parameter.requires_grad = True
+                self.train(False)
+                self.projection.train(True)
+                self.projection_norm.train(True)
+            else:
+                # Keep BatchNorm running stats frozen during outer policy training.
+                super().train(False)
+        else:
+            for parameter in self.parameters():
+                parameter.requires_grad = True
 
     @staticmethod
     def _to_channel_first(point_cloud: torch.Tensor) -> torch.Tensor:

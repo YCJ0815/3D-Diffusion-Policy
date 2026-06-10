@@ -65,6 +65,7 @@ policy:
     out_channels: ${policy.encoder_output_dim}
     pretrained_checkpoint_path: /root/autodl-tmp/point-net/log/joint_collision_distance/all_jobs_compact/best_model.pth
     freeze_pretrained: true
+    unfreeze_last_layer: false
 
 ema:
   _target_: diffusion_policy_3d.model.diffusion.ema_model.EMAModel
