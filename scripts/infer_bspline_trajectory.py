@@ -57,7 +57,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--urdf-path", type=str, default=None)
     parser.add_argument("--trajectory-key", type=str, default="q_plan")
     parser.add_argument("--target-steps", type=int, default=64)
-    parser.add_argument("--num-control-points", type=int, default=16)
+    parser.add_argument("--num-control-points", type=int, default=12)
     parser.add_argument("--spline-degree", type=int, default=5)
     parser.add_argument("--use-poisson-disk", action="store_true")
     return parser
@@ -190,7 +190,7 @@ def main() -> None:
 
     pred_action_window = result["action"][0].detach().cpu().numpy().astype(np.float32)
     pred_action_horizon = result["action_pred"][0].detach().cpu().numpy().astype(np.float32)
-    expected_action_shape = (args.num_control_points - 6, 6)
+    expected_action_shape = (args.num_control_points - 4, 6)
     if pred_action_horizon.shape != expected_action_shape:
         raise ValueError(
             "Predicted normalized free control-point residual has incompatible shape. "

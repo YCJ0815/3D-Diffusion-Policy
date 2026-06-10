@@ -14,7 +14,7 @@ from diffusion_policy_3d.common.input_data import (
 )
 
 
-FREE_CONTROL_POINT_SLICE = slice(2, 14)
+FREE_CONTROL_POINT_SLICE = slice(2, 10)
 
 
 def _progress(iterable, **kwargs):
@@ -65,7 +65,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--num-control-points",
         type=int,
-        default=16,
+        default=12,
         help="Number of control points used for quintic B-spline fitting.",
     )
     return parser
@@ -208,7 +208,7 @@ def build_bspline_basis_matrix(
 
 def fit_quintic_bspline_control_points(
     normalized_trajectory: np.ndarray,
-    num_control_points: int = 16,
+    num_control_points: int = 12,
     degree: int = 5,
 ) -> tuple[np.ndarray, np.ndarray]:
     normalized_trajectory = np.asarray(normalized_trajectory, dtype=np.float32)
@@ -271,7 +271,7 @@ def fit_quintic_bspline_control_points(
 def build_linear_control_points(
     start_state: np.ndarray,
     end_state: np.ndarray,
-    num_control_points: int = 16,
+    num_control_points: int = 12,
 ) -> np.ndarray:
     start_state = np.asarray(start_state, dtype=np.float32).reshape(-1)
     end_state = np.asarray(end_state, dtype=np.float32).reshape(-1)
@@ -341,7 +341,7 @@ def fit_quintic_bspline_to_npz_trajectory(
     trajectory_key: str = "q_plan",
     target_steps: int = 64,
     urdf_path: str | None = None,
-    num_control_points: int = 16,
+    num_control_points: int = 12,
     degree: int = 5,
 ) -> dict[str, np.ndarray]:
     normalized_trajectory = build_normalized_resampled_joint_trajectory(
@@ -392,8 +392,8 @@ def fit_quintic_bspline_to_npz_trajectory(
 
 def extract_free_delta_w(delta_w: np.ndarray) -> np.ndarray:
     delta_w = np.asarray(delta_w, dtype=np.float32)
-    if delta_w.shape != (16, 6):
-        raise ValueError(f"delta_w must have shape (16, 6), got {delta_w.shape}")
+    if delta_w.shape != (12, 6):
+        raise ValueError(f"delta_w must have shape (12, 6), got {delta_w.shape}")
     return delta_w[FREE_CONTROL_POINT_SLICE].astype(np.float32)
 
 
@@ -402,7 +402,7 @@ def build_delta_w_stats_from_paths(
     trajectory_key: str = "q_plan",
     target_steps: int = 64,
     urdf_path: str | None = None,
-    num_control_points: int = 16,
+    num_control_points: int = 12,
     degree: int = 5,
     std_eps: float = 1e-6,
 ) -> dict[str, np.ndarray]:
@@ -451,7 +451,7 @@ def save_delta_w_stats(
     trajectory_key: str = "q_plan",
     target_steps: int = 64,
     urdf_path: str | None = None,
-    num_control_points: int = 16,
+    num_control_points: int = 12,
     degree: int = 5,
     std_eps: float = 1e-6,
 ) -> dict[str, np.ndarray]:
@@ -493,8 +493,8 @@ def normalize_delta_w(
     std: np.ndarray,
 ) -> np.ndarray:
     delta_w = np.asarray(delta_w, dtype=np.float32)
-    if delta_w.shape != (16, 6):
-        raise ValueError(f"delta_w must have shape (16, 6), got {delta_w.shape}")
+    if delta_w.shape != (12, 6):
+        raise ValueError(f"delta_w must have shape (12, 6), got {delta_w.shape}")
 
     mean = np.asarray(mean, dtype=np.float32)
     std = np.asarray(std, dtype=np.float32)
@@ -543,7 +543,7 @@ def reconstruct_delta_w_from_normalized_free_residual(
     normalized_free_delta_w: np.ndarray,
     mean: np.ndarray,
     std: np.ndarray,
-    num_control_points: int = 16,
+    num_control_points: int = 12,
 ) -> tuple[np.ndarray, np.ndarray]:
     free_slice = _resolve_free_control_point_slice(num_control_points)
     normalized_free_delta_w = np.asarray(normalized_free_delta_w, dtype=np.float32)
@@ -570,7 +570,7 @@ def reconstruct_control_points_from_normalized_free_residual(
     end_state: np.ndarray,
     mean: np.ndarray,
     std: np.ndarray,
-    num_control_points: int = 16,
+    num_control_points: int = 12,
 ) -> dict[str, np.ndarray]:
     normalized_delta_w, delta_w = reconstruct_delta_w_from_normalized_free_residual(
         normalized_free_delta_w=normalized_free_delta_w,
@@ -599,7 +599,7 @@ def reconstruct_trajectory_from_normalized_free_residual(
     end_state: np.ndarray,
     mean: np.ndarray,
     std: np.ndarray,
-    num_control_points: int = 16,
+    num_control_points: int = 12,
     num_steps: int = 64,
     degree: int = 5,
     knot_vector: np.ndarray | None = None,
@@ -628,7 +628,7 @@ def build_normalized_delta_w_from_npz(
     trajectory_key: str = "q_plan",
     target_steps: int = 64,
     urdf_path: str | None = None,
-    num_control_points: int = 16,
+    num_control_points: int = 12,
     degree: int = 5,
 ) -> dict[str, np.ndarray]:
     fit_result = fit_quintic_bspline_to_npz_trajectory(

@@ -28,11 +28,11 @@
 
 ```bash
 /Users/ycj/miniconda3/envs/pybullet/bin/python scripts/build_bspline_zarr.py \
-  --input-dirs data/raw_data/results data/raw_data/simple_results \
-  --jobs-root data/raw_data/jobs \
-  --simple-jobs-root data/raw_data/simple_jobs \
-  --output-zarr data/realdex_bspline_free10.zarr \
-  --stats-path data/raw_data/realdex_bspline_stats.npz \
+  --input-dirs /Volumes/research/outputs/data/results /Volumes/research/outputs/data/simple_results \
+  --jobs-root /Volumes/research/outputs/data/jobs \
+  --simple-jobs-root /Volumes/research/outputs/data/simple_jobs \
+  --output-zarr data/realdex_bspline_free12_most.zarr \
+  --stats-path data/raw_data/realdex_bspline_stats_free12_most.npz \
   --mesh-cache-dir data/cache/mesh_points \
   --bspline-cache-dir data/cache/bspline_artifacts \
   --reuse-stats-if-exists \

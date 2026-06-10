@@ -217,7 +217,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--num-control-points",
         type=int,
-        default=16,
+        default=12,
         help="Number of B-spline control points to predict residuals for.",
     )
     parser.add_argument("--urdf-path", type=str, default=None)

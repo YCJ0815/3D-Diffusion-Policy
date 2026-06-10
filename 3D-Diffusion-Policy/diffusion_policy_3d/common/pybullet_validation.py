@@ -276,7 +276,7 @@ class PyBulletValidationConfig:
     min_interpolated_steps_per_segment: int = 1
     goal_position_norm_m: float = 0.1
     goal_tolerance_m: float = 0.01
-    num_control_points: int = 16
+    num_control_points: int = 12
     spline_degree: int = 5
     target_steps: int = 64
     max_episodes: int | None = None
@@ -308,7 +308,7 @@ class PyBulletValidationConfig:
             min_interpolated_steps_per_segment=int(cfg.get("min_interpolated_steps_per_segment", 1)),
             goal_position_norm_m=float(cfg.get("goal_position_norm_m", 0.1)),
             goal_tolerance_m=float(cfg.get("goal_tolerance_m", 0.01)),
-            num_control_points=int(cfg.get("num_control_points", 16)),
+            num_control_points=int(cfg.get("num_control_points", 12)),
             spline_degree=int(cfg.get("spline_degree", 5)),
             target_steps=int(cfg.get("target_steps", 64)),
             max_episodes=cfg.get("max_episodes"),

@@ -140,7 +140,7 @@ training:
     min_interpolated_steps_per_segment: 1
     goal_position_norm_m: 0.1
     goal_tolerance_m: 0.01
-    num_control_points: 16
+    num_control_points: 12
     spline_degree: 5
     target_steps: 64
     max_episodes: null

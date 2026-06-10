@@ -2,7 +2,7 @@
 set -euo pipefail
 
 DEVICE="${1:-cuda:0}"
-STATS_PATH="${2:-data/raw_data/realdex_bspline_stats.npz}"
+STATS_PATH="${2:-data/raw_data/realdex_bspline_stats_free8.npz}"
 RUN_DIR="${3:-data/outputs/pybullet_eval_smoke}"
 
 cd "$(dirname "$0")/../3D-Diffusion-Policy"
@@ -10,11 +10,12 @@ cd "$(dirname "$0")/../3D-Diffusion-Policy"
 python train.py \
   --config-name=simple_dp3.yaml \
   task=realdex_transition \
-  task.dataset.zarr_path=data/realdex_bspline_free10.zarr \
+  task.dataset.zarr_path=data/realdex_bspline_free8.zarr \
   task.dataset.val_ratio=0.04 \
-  horizon=10 \
+  horizon=8 \
   n_obs_steps=1 \
-  n_action_steps=10 \
+  n_action_steps=8 \
+  training.pybullet_eval.num_control_points=12 \
   training.debug=False \
   training.resume=False \
   training.num_epochs=1 \
