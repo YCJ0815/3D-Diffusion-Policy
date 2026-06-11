@@ -113,6 +113,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Template used to resolve workpiece ids to job folder names.",
     )
     parser.add_argument(
+        "--sdf-out-of-bounds-value-m",
+        type=float,
+        default=1.0,
+        help=(
+            "Fallback SDF distance in meters for robot sample points outside the SDF grid. "
+            "Kept consistent with the collision feature builder defaults."
+        ),
+    )
+    parser.add_argument(
         "--max-workpieces",
         type=int,
         default=None,
