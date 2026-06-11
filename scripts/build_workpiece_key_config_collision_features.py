@@ -17,7 +17,10 @@ from diffusion_policy_3d.common.pybullet_validation import (  # noqa: E402
     PyBulletCollisionValidator,
     PyBulletValidationConfig,
     SDFGrid,
+    _default_urdf_path,
+    _load_joint_limits_from_urdf,
     _resolve_workpiece_file_path,
+    _rewrite_urdf_package_uris,
 )
 
 
@@ -78,12 +81,6 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.001,
         help="Safety distance threshold in meters for collision flag computation.",
-    )
-    parser.add_argument(
-        "--stats-path",
-        type=str,
-        default="data/raw_data/results/realdex_bspline_stats.npz",
-        help="Existing stats file required only to initialize the shared PyBullet validator.",
     )
     parser.add_argument(
         "--urdf-path",
@@ -225,7 +222,64 @@ class WorkpieceKeyConfigEvaluator(PyBulletCollisionValidator):
     ):
         self.jobs_sdf_root = str(pathlib.Path(jobs_sdf_root).expanduser().resolve())
         self.simple_sdf_root = str(pathlib.Path(simple_sdf_root).expanduser().resolve())
-        super().__init__(cfg)
+        self.cfg = cfg
+        if not self.cfg.enabled:
+            raise ValueError("WorkpieceKeyConfigEvaluator should only be created when enabled=True.")
+
+        try:
+            import pybullet as pb
+        except ModuleNotFoundError as exc:
+            raise ModuleNotFoundError(
+                "pybullet is required to build workpiece/key-configuration collision features."
+            ) from exc
+
+        self.pb = pb
+        self.client_id = pb.connect(pb.DIRECT)
+        resolved_urdf_path = self.cfg.urdf_path if self.cfg.urdf_path is not None else str(_default_urdf_path())
+        resolved_urdf_path = _rewrite_urdf_package_uris(
+            urdf_path=resolved_urdf_path,
+            package_roots=list(self.cfg.urdf_package_roots),
+        )
+        self.resolved_urdf_path = resolved_urdf_path
+        self.robot_id = pb.loadURDF(
+            resolved_urdf_path,
+            useFixedBase=True,
+            physicsClientId=self.client_id,
+        )
+        self.joint_names, self.joint_lower_limits, self.joint_upper_limits = _load_joint_limits_from_urdf(
+            self.cfg.urdf_path if self.cfg.urdf_path is not None else str(_default_urdf_path())
+        )
+        self.revolute_joint_indices = []
+        self.link_name_to_index = {}
+        for joint_idx in range(pb.getNumJoints(self.robot_id, physicsClientId=self.client_id)):
+            joint_info = pb.getJointInfo(self.robot_id, joint_idx, physicsClientId=self.client_id)
+            joint_type = joint_info[2]
+            child_link_name = joint_info[12].decode("utf-8")
+            self.link_name_to_index[child_link_name] = joint_idx
+            if joint_type == pb.JOINT_REVOLUTE:
+                self.revolute_joint_indices.append(joint_idx)
+        if len(self.revolute_joint_indices) != len(self.joint_names):
+            raise ValueError(
+                f"URDF revolute joint count mismatch: parsed {len(self.joint_names)} from XML, "
+                f"loaded {len(self.revolute_joint_indices)} in pybullet."
+            )
+        if self.cfg.tcp_link_name not in self.link_name_to_index:
+            raise KeyError(
+                f"TCP link `{self.cfg.tcp_link_name}` not found in URDF. "
+                f"Available links: {sorted(self.link_name_to_index.keys())}"
+            )
+        self.tcp_link_index = self.link_name_to_index[self.cfg.tcp_link_name]
+        if self.cfg.robot_surface_points_per_link <= 0:
+            raise ValueError(
+                "robot_surface_points_per_link must be positive, "
+                f"got {self.cfg.robot_surface_points_per_link}"
+            )
+        self.workpiece_cache = {}
+        self.sdf_cache = {}
+        self.robot_surface_points_by_link = self._build_robot_collision_surface_points(
+            resolved_urdf_path=self.resolved_urdf_path,
+            points_per_link=self.cfg.robot_surface_points_per_link,
+        )
 
     def _load_workpiece_sdf(self, workpiece_id: int):
         workpiece_id = int(workpiece_id)
@@ -286,7 +340,7 @@ def build_validator(args: argparse.Namespace) -> WorkpieceKeyConfigEvaluator:
 
     cfg = PyBulletValidationConfig(
         enabled=True,
-        stats_path=str(pathlib.Path(args.stats_path).expanduser().resolve()),
+        stats_path="unused_for_single_configuration_features",
         stats_mode="auto",
         jobs_root=str(jobs_root),
         simple_jobs_root=str(simple_jobs_root),
@@ -341,7 +395,6 @@ def build_manifest(
             else pathlib.Path(args.jobs_root).expanduser().resolve()
         ),
         "simple_sdf_root": str(pathlib.Path(args.simple_sdf_root).expanduser().resolve()),
-        "stats_path": str(pathlib.Path(args.stats_path).expanduser().resolve()),
         "d_safe_m": float(args.d_safe),
         "simple_workpiece_id_offset": int(args.simple_workpiece_id_offset),
         "workpiece_count": len(workpiece_table),
