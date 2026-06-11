@@ -124,7 +124,8 @@ def compute_metrics(
     unsafe_ratio_global = float(unsafe.mean())
 
     # --- 3 & 4. signed clearance types ---
-    signed_clearance = features[:, :, 2].copy()
+    # Dim 2 is safety_flag (binary). Reconstruct signed_clearance from dim 1 + d_safe.
+    signed_clearance = d_min - d_safe
     near = np.abs(signed_clearance) <= clearance_near_m
     safe = signed_clearance > clearance_near_m
     unsafe_sdf = signed_clearance < -clearance_near_m

@@ -510,9 +510,9 @@ def build_manifest(
         "feature_layout": {
             "0": "collision_flag_float32",
             "1": "d_min_m_float32",
-            "2": "signed_clearance_m_float32",
+            "2": "safety_flag_float32",
         },
-        "collision_rule": "mesh_collision OR d_min < d_safe",
+        "collision_rule": "unsafe = mesh_collision OR d_min <= d_safe",
         "key_config_manifest_created_at_utc": key_manifest.get("created_at_utc"),
     }
 
@@ -612,7 +612,8 @@ def main() -> None:
                 )
                 features[workpiece_idx, key_idx, 0] = np.float32(collision_flag)
                 features[workpiece_idx, key_idx, 1] = np.float32(d_min)
-                features[workpiece_idx, key_idx, 2] = np.float32(d_min - float(args.d_safe))
+                safety_flag = int(collision_flag > 0.5) or int(d_min <= float(args.d_safe))
+                features[workpiece_idx, key_idx, 2] = np.float32(safety_flag)
                 evaluated_count += 1
                 collision_count += int(collision_flag > 0.5)
                 workpiece_collision_count += int(collision_flag > 0.5)
