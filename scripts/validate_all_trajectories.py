@@ -405,8 +405,17 @@ def main() -> None:
 
             # Progress
             if (idx + 1) % max(1, len(val_episode_indices) // 10) == 0 or idx == 0:
-                print(f"  [{idx + 1}/{len(val_episode_indices)}] "
-                      f"collision_rate_so_far={collision_count / (idx + 1):.3f}")
+                traj_collision_rate_so_far = collision_count / (idx + 1)
+                step_collision_rate_so_far = (
+                    total_segment_collision_steps / total_segment_steps
+                    if total_segment_steps > 0
+                    else 0.0
+                )
+                print(
+                    f"  [{idx + 1}/{len(val_episode_indices)}] "
+                    f"traj_collision_rate_so_far={traj_collision_rate_so_far:.3f} "
+                    f"step_collision_rate_so_far={step_collision_rate_so_far:.3f}"
+                )
 
     # ---- cleanup ----
     runner.close()
