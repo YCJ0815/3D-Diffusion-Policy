@@ -1,0 +1,422 @@
+import argparse
+import json
+import pathlib
+import re
+import sys
+from datetime import datetime, timezone
+
+import numpy as np
+
+
+PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[1]
+PACKAGE_ROOT = PROJECT_ROOT / "3D-Diffusion-Policy"
+if str(PACKAGE_ROOT) not in sys.path:
+    sys.path.insert(0, str(PACKAGE_ROOT))
+
+from diffusion_policy_3d.common.pybullet_validation import (  # noqa: E402
+    PyBulletCollisionValidator,
+    PyBulletValidationConfig,
+    SDFGrid,
+    _resolve_workpiece_file_path,
+)
+
+
+JOB_DIR_PATTERN = re.compile(r"^job_(\d{3})$")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Build workpiece-level collision and minimum-distance features for "
+            "all key joint configurations."
+        )
+    )
+    parser.add_argument(
+        "--key-config-dir",
+        type=str,
+        default="analysis_outputs/key_joint_configurations_fps",
+        help="Directory containing key joint configuration artifacts from stage two.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="analysis_outputs/workpiece_key_config_collision_features",
+        help="Directory to save workpiece/key-configuration features.",
+    )
+    parser.add_argument(
+        "--jobs-root",
+        type=str,
+        default="data/raw_data/jobs",
+        help="Directory containing regular workpiece STL folders.",
+    )
+    parser.add_argument(
+        "--simple-jobs-root",
+        type=str,
+        default="data/raw_data/simple_jobs",
+        help="Directory containing simple workpiece STL folders.",
+    )
+    parser.add_argument(
+        "--jobs-sdf-root",
+        type=str,
+        default=None,
+        help="Optional override for regular workpiece SDF folders. Defaults to --jobs-root.",
+    )
+    parser.add_argument(
+        "--simple-sdf-root",
+        type=str,
+        required=True,
+        help="External directory containing simple workpiece SDF folders.",
+    )
+    parser.add_argument(
+        "--simple-workpiece-id-offset",
+        type=int,
+        default=1000,
+        help="Offset used to encode simple workpiece ids.",
+    )
+    parser.add_argument(
+        "--d-safe",
+        type=float,
+        default=0.001,
+        help="Safety distance threshold in meters for collision flag computation.",
+    )
+    parser.add_argument(
+        "--stats-path",
+        type=str,
+        default="data/raw_data/results/realdex_bspline_stats.npz",
+        help="Existing stats file required only to initialize the shared PyBullet validator.",
+    )
+    parser.add_argument(
+        "--urdf-path",
+        type=str,
+        default=None,
+        help="Optional robot URDF path.",
+    )
+    parser.add_argument(
+        "--urdf-package-roots",
+        type=str,
+        nargs="+",
+        default=["config/robot-model"],
+        help="Package roots used to resolve URDF mesh URIs.",
+    )
+    parser.add_argument(
+        "--tcp-link-name",
+        type=str,
+        default="tool0",
+        help="TCP link name in the URDF.",
+    )
+    parser.add_argument(
+        "--stl-x-offset-m",
+        type=float,
+        default=0.5,
+        help="Translation applied to workpiece STL bodies in PyBullet.",
+    )
+    parser.add_argument(
+        "--robot-surface-points-per-link",
+        type=int,
+        default=256,
+        help="Number of deterministic robot collision surface points retained per link.",
+    )
+    parser.add_argument(
+        "--workpiece-filename",
+        type=str,
+        default="workpiece.stl",
+        help="Workpiece mesh filename inside each job directory.",
+    )
+    parser.add_argument(
+        "--sdf-filename",
+        type=str,
+        default="workpiece_sdf.npz",
+        help="Workpiece SDF filename inside each SDF directory.",
+    )
+    parser.add_argument(
+        "--job-name-template",
+        type=str,
+        default="job_{workpiece_id:03d}",
+        help="Template used to resolve workpiece ids to job folder names.",
+    )
+    return parser
+
+
+def ensure_dir(path: pathlib.Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+
+
+def load_key_config_artifacts(key_config_dir: pathlib.Path) -> tuple[np.ndarray, np.ndarray, dict]:
+    raw_path = key_config_dir / "key_joint_configurations_raw.npy"
+    idx_path = key_config_dir / "key_joint_configuration_indices.npy"
+    manifest_path = key_config_dir / "manifest.json"
+    missing = [
+        path.name
+        for path in (raw_path, idx_path, manifest_path)
+        if not path.exists()
+    ]
+    if missing:
+        raise FileNotFoundError(
+            f"Missing required key-configuration artifacts in {key_config_dir}: {missing}"
+        )
+
+    key_configs_raw = np.asarray(np.load(raw_path), dtype=np.float32)
+    key_config_indices = np.asarray(np.load(idx_path), dtype=np.int64).reshape(-1)
+    with open(manifest_path, "r", encoding="utf-8") as f:
+        key_manifest = json.load(f)
+
+    if key_configs_raw.ndim != 2 or key_configs_raw.shape[1] != 6:
+        raise ValueError(
+            f"key_joint_configurations_raw.npy must have shape [K, 6], got {key_configs_raw.shape}"
+        )
+    if key_config_indices.shape[0] != key_configs_raw.shape[0]:
+        raise ValueError(
+            "key configuration index count must match key configuration count, "
+            f"got {key_config_indices.shape[0]} and {key_configs_raw.shape[0]}"
+        )
+    return key_configs_raw, key_config_indices, key_manifest
+
+
+def list_canonical_job_dirs(root: pathlib.Path) -> list[tuple[int, str, pathlib.Path]]:
+    if not root.exists():
+        raise FileNotFoundError(f"Workpiece root does not exist: {root}")
+    entries: list[tuple[int, str, pathlib.Path]] = []
+    for path in sorted(root.iterdir()):
+        if not path.is_dir():
+            continue
+        match = JOB_DIR_PATTERN.fullmatch(path.name)
+        if match is None:
+            continue
+        local_id = int(match.group(1))
+        entries.append((local_id, path.name, path.resolve()))
+    return entries
+
+
+def build_workpiece_table(
+    jobs_root: pathlib.Path,
+    simple_jobs_root: pathlib.Path,
+    simple_workpiece_id_offset: int,
+) -> list[dict[str, object]]:
+    table: list[dict[str, object]] = []
+    for local_id, name, path in list_canonical_job_dirs(jobs_root):
+        table.append(
+            {
+                "workpiece_id": int(local_id),
+                "local_id": int(local_id),
+                "name": name,
+                "type": "regular",
+                "job_dir": path,
+            }
+        )
+    for local_id, name, path in list_canonical_job_dirs(simple_jobs_root):
+        table.append(
+            {
+                "workpiece_id": int(simple_workpiece_id_offset + local_id),
+                "local_id": int(local_id),
+                "name": name,
+                "type": "simple",
+                "job_dir": path,
+            }
+        )
+    return table
+
+
+class WorkpieceKeyConfigEvaluator(PyBulletCollisionValidator):
+    def __init__(
+        self,
+        cfg: PyBulletValidationConfig,
+        jobs_sdf_root: str,
+        simple_sdf_root: str,
+    ):
+        self.jobs_sdf_root = str(pathlib.Path(jobs_sdf_root).expanduser().resolve())
+        self.simple_sdf_root = str(pathlib.Path(simple_sdf_root).expanduser().resolve())
+        super().__init__(cfg)
+
+    def _load_workpiece_sdf(self, workpiece_id: int):
+        workpiece_id = int(workpiece_id)
+        if workpiece_id in self.sdf_cache:
+            return self.sdf_cache[workpiece_id]
+        sdf_path = _resolve_workpiece_file_path(
+            workpiece_id=workpiece_id,
+            jobs_root=self.jobs_sdf_root,
+            simple_jobs_root=self.simple_sdf_root,
+            simple_workpiece_id_offset=self.cfg.simple_workpiece_id_offset,
+            job_name_template=self.cfg.job_name_template,
+            filename=self.cfg.sdf_filename,
+            file_label="SDF",
+        )
+        sdf_grid = self.sdf_cache[workpiece_id] = SDFGrid.load(
+            sdf_path,
+            out_of_bounds_value_m=self.cfg.sdf_out_of_bounds_value_m,
+        )
+        return sdf_grid
+
+    def evaluate_single_configuration(
+        self,
+        workpiece_id: int,
+        joint_state: np.ndarray,
+        d_safe: float,
+    ) -> tuple[float, float]:
+        workpiece_body_id = self._load_workpiece_body(workpiece_id)
+        sdf_grid = self._load_workpiece_sdf(workpiece_id)
+        joint_state = np.asarray(joint_state, dtype=np.float32).reshape(-1)
+        self._set_robot_joints(joint_state)
+        self.pb.performCollisionDetection(physicsClientId=self.client_id)
+        contacts = self.pb.getClosestPoints(
+            bodyA=self.robot_id,
+            bodyB=workpiece_body_id,
+            distance=0.0,
+            physicsClientId=self.client_id,
+        )
+        mesh_collision = bool(len(contacts) > 0)
+        d_min = float(self._min_sdf_distance_for_current_robot_state(sdf_grid))
+        if np.isnan(d_min):
+            raise ValueError(
+                f"SDF query returned NaN for workpiece_id={workpiece_id}. "
+                "This likely means all robot collision sample points fell outside the SDF bounds."
+            )
+        collision_flag = float(mesh_collision or (d_min < float(d_safe)))
+        return collision_flag, d_min
+
+
+def build_validator(args: argparse.Namespace) -> WorkpieceKeyConfigEvaluator:
+    jobs_root = pathlib.Path(args.jobs_root).expanduser().resolve()
+    simple_jobs_root = pathlib.Path(args.simple_jobs_root).expanduser().resolve()
+    jobs_sdf_root = pathlib.Path(args.jobs_sdf_root).expanduser().resolve() if args.jobs_sdf_root else jobs_root
+    simple_sdf_root = pathlib.Path(args.simple_sdf_root).expanduser().resolve()
+    if not simple_sdf_root.exists():
+        raise FileNotFoundError(f"simple_sdf_root does not exist: {simple_sdf_root}")
+    if not jobs_sdf_root.exists():
+        raise FileNotFoundError(f"jobs_sdf_root does not exist: {jobs_sdf_root}")
+
+    cfg = PyBulletValidationConfig(
+        enabled=True,
+        stats_path=str(pathlib.Path(args.stats_path).expanduser().resolve()),
+        stats_mode="auto",
+        jobs_root=str(jobs_root),
+        simple_jobs_root=str(simple_jobs_root),
+        simple_workpiece_id_offset=int(args.simple_workpiece_id_offset),
+        job_name_template=str(args.job_name_template),
+        workpiece_filename=str(args.workpiece_filename),
+        urdf_path=args.urdf_path,
+        urdf_package_roots=tuple(args.urdf_package_roots),
+        tcp_link_name=str(args.tcp_link_name),
+        stl_x_offset_m=float(args.stl_x_offset_m),
+        collision_distance_threshold=0.0,
+        interpolate_for_collision=False,
+        max_joint_step_rad=0.01,
+        min_interpolated_steps_per_segment=1,
+        goal_position_norm_m=0.1,
+        goal_tolerance_m=0.01,
+        num_control_points=12,
+        spline_degree=5,
+        target_steps=64,
+        max_episodes=None,
+        sdf_filename=str(args.sdf_filename),
+        sdf_required=True,
+        robot_surface_points_per_link=int(args.robot_surface_points_per_link),
+        sdf_out_of_bounds_value_m=None,
+        log_legacy_pybullet_metrics=False,
+    )
+    return WorkpieceKeyConfigEvaluator(
+        cfg=cfg,
+        jobs_sdf_root=str(jobs_sdf_root),
+        simple_sdf_root=str(simple_sdf_root),
+    )
+
+
+def build_manifest(
+    args: argparse.Namespace,
+    output_dir: pathlib.Path,
+    workpiece_table: list[dict[str, object]],
+    key_configs_raw: np.ndarray,
+    key_manifest: dict,
+) -> dict[str, object]:
+    regular_count = sum(1 for item in workpiece_table if item["type"] == "regular")
+    simple_count = sum(1 for item in workpiece_table if item["type"] == "simple")
+    return {
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "key_config_dir": str(pathlib.Path(args.key_config_dir).expanduser().resolve()),
+        "output_dir": str(output_dir.resolve()),
+        "jobs_root": str(pathlib.Path(args.jobs_root).expanduser().resolve()),
+        "simple_jobs_root": str(pathlib.Path(args.simple_jobs_root).expanduser().resolve()),
+        "jobs_sdf_root": str(
+            pathlib.Path(args.jobs_sdf_root).expanduser().resolve()
+            if args.jobs_sdf_root
+            else pathlib.Path(args.jobs_root).expanduser().resolve()
+        ),
+        "simple_sdf_root": str(pathlib.Path(args.simple_sdf_root).expanduser().resolve()),
+        "stats_path": str(pathlib.Path(args.stats_path).expanduser().resolve()),
+        "d_safe_m": float(args.d_safe),
+        "simple_workpiece_id_offset": int(args.simple_workpiece_id_offset),
+        "workpiece_count": len(workpiece_table),
+        "regular_workpiece_count": regular_count,
+        "simple_workpiece_count": simple_count,
+        "num_key_configs": int(key_configs_raw.shape[0]),
+        "feature_shape": [len(workpiece_table), int(key_configs_raw.shape[0]), 2],
+        "feature_layout": {
+            "0": "collision_flag_float32",
+            "1": "d_min_m_float32",
+        },
+        "collision_rule": "mesh_collision OR d_min < d_safe",
+        "key_config_manifest_created_at_utc": key_manifest.get("created_at_utc"),
+    }
+
+
+def main() -> None:
+    args = build_parser().parse_args()
+    if args.d_safe < 0:
+        raise ValueError(f"d_safe must be non-negative, got {args.d_safe}")
+
+    key_config_dir = pathlib.Path(args.key_config_dir).expanduser().resolve()
+    output_dir = pathlib.Path(args.output_dir).expanduser().resolve()
+    ensure_dir(output_dir)
+
+    key_configs_raw, key_config_indices, key_manifest = load_key_config_artifacts(key_config_dir)
+    workpiece_table = build_workpiece_table(
+        jobs_root=pathlib.Path(args.jobs_root).expanduser().resolve(),
+        simple_jobs_root=pathlib.Path(args.simple_jobs_root).expanduser().resolve(),
+        simple_workpiece_id_offset=int(args.simple_workpiece_id_offset),
+    )
+    if not workpiece_table:
+        raise ValueError("No canonical workpiece directories were found.")
+
+    validator = build_validator(args)
+    try:
+        features = np.empty((len(workpiece_table), key_configs_raw.shape[0], 2), dtype=np.float32)
+        for workpiece_idx, item in enumerate(workpiece_table):
+            workpiece_id = int(item["workpiece_id"])
+            for key_idx, joint_state in enumerate(key_configs_raw):
+                collision_flag, d_min = validator.evaluate_single_configuration(
+                    workpiece_id=workpiece_id,
+                    joint_state=joint_state,
+                    d_safe=float(args.d_safe),
+                )
+                features[workpiece_idx, key_idx, 0] = np.float32(collision_flag)
+                features[workpiece_idx, key_idx, 1] = np.float32(d_min)
+    finally:
+        validator.close()
+
+    workpiece_ids = np.asarray([int(item["workpiece_id"]) for item in workpiece_table], dtype=np.int64)
+    workpiece_types = np.asarray([str(item["type"]) for item in workpiece_table], dtype="<U16")
+    workpiece_names = np.asarray([str(item["name"]) for item in workpiece_table], dtype="<U64")
+
+    np.save(output_dir / "workpiece_key_config_features.npy", features)
+    np.save(output_dir / "workpiece_ids.npy", workpiece_ids)
+    np.save(output_dir / "workpiece_types.npy", workpiece_types)
+    np.save(output_dir / "workpiece_names.npy", workpiece_names)
+    np.save(output_dir / "key_config_indices.npy", key_config_indices.astype(np.int64))
+
+    manifest = build_manifest(
+        args=args,
+        output_dir=output_dir,
+        workpiece_table=workpiece_table,
+        key_configs_raw=key_configs_raw,
+        key_manifest=key_manifest,
+    )
+    with open(output_dir / "manifest.json", "w", encoding="utf-8") as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=2)
+
+    print(f"workpiece_count: {len(workpiece_table)}")
+    print(f"num_key_configs: {key_configs_raw.shape[0]}")
+    print(f"feature_shape: {features.shape}")
+    print(f"saved_output_dir: {output_dir}")
+
+
+if __name__ == "__main__":
+    main()

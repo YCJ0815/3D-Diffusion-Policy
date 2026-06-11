@@ -6,8 +6,6 @@ import tempfile
 import xml.etree.ElementTree as ET
 
 import numpy as np
-import torch
-
 from diffusion_policy_3d.common.bspline import (
     load_delta_w_stats,
     reconstruct_trajectory_from_normalized_free_residual,
@@ -798,6 +796,8 @@ class PyBulletValidationRunner:
         n_obs_steps: int,
         device: torch.device,
     ) -> tuple[dict[str, torch.Tensor], dict[str, np.ndarray]]:
+        import torch
+
         episode_ends = np.asarray(replay_buffer.episode_ends[:], dtype=np.int64)
         start_idx, end_idx = _episode_bounds(episode_ends, episode_idx)
         episode_length = end_idx - start_idx
@@ -825,6 +825,8 @@ class PyBulletValidationRunner:
         n_obs_steps: int,
         device: torch.device,
     ) -> dict[str, float]:
+        import torch
+
         if "workpiece_ids" not in replay_buffer.meta:
             raise KeyError(
                 "PyBullet validation requires `meta/workpiece_ids` in the zarr dataset. "
