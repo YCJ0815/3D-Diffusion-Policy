@@ -63,7 +63,7 @@ policy:
   pointcloud_encoder_cfg:
     in_channels: 3
     out_channels: ${policy.encoder_output_dim}
-    pretrained_checkpoint_path: /root/autodl-tmp/point-net/log/joint_collision_distance/all_jobs_compact/best_model.pth
+    pretrained_checkpoint_path: /root/autodl-tmp/point-net/log/joint_collision_distance/0610/best_model.pth
     freeze_pretrained: true
     unfreeze_last_layer: false
 
