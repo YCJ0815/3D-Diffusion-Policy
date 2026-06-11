@@ -357,11 +357,14 @@ def load_trajectory_paths(
             for root in scan_roots
             if (root / candidate).exists()
         ]
-        if len(matches) != 1:
+        if len(matches) == 0:
             raise ValueError(
-                f"Could not uniquely resolve source trajectory {serialized_path!r}; "
-                f"matches={matches}. Use --results-dir and --simple-results-dir."
+                f"Could not resolve source trajectory {serialized_path!r} in any scan root."
             )
+        if len(matches) > 1:
+            # When path exists in both results_dir and simple_results_dir,
+            # prefer results_dir (first scan root).
+            matches = [matches[0]]
         resolved_paths.append(matches[0])
     return resolved_paths, results_dir, simple_results_dir
 

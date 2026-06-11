@@ -509,10 +509,11 @@ def build_manifest(
         "regular_workpiece_count": regular_count,
         "simple_workpiece_count": simple_count,
         "num_key_configs": int(key_configs_raw.shape[0]),
-        "feature_shape": [len(workpiece_table), int(key_configs_raw.shape[0]), 2],
+        "feature_shape": [len(workpiece_table), int(key_configs_raw.shape[0]), 3],
         "feature_layout": {
             "0": "collision_flag_float32",
             "1": "d_min_m_float32",
+            "2": "signed_clearance_m_float32",
         },
         "collision_rule": "mesh_collision OR d_min < d_safe",
         "key_config_manifest_created_at_utc": key_manifest.get("created_at_utc"),
@@ -539,7 +540,7 @@ def main() -> None:
 
     validator = build_validator(args)
     try:
-        features = np.empty((len(workpiece_table), key_configs_raw.shape[0], 2), dtype=np.float32)
+        features = np.empty((len(workpiece_table), key_configs_raw.shape[0], 3), dtype=np.float32)
         total_evaluations = len(workpiece_table) * key_configs_raw.shape[0]
         evaluated_count = 0
         collision_count = 0
@@ -569,6 +570,7 @@ def main() -> None:
                 )
                 features[workpiece_idx, key_idx, 0] = np.float32(collision_flag)
                 features[workpiece_idx, key_idx, 1] = np.float32(d_min)
+                features[workpiece_idx, key_idx, 2] = np.float32(d_min - float(args.d_safe))
                 evaluated_count += 1
                 collision_count += int(collision_flag > 0.5)
                 workpiece_collision_count += int(collision_flag > 0.5)
