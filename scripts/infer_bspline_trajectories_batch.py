@@ -138,15 +138,16 @@ def resolve_matching_stl(
             if candidate_path.is_file():
                 return candidate_path
 
-        raise FileNotFoundError(
-            f"Unable to resolve the matching STL for NPZ {npz_path}. Tried: {[str(path) for path in candidate_paths]}"
-        )
-
     if fallback_stl_path is not None:
         candidate_path = pathlib.Path(fallback_stl_path).expanduser().resolve()
         if candidate_path.is_file():
             return candidate_path
         raise FileNotFoundError(f"Fallback STL path does not exist: {candidate_path}")
+
+    if candidate_paths:
+        raise FileNotFoundError(
+            f"Unable to resolve the matching STL for NPZ {npz_path}. Tried: {[str(path) for path in candidate_paths]}"
+        )
 
     raise FileNotFoundError(f"Unable to resolve STL for NPZ {npz_path}.")
 
