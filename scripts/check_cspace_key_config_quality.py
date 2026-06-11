@@ -84,7 +84,7 @@ def load_data(input_dir: pathlib.Path) -> dict:
     with open(manifest_path, "r", encoding="utf-8") as f:
         manifest = json.load(f)
 
-    if features.ndim != 3 or features.shape[2] != 3:
+    if features.ndim != 3 or features.shape[2] != 2:
         raise ValueError(f"Expected features shape (W, K, 2), got {features.shape}")
 
     ids_path = input_dir / "workpiece_ids.npy"
@@ -118,22 +118,12 @@ def compute_metrics(
     mesh_col_ratio_wp = collision_flags.mean(axis=1)
     mesh_col_ratio_global = float(collision_flags.mean())
 
-    # --- 2. unsafe_ratio (from dim 2: safety_flag) ---
-    safety_flag = features[:, :, 2].copy()
-    unsafe_ratio_wp = safety_flag.mean(axis=1).astype(np.float64)
-    unsafe_ratio_global = float(safety_flag.mean())
-
-    # Validate dim 2 consistency: safety_flag == (collision_flag > 0.5) | (d_min <= d_safe)
-    expected_safety = (collision_flags > 0.5) | (d_min <= d_safe)
-    dim2_inconsistent = np.any(safety_flag.astype(bool) != expected_safety)
-    if dim2_inconsistent:
-        n_mismatch = int(np.sum(safety_flag.astype(bool) != expected_safety))
-        total = safety_flag.size
-        print(f"[WARN] Dim 2 (safety_flag) inconsistent with (collision_flag | d_min <= d_safe): "
-              f"{n_mismatch}/{total} mismatches")
+    # --- 2. unsafe_ratio = mesh_collision OR (d_min <= d_safe) ---
+    unsafe = (collision_flags > 0.5) | (d_min <= d_safe)
+    unsafe_ratio_wp = unsafe.mean(axis=1).astype(np.float64)
+    unsafe_ratio_global = float(unsafe.mean())
 
     # --- 3 & 4. signed clearance types ---
-    # Dim 2 is safety_flag (binary). Reconstruct signed_clearance from dim 1 + d_safe.
     signed_clearance = d_min - d_safe
     near = np.abs(signed_clearance) <= clearance_near_m
     safe = signed_clearance > clearance_near_m
