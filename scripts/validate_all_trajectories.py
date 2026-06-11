@@ -99,6 +99,24 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Override dataset horizon (default: from checkpoint cfg.task.dataset.horizon or cfg.horizon).",
     )
+    parser.add_argument(
+        "--jobs-root",
+        type=str,
+        default=None,
+        help=(
+            "Override the regular workpiece STL root used by PyBullet validation. "
+            "Expected layout: <jobs-root>/job_xxx/workpiece.stl"
+        ),
+    )
+    parser.add_argument(
+        "--simple-jobs-root",
+        type=str,
+        default=None,
+        help=(
+            "Override the simple workpiece STL root used by PyBullet validation. "
+            "Expected layout: <simple-jobs-root>/job_xxx/workpiece.stl"
+        ),
+    )
     return parser
 
 
@@ -150,6 +168,8 @@ def _build_pybullet_config(
     workspace: TrainDP3Workspace,
     stats_path: str,
     num_control_points: int,
+    jobs_root: Optional[str] = None,
+    simple_jobs_root: Optional[str] = None,
 ) -> PyBulletValidationConfig:
     """Build PyBulletValidationConfig, seeding from the checkpoint and overriding with CLI."""
     from omegaconf import OmegaConf
@@ -159,8 +179,12 @@ def _build_pybullet_config(
         enabled=True,
         stats_path=stats_path,
         stats_mode=str(pyb_cfg_raw.get("stats_mode", "auto")),
-        jobs_root=str(pyb_cfg_raw.get("jobs_root", "data/raw_data/jobs")),
-        simple_jobs_root=pyb_cfg_raw.get("simple_jobs_root", "data/raw_data/simple_jobs"),
+        jobs_root=str(jobs_root if jobs_root is not None else pyb_cfg_raw.get("jobs_root", "data/raw_data/jobs")),
+        simple_jobs_root=(
+            simple_jobs_root
+            if simple_jobs_root is not None
+            else pyb_cfg_raw.get("simple_jobs_root", "data/raw_data/simple_jobs")
+        ),
         simple_workpiece_id_offset=int(pyb_cfg_raw.get("simple_workpiece_id_offset", 1000)),
         job_name_template=str(pyb_cfg_raw.get("job_name_template", "job_{workpiece_id:03d}")),
         workpiece_filename=str(pyb_cfg_raw.get("workpiece_filename", "workpiece.stl")),
@@ -289,9 +313,13 @@ def main() -> None:
         workspace=workspace,
         stats_path=str(stats_path),
         num_control_points=args.num_control_points,
+        jobs_root=args.jobs_root,
+        simple_jobs_root=args.simple_jobs_root,
     )
     print(f"  num_control_points={pyb_cfg.num_control_points}")
     print(f"  stats_mode={pyb_cfg.stats_mode}")
+    print(f"  jobs_root={pyb_cfg.jobs_root}")
+    print(f"  simple_jobs_root={pyb_cfg.simple_jobs_root}")
     runner = PyBulletValidationRunner(pyb_cfg)
     validator = runner.validator
 
