@@ -428,12 +428,9 @@ class WorkpieceKeyConfigEvaluator(PyBulletCollisionValidator):
 def build_validator(args: argparse.Namespace) -> WorkpieceKeyConfigEvaluator:
     jobs_root = pathlib.Path(args.jobs_root).expanduser().resolve()
     simple_jobs_root = pathlib.Path(args.simple_jobs_root).expanduser().resolve()
-    jobs_sdf_root = pathlib.Path(args.jobs_sdf_root).expanduser().resolve() if args.jobs_sdf_root else jobs_root
+    # jobs_sdf_root and simple_sdf_root already validated during SDF filtering above
     simple_sdf_root = pathlib.Path(args.simple_sdf_root).expanduser().resolve()
-    if not simple_sdf_root.exists():
-        raise FileNotFoundError(f"simple_sdf_root does not exist: {simple_sdf_root}")
-    if not jobs_sdf_root.exists():
-        raise FileNotFoundError(f"jobs_sdf_root does not exist: {jobs_sdf_root}")
+    jobs_sdf_root = pathlib.Path(args.jobs_sdf_root).expanduser().resolve() if args.jobs_sdf_root else jobs_root
 
     cfg = PyBulletValidationConfig(
         enabled=True,
@@ -520,6 +517,34 @@ def build_manifest(
     }
 
 
+
+def filter_workpieces_with_sdf(
+    workpiece_table: list[dict[str, object]],
+    jobs_sdf_root: pathlib.Path,
+    simple_sdf_root: pathlib.Path,
+    simple_workpiece_id_offset: int,
+    job_name_template: str,
+    sdf_filename: str,
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """Filter out workpieces that do not have an SDF file."""
+    kept: list[dict[str, object]] = []
+    dropped: list[dict[str, object]] = []
+    for item in workpiece_table:
+        workpiece_id = int(item["workpiece_id"])
+        if workpiece_id >= simple_workpiece_id_offset:
+            root = simple_sdf_root
+            local_id = workpiece_id - simple_workpiece_id_offset
+        else:
+            root = jobs_sdf_root
+            local_id = workpiece_id
+        job_name = job_name_template.format(workpiece_id=int(local_id))
+        sdf_path = root / job_name / sdf_filename
+        if sdf_path.is_file():
+            kept.append(item)
+        else:
+            dropped.append(item)
+    return kept, dropped
+
 def main() -> None:
     args = build_parser().parse_args()
     if args.d_safe < 0:
@@ -537,6 +562,23 @@ def main() -> None:
     )
     if not workpiece_table:
         raise ValueError("No canonical workpiece directories were found.")
+
+    # Filter workpieces: only keep those with SDF files
+    jobs_sdf_root = pathlib.Path(args.jobs_sdf_root).expanduser().resolve() if args.jobs_sdf_root else pathlib.Path(args.jobs_root).expanduser().resolve()
+    simple_sdf_root = pathlib.Path(args.simple_sdf_root).expanduser().resolve()
+    workpiece_table, dropped_table = filter_workpieces_with_sdf(
+        workpiece_table=workpiece_table,
+        jobs_sdf_root=jobs_sdf_root,
+        simple_sdf_root=simple_sdf_root,
+        simple_workpiece_id_offset=int(args.simple_workpiece_id_offset),
+        job_name_template=str(args.job_name_template),
+        sdf_filename=str(args.sdf_filename),
+    )
+    if dropped_table:
+        dropped_ids = sorted([int(item["workpiece_id"]) for item in dropped_table])
+        print(f"[INFO] Dropped {len(dropped_table)} workpiece(s) without SDF: {dropped_ids}")
+    if not workpiece_table:
+        raise ValueError("No workpieces remain after SDF filtering.")
 
     validator = build_validator(args)
     try:

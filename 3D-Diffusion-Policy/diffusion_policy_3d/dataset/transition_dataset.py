@@ -165,6 +165,7 @@ class TransitionTrajectoryDataset(BaseDataset):
             stratify_workpiece_split=False,
             simple_workpiece_id_offset=1000,
             workpiece_split_strategy='random',
+            simple_as_train_validation_split=False,
             ):
         super().__init__()
         self.task_name = task_name
@@ -172,6 +173,31 @@ class TransitionTrajectoryDataset(BaseDataset):
         self.obs_keys = tuple(obs_keys) if obs_keys is not None else self.DEFAULT_OBS_KEYS
 
         self.replay_buffer = ReplayBuffer.copy_from_path(zarr_path, keys=None)
+        if simple_as_train_validation_split:
+            if 'workpiece_ids' not in self.replay_buffer.meta:
+                raise KeyError(
+                    'simple_as_train_validation_split=True requires `meta/workpiece_ids` '
+                    'in the zarr dataset. Rebuild the dataset with workpiece metadata.'
+                )
+            episode_workpiece_ids = np.asarray(self.replay_buffer.meta['workpiece_ids'][:], dtype=np.int64)
+            if episode_workpiece_ids.shape != (self.replay_buffer.n_episodes,):
+                raise ValueError(
+                    f'`meta/workpiece_ids` must have shape ({self.replay_buffer.n_episodes},), '
+                    f'got {episode_workpiece_ids.shape}'
+                )
+            unique_ids = np.unique(episode_workpiece_ids)
+            train_workpiece_ids = unique_ids[unique_ids >= int(simple_workpiece_id_offset)]
+            val_workpiece_ids = unique_ids[unique_ids < int(simple_workpiece_id_offset)]
+            if len(train_workpiece_ids) == 0:
+                raise ValueError(
+                    'simple_as_train_validation_split=True found no simple workpiece ids '
+                    f'(>= {simple_workpiece_id_offset}) for training.'
+                )
+            if len(val_workpiece_ids) == 0:
+                raise ValueError(
+                    'simple_as_train_validation_split=True found no complex workpiece ids '
+                    f'(< {simple_workpiece_id_offset}) for validation.'
+                )
         split_masks = self._resolve_workpiece_split_masks(
             replay_buffer=self.replay_buffer,
             train_workpiece_ids=train_workpiece_ids,

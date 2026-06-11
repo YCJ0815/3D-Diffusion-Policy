@@ -1,5 +1,5 @@
 defaults:
-  - task: adroit_hammer
+  - task: realdex_transition
   - _self_
 
 name: train_simple_dp3
