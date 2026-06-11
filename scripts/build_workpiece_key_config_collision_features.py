@@ -147,6 +147,14 @@ def ensure_dir(path: pathlib.Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
+def progress(iterable, **kwargs):
+    try:
+        from tqdm.auto import tqdm
+    except ImportError:
+        return iterable
+    return tqdm(iterable, **kwargs)
+
+
 def load_key_config_artifacts(key_config_dir: pathlib.Path) -> tuple[np.ndarray, np.ndarray, dict]:
     raw_path = key_config_dir / "key_joint_configurations_raw.npy"
     idx_path = key_config_dir / "key_joint_configuration_indices.npy"
@@ -443,9 +451,28 @@ def main() -> None:
     validator = build_validator(args)
     try:
         features = np.empty((len(workpiece_table), key_configs_raw.shape[0], 2), dtype=np.float32)
-        for workpiece_idx, item in enumerate(workpiece_table):
+        total_evaluations = len(workpiece_table) * key_configs_raw.shape[0]
+        evaluated_count = 0
+        collision_count = 0
+        running_min_d_min = float("inf")
+        workpiece_iter = progress(
+            enumerate(workpiece_table),
+            total=len(workpiece_table),
+            desc="Evaluating workpieces",
+            unit="workpiece",
+        )
+        for workpiece_idx, item in workpiece_iter:
             workpiece_id = int(item["workpiece_id"])
-            for key_idx, joint_state in enumerate(key_configs_raw):
+            workpiece_collision_count = 0
+            workpiece_min_d_min = float("inf")
+            key_iter = progress(
+                enumerate(key_configs_raw),
+                total=key_configs_raw.shape[0],
+                desc=f"{item['type']}:{item['name']}",
+                unit="keycfg",
+                leave=False,
+            )
+            for key_idx, joint_state in key_iter:
                 collision_flag, d_min = validator.evaluate_single_configuration(
                     workpiece_id=workpiece_id,
                     joint_state=joint_state,
@@ -453,6 +480,28 @@ def main() -> None:
                 )
                 features[workpiece_idx, key_idx, 0] = np.float32(collision_flag)
                 features[workpiece_idx, key_idx, 1] = np.float32(d_min)
+                evaluated_count += 1
+                collision_count += int(collision_flag > 0.5)
+                workpiece_collision_count += int(collision_flag > 0.5)
+                running_min_d_min = min(running_min_d_min, float(d_min))
+                workpiece_min_d_min = min(workpiece_min_d_min, float(d_min))
+
+                global_collision_rate = collision_count / evaluated_count if evaluated_count > 0 else 0.0
+                workpiece_collision_rate = (
+                    workpiece_collision_count / (key_idx + 1)
+                    if key_idx + 1 > 0 else 0.0
+                )
+                if hasattr(key_iter, "set_postfix"):
+                    key_iter.set_postfix(
+                        collision_rate=f"{workpiece_collision_rate:.3f}",
+                        min_d_min=f"{workpiece_min_d_min:.6f}",
+                    )
+                if hasattr(workpiece_iter, "set_postfix"):
+                    workpiece_iter.set_postfix(
+                        global_collision_rate=f"{global_collision_rate:.3f}",
+                        min_d_min=f"{running_min_d_min:.6f}",
+                        done=f"{evaluated_count}/{total_evaluations}",
+                    )
     finally:
         validator.close()
 
