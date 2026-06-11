@@ -98,8 +98,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--sdf-query-link-names",
         type=str,
         nargs="+",
-        default=["wrist_2_link", "wrist_3_link", "ee_link", "pen_link", "tool0"],
-        help="Robot link names used for SDF coverage diagnosis, matching the feature builder.",
+        default=None,
+        help=(
+            "Optional robot link subset used for SDF coverage diagnosis. "
+            "By default all collision links are used, matching the feature builder."
+        ),
     )
     parser.add_argument(
         "--workpiece-filename",
