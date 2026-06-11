@@ -95,6 +95,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Number of deterministic robot collision surface points retained per link.",
     )
     parser.add_argument(
+        "--sdf-query-link-names",
+        type=str,
+        nargs="+",
+        default=["wrist_2_link", "wrist_3_link", "ee_link", "pen_link", "tool0"],
+        help="Robot link names used for SDF coverage diagnosis, matching the feature builder.",
+    )
+    parser.add_argument(
         "--workpiece-filename",
         type=str,
         default="workpiece.stl",
@@ -198,7 +205,7 @@ def main() -> None:
             workpiece_fallbacks = 0
             for key_idx, joint_state in key_iter:
                 validator._set_robot_joints(joint_state)
-                robot_points = validator._robot_surface_points_world()
+                robot_points = validator._robot_surface_points_world_for_sdf()
                 inside_mask = points_inside_sdf_bounds(robot_points, sdf_grid)
                 inside_ratio = float(np.mean(inside_mask.astype(np.float32)))
                 all_outside = bool(not np.any(inside_mask))

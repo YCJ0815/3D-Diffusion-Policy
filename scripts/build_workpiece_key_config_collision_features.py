@@ -123,6 +123,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Number of deterministic robot collision surface points retained per link.",
     )
     parser.add_argument(
+        "--sdf-query-link-names",
+        type=str,
+        nargs="+",
+        default=["wrist_2_link", "wrist_3_link", "ee_link", "pen_link", "tool0"],
+        help=(
+            "Robot link names whose collision surface points participate in SDF d_min queries. "
+            "Mesh collision still uses the full robot."
+        ),
+    )
+    parser.add_argument(
         "--workpiece-filename",
         type=str,
         default="workpiece.stl",
@@ -297,6 +307,72 @@ class WorkpieceKeyConfigEvaluator(PyBulletCollisionValidator):
             resolved_urdf_path=self.resolved_urdf_path,
             points_per_link=self.cfg.robot_surface_points_per_link,
         )
+        requested_sdf_query_link_names = list(getattr(self.cfg, "sdf_query_link_names", []))
+        self.sdf_query_link_indices = self._resolve_sdf_query_link_indices(
+            requested_link_names=requested_sdf_query_link_names
+        )
+        if not self.sdf_query_link_indices:
+            raise ValueError(
+                "No valid SDF query links were resolved from "
+                f"{requested_sdf_query_link_names}. Available collision links: "
+                f"{sorted(self._collision_link_names_with_points())}"
+            )
+
+    def _collision_link_names_with_points(self) -> list[str]:
+        names = []
+        reverse = {index: name for name, index in self.link_name_to_index.items()}
+        for link_index in self.robot_surface_points_by_link.keys():
+            if link_index == -1:
+                names.append("base_link")
+            elif link_index in reverse:
+                names.append(reverse[link_index])
+        return sorted(set(names))
+
+    def _resolve_sdf_query_link_indices(self, requested_link_names: list[str]) -> list[int]:
+        resolved = []
+        reverse = {index: name for name, index in self.link_name_to_index.items()}
+        for name in requested_link_names:
+            if name == "base_link":
+                link_index = -1
+            elif name not in self.link_name_to_index:
+                continue
+            else:
+                link_index = self.link_name_to_index[name]
+            if link_index in self.robot_surface_points_by_link:
+                resolved.append(link_index)
+        ordered_unique = []
+        seen = set()
+        for idx in resolved:
+            if idx in seen:
+                continue
+            seen.add(idx)
+            ordered_unique.append(idx)
+        return ordered_unique
+
+    def _robot_surface_points_world_for_sdf(self) -> np.ndarray:
+        world_points = []
+        for link_index in self.sdf_query_link_indices:
+            local_points = self.robot_surface_points_by_link[link_index]
+            position, orientation = self._get_link_pose(link_index)
+            rotation = np.asarray(
+                self.pb.getMatrixFromQuaternion(orientation),
+                dtype=np.float32,
+            ).reshape(3, 3)
+            world_points.append(local_points @ rotation.T + position.reshape(1, 3))
+        if not world_points:
+            return np.empty((0, 3), dtype=np.float32)
+        return np.concatenate(world_points, axis=0).astype(np.float32)
+
+    def _min_sdf_distance_for_current_robot_state(self, sdf_grid):
+        if sdf_grid is None:
+            return float("nan")
+        robot_points = self._robot_surface_points_world_for_sdf()
+        if robot_points.size == 0:
+            return float("nan")
+        sdf_values = sdf_grid.query(robot_points)
+        if np.all(np.isnan(sdf_values)):
+            return float("nan")
+        return float(np.nanmin(sdf_values))
 
     def _load_workpiece_sdf(self, workpiece_id: int):
         workpiece_id = int(workpiece_id)
@@ -385,6 +461,7 @@ def build_validator(args: argparse.Namespace) -> WorkpieceKeyConfigEvaluator:
         sdf_out_of_bounds_value_m=float(args.sdf_out_of_bounds_value_m),
         log_legacy_pybullet_metrics=False,
     )
+    setattr(cfg, "sdf_query_link_names", tuple(args.sdf_query_link_names))
     return WorkpieceKeyConfigEvaluator(
         cfg=cfg,
         jobs_sdf_root=str(jobs_sdf_root),
@@ -415,6 +492,7 @@ def build_manifest(
         "simple_sdf_root": str(pathlib.Path(args.simple_sdf_root).expanduser().resolve()),
         "d_safe_m": float(args.d_safe),
         "sdf_out_of_bounds_value_m": float(args.sdf_out_of_bounds_value_m),
+        "sdf_query_link_names": list(args.sdf_query_link_names),
         "simple_workpiece_id_offset": int(args.simple_workpiece_id_offset),
         "workpiece_count": len(workpiece_table),
         "regular_workpiece_count": regular_count,
