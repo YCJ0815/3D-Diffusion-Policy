@@ -117,6 +117,20 @@ def collect_npz_paths(scan_roots: list[pathlib.Path]) -> list[pathlib.Path]:
     return unique_paths
 
 
+def serialize_npz_path(npz_path: pathlib.Path, scan_roots: list[pathlib.Path]) -> str:
+    npz_path = npz_path.resolve()
+    for root in scan_roots:
+        try:
+            relative = npz_path.relative_to(root.resolve())
+            return str(relative)
+        except ValueError:
+            continue
+    try:
+        return str(npz_path.relative_to(PROJECT_ROOT.resolve()))
+    except ValueError:
+        return str(npz_path)
+
+
 def load_joint_trajectory(npz_path: pathlib.Path, trajectory_key: str) -> tuple[np.ndarray, np.lib.npyio.NpzFile]:
     data = np.load(npz_path)
     if trajectory_key not in data.files:
@@ -247,7 +261,7 @@ def main() -> None:
 
     raw_trajectories: list[np.ndarray] = []
     extracted_trajectories: list[np.ndarray] = []
-    relative_paths: list[str] = []
+    serialized_paths: list[str] = []
 
     for npz_path in npz_paths:
         trajectory, data = load_joint_trajectory(
@@ -263,7 +277,7 @@ def main() -> None:
         )
         raw_trajectories.append(trajectory.astype(np.float32))
         extracted_trajectories.append(extracted.astype(np.float32))
-        relative_paths.append(str(npz_path.relative_to(PROJECT_ROOT.resolve())))
+        serialized_paths.append(serialize_npz_path(npz_path=npz_path, scan_roots=scan_roots))
         data.close()
 
     trajectories_after_extraction = np.stack(extracted_trajectories, axis=0).astype(np.float32)
@@ -275,7 +289,7 @@ def main() -> None:
 
     raw_archive = build_ragged_trajectory_archive(
         trajectories=raw_trajectories,
-        paths=relative_paths,
+        paths=serialized_paths,
     )
 
     np.savez(output_dir / "trajectories_before_extraction.npz", **raw_archive)
