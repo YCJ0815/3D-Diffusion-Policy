@@ -118,10 +118,19 @@ def compute_metrics(
     mesh_col_ratio_wp = collision_flags.mean(axis=1)
     mesh_col_ratio_global = float(collision_flags.mean())
 
-    # --- 2. unsafe_ratio = mesh_collision OR (d_min < d_safe) ---
-    unsafe = (collision_flags > 0.5) | (d_min < d_safe)
-    unsafe_ratio_wp = unsafe.mean(axis=1).astype(np.float64)
-    unsafe_ratio_global = float(unsafe.mean())
+    # --- 2. unsafe_ratio (from dim 2: safety_flag) ---
+    safety_flag = features[:, :, 2].copy()
+    unsafe_ratio_wp = safety_flag.mean(axis=1).astype(np.float64)
+    unsafe_ratio_global = float(safety_flag.mean())
+
+    # Validate dim 2 consistency: safety_flag == (collision_flag > 0.5) | (d_min <= d_safe)
+    expected_safety = (collision_flags > 0.5) | (d_min <= d_safe)
+    dim2_inconsistent = np.any(safety_flag.astype(bool) != expected_safety)
+    if dim2_inconsistent:
+        n_mismatch = int(np.sum(safety_flag.astype(bool) != expected_safety))
+        total = safety_flag.size
+        print(f"[WARN] Dim 2 (safety_flag) inconsistent with (collision_flag | d_min <= d_safe): "
+              f"{n_mismatch}/{total} mismatches")
 
     # --- 3 & 4. signed clearance types ---
     # Dim 2 is safety_flag (binary). Reconstruct signed_clearance from dim 1 + d_safe.
@@ -207,7 +216,7 @@ def compute_metrics(
                 "pass_rate_per_workpiece": float(mesh_ok_wp.mean()),
                 "failed_workpiece_indices": _l(np.flatnonzero(~mesh_ok_wp)),
             },
-            "2_unsafe_ratio_gt_mesh_collision_ratio": {
+            "2_unsafe_ratio_gt_mesh_collision_ratio（基于 Dim 2 safety_flag）": {
                 "pass": unsafe_gt_mesh_global,
                 "global_gap": float(unsafe_ratio_global - mesh_col_ratio_global),
                 "threshold": f"gap >= {unsafe_margin}",
