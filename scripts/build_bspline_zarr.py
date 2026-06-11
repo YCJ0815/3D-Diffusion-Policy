@@ -12,7 +12,6 @@ if str(PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_ROOT))
 
 from diffusion_policy_3d.common.bspline import (
-    FREE_CONTROL_POINT_SLICE,
     build_linear_control_points,
     build_normalized_resampled_joint_trajectory,
     build_normalized_delta_w_from_npz,
@@ -20,6 +19,7 @@ from diffusion_policy_3d.common.bspline import (
     fit_quintic_bspline_to_npz_trajectory,
     load_delta_w_stats,
     normalize_delta_w,
+    _resolve_free_control_point_slice,
     save_delta_w_stats,
 )
 from diffusion_policy_3d.common.input_data import PlanningInputData, load_bspline_planning_input_data
@@ -100,8 +100,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output-zarr",
         type=str,
-        required=True,
-        help="Path to the output zarr dataset.",
+        default=None,
+        help="Path to the output zarr dataset. Required unless --stats-only is set.",
+    )
+    parser.add_argument(
+        "--stats-only",
+        action="store_true",
+        help="Only build the B-spline stats NPZ and skip zarr dataset generation.",
     )
     parser.add_argument(
         "--stats-path",
@@ -582,8 +587,9 @@ def ensure_delta_w_stats(
             urdf_path=urdf_path,
             cache_counters=cache_counters,
         )
+        free_slice = _resolve_free_control_point_slice(num_control_points)
         free_delta_w_list.append(
-            np.asarray(artifacts["delta_w"], dtype=np.float32)[FREE_CONTROL_POINT_SLICE]
+            np.asarray(artifacts["delta_w"], dtype=np.float32)[free_slice]
         )
         if basis_matrix is None:
             basis_matrix = np.asarray(artifacts["basis_matrix"], dtype=np.float32)
@@ -824,7 +830,8 @@ def build_reversed_bspline_control_point_residuals(
         mean=mean,
         std=std,
     )
-    return normalized_delta_w[FREE_CONTROL_POINT_SLICE].astype(np.float32)
+    free_slice = _resolve_free_control_point_slice(num_control_points)
+    return normalized_delta_w[free_slice].astype(np.float32)
 
 
 def build_reversed_bspline_control_point_residuals_from_trajectory(
@@ -851,7 +858,8 @@ def build_reversed_bspline_control_point_residuals_from_trajectory(
         mean=stats_mean,
         std=stats_std,
     )
-    return normalized_delta_w[FREE_CONTROL_POINT_SLICE].astype(np.float32)
+    free_slice = _resolve_free_control_point_slice(num_control_points)
+    return normalized_delta_w[free_slice].astype(np.float32)
 
 
 def resolve_job_name_from_npz(npz_path: pathlib.Path) -> str | None:
@@ -1047,7 +1055,8 @@ def build_bspline_control_point_residuals(
         num_control_points=num_control_points,
         degree=spline_degree,
     )
-    return fit_result["normalized_delta_w"][FREE_CONTROL_POINT_SLICE].astype(np.float32)
+    free_slice = _resolve_free_control_point_slice(num_control_points)
+    return fit_result["normalized_delta_w"][free_slice].astype(np.float32)
 
 
 def build_forward_invariants(
@@ -1108,6 +1117,8 @@ def main() -> None:
     args = build_parser().parse_args()
     if args.augment_copies <= 0:
         raise ValueError(f"--augment-copies must be positive, got {args.augment_copies}")
+    if not args.stats_only and not args.output_zarr:
+        raise ValueError("--output-zarr is required unless --stats-only is set")
 
     search_dirs = [pathlib.Path(path) for path in (args.input_dirs if args.input_dirs else [args.input_dir])]
     npz_files = collect_npz_files(
@@ -1144,6 +1155,15 @@ def main() -> None:
         stats_std_eps=args.stats_std_eps,
         cache_counters=cache_counters,
     )
+    if args.stats_only:
+        print("stats_only: true")
+        print(f"stats_path: {args.stats_path}")
+        print(f"basis_matrix: {stats['basis_matrix'].shape}")
+        print(f"mean/std shape: {stats['mean'].shape} / {stats['std'].shape}")
+        print(f"num_control_points: {args.num_control_points}")
+        free_slice = _resolve_free_control_point_slice(args.num_control_points)
+        print(f"num_free_control_points: {free_slice.stop - free_slice.start}")
+        return
 
     from diffusion_policy_3d.common.replay_buffer import ReplayBuffer
 
@@ -1202,7 +1222,7 @@ def main() -> None:
             delta_w=np.asarray(artifacts["delta_w"], dtype=np.float32),
             mean=np.asarray(stats["mean"], dtype=np.float32),
             std=np.asarray(stats["std"], dtype=np.float32),
-        )[FREE_CONTROL_POINT_SLICE].astype(np.float32)
+        )[_resolve_free_control_point_slice(args.num_control_points)].astype(np.float32)
 
         reversed_planning_result = None
         reversed_action = None

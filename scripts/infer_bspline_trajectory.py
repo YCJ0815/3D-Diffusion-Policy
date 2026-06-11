@@ -14,6 +14,7 @@ if str(PACKAGE_ROOT) not in sys.path:
 
 from train import TrainDP3Workspace
 from diffusion_policy_3d.common.bspline import (
+    _resolve_free_control_point_slice,
     fit_quintic_bspline_to_npz_trajectory,
     load_delta_w_stats,
     reconstruct_trajectory_from_normalized_free_residual,
@@ -190,7 +191,8 @@ def main() -> None:
 
     pred_action_window = result["action"][0].detach().cpu().numpy().astype(np.float32)
     pred_action_horizon = result["action_pred"][0].detach().cpu().numpy().astype(np.float32)
-    expected_action_shape = (args.num_control_points - 4, 6)
+    free_slice = _resolve_free_control_point_slice(args.num_control_points)
+    expected_action_shape = (free_slice.stop - free_slice.start, 6)
     if pred_action_horizon.shape != expected_action_shape:
         raise ValueError(
             "Predicted normalized free control-point residual has incompatible shape. "

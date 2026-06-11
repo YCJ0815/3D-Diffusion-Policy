@@ -22,7 +22,7 @@
 - `goal_direction`，当前是 `6` 维
 - `first_joint_angles_normalized`
 - `last_joint_angles_normalized`
-- `action = 10 x 6`，对应 16 个控制点中间 10 个自由控制点残差
+- `action = 10 x 6`，对应 16 个控制点里前 3 / 后 3 固定、中间 10 个自由控制点残差
 
 当前推荐命令：
 
@@ -52,6 +52,20 @@
   --num-control-points 16
 ```
 
+如果你只想生成 `stats` 文件、不构建 zarr，可以直接运行：
+
+```bash
+/Users/ycj/miniconda3/envs/pybullet/bin/python scripts/build_bspline_zarr.py \
+  --input-dir data/raw_data/results \
+  --stats-path data/raw_data/realdex_bspline_stats_free10.npz \
+  --bspline-cache-dir data/cache/bspline_artifacts \
+  --trajectory-key q_plan \
+  --target-steps 64 \
+  --spline-degree 5 \
+  --num-control-points 16 \
+  --stats-only
+```
+
 如果只想处理原始 `results`，把上面的：
 
 ```bash
@@ -68,7 +82,7 @@
 
 - `--target-steps 64`：先把原始关节角轨迹重采样到 `64 x 6`，再拟合 B-spline。
 - `--num-control-points 16`：拟合 16 个控制点。
-- 当前脚本只把中间 `10` 个自由控制点残差写入 zarr。
+- 当前脚本只把中间 `10` 个自由控制点残差写入 zarr（前 `3` / 后 `3` 控制点固定）。
 - `--input-dirs ...`：支持同时扫描多个结果目录；`results -> jobs`、`simple_results -> simple_jobs` 会自动匹配对应 STL。
 - `--jobs-root` / `--simple-jobs-root`：可显式指定常规工件和 simple 工件的 STL 根目录；适合结果目录和工件目录不在同一父目录下的情况。
 - `--mesh-cache-dir`：缓存每个 STL 采样后的世界系点云，重复构建时不再重新采样网格。
