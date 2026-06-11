@@ -83,6 +83,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Safety distance threshold in meters for collision flag computation.",
     )
     parser.add_argument(
+        "--sdf-out-of-bounds-value-m",
+        type=float,
+        default=1.0,
+        help=(
+            "Fallback SDF distance in meters for robot sample points outside the SDF grid. "
+            "Use a positive value larger than d_safe to avoid NaN failures for far-away configurations."
+        ),
+    )
+    parser.add_argument(
         "--urdf-path",
         type=str,
         default=None,
@@ -322,7 +331,8 @@ class WorkpieceKeyConfigEvaluator(PyBulletCollisionValidator):
         if np.isnan(d_min):
             raise ValueError(
                 f"SDF query returned NaN for workpiece_id={workpiece_id}. "
-                "This likely means all robot collision sample points fell outside the SDF bounds."
+                "This likely means all robot collision sample points fell outside the SDF bounds. "
+                "Consider setting --sdf-out-of-bounds-value-m to a positive fallback distance."
             )
         collision_flag = float(mesh_collision or (d_min < float(d_safe)))
         return collision_flag, d_min
@@ -364,7 +374,7 @@ def build_validator(args: argparse.Namespace) -> WorkpieceKeyConfigEvaluator:
         sdf_filename=str(args.sdf_filename),
         sdf_required=True,
         robot_surface_points_per_link=int(args.robot_surface_points_per_link),
-        sdf_out_of_bounds_value_m=None,
+        sdf_out_of_bounds_value_m=float(args.sdf_out_of_bounds_value_m),
         log_legacy_pybullet_metrics=False,
     )
     return WorkpieceKeyConfigEvaluator(
@@ -396,6 +406,7 @@ def build_manifest(
         ),
         "simple_sdf_root": str(pathlib.Path(args.simple_sdf_root).expanduser().resolve()),
         "d_safe_m": float(args.d_safe),
+        "sdf_out_of_bounds_value_m": float(args.sdf_out_of_bounds_value_m),
         "simple_workpiece_id_offset": int(args.simple_workpiece_id_offset),
         "workpiece_count": len(workpiece_table),
         "regular_workpiece_count": regular_count,
