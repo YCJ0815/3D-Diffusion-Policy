@@ -37,6 +37,9 @@ from diffusion_policy_3d.common.pybullet_validation import (  # noqa: E402
 from diffusion_policy_3d.dataset.transition_dataset import (  # noqa: E402
     TransitionTrajectoryDataset,
 )
+from diffusion_policy_3d.dataset.transition_cspace_dataset import (  # noqa: E402
+    TransitionTrajectoryCSpaceDataset,
+)
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -117,6 +120,27 @@ def build_parser() -> argparse.ArgumentParser:
             "Expected layout: <simple-jobs-root>/job_xxx/workpiece.stl"
         ),
     )
+    parser.add_argument(
+        "--cspace-feature-dir",
+        type=str,
+        default=None,
+        help=(
+            "Optional override for the C-space feature directory. "
+            "If omitted, the script uses checkpoint cfg.task.dataset.cspace_feature_dir when needed."
+        ),
+    )
+    parser.add_argument(
+        "--cspace-feature-filename",
+        type=str,
+        default=None,
+        help="Optional override for the C-space feature npy filename.",
+    )
+    parser.add_argument(
+        "--cspace-workpiece-ids-filename",
+        type=str,
+        default=None,
+        help="Optional override for the C-space workpiece IDs npy filename.",
+    )
     return parser
 
 
@@ -146,7 +170,7 @@ def _build_val_dataset(
     # Pull dataset-construction args from the checkpoint config when available,
     # falling back to sensible defaults.
     ds_cfg = OmegaConf.select(workspace.cfg, "task.dataset", default={}) or {}
-    dataset = TransitionTrajectoryDataset(
+    common_kwargs = dict(
         zarr_path=str(zarr_path),
         horizon=horizon,
         pad_before=int(ds_cfg.get("pad_before", 0)),
@@ -161,6 +185,16 @@ def _build_val_dataset(
         simple_workpiece_id_offset=int(ds_cfg.get("simple_workpiece_id_offset", 1000)),
         workpiece_split_strategy=str(ds_cfg.get("workpiece_split_strategy", "tail")),
     )
+    dataset_target = str(ds_cfg.get("_target_", ""))
+    if dataset_target.endswith("TransitionTrajectoryCSpaceDataset"):
+        dataset = TransitionTrajectoryCSpaceDataset(
+            cspace_feature_dir=str(ds_cfg.get("cspace_feature_dir")),
+            cspace_feature_filename=str(ds_cfg.get("cspace_feature_filename", "workpiece_key_config_features.npy")),
+            cspace_workpiece_ids_filename=str(ds_cfg.get("cspace_workpiece_ids_filename", "workpiece_ids.npy")),
+            **common_kwargs,
+        )
+    else:
+        dataset = TransitionTrajectoryDataset(**common_kwargs)
     return dataset.get_validation_dataset()
 
 
@@ -216,6 +250,9 @@ def _build_obs_batch(
     obs_keys: tuple[str, ...],
     n_obs_steps: int,
     device: torch.device,
+    workpiece_id: Optional[int] = None,
+    dataset=None,
+    policy=None,
 ) -> tuple[dict[str, torch.Tensor], dict[str, np.ndarray]]:
     """Mirrors PyBulletValidationRunner._build_obs_batch."""
     episode_ends = np.asarray(replay_buffer.episode_ends[:], dtype=np.int64)
@@ -235,6 +272,16 @@ def _build_obs_batch(
             value = np.concatenate([value, pad], axis=0)
         raw_obs[key] = value.copy()
         obs_batch[key] = torch.from_numpy(value[None]).to(device)
+    cspace_feature_key = getattr(policy, "cspace_feature_key", None)
+    if cspace_feature_key is not None:
+        if dataset is None or workpiece_id is None or not hasattr(dataset, "get_cspace_feature_by_workpiece_id"):
+            raise KeyError(
+                "This checkpoint expects C-space features, but the validation dataset "
+                "cannot provide them. Pass a C-space dataset or override --cspace-feature-dir."
+            )
+        cspace_feature = dataset.get_cspace_feature_by_workpiece_id(int(workpiece_id))
+        raw_obs[cspace_feature_key] = cspace_feature.copy()
+        obs_batch[cspace_feature_key] = torch.from_numpy(cspace_feature[None]).to(device)
     return obs_batch, raw_obs
 
 
@@ -271,6 +318,28 @@ def main() -> None:
     workspace = TrainDP3Workspace.create_from_checkpoint(
         str(checkpoint_path),
     )
+    from omegaconf import OmegaConf
+    if args.cspace_feature_dir is not None:
+        OmegaConf.update(
+            workspace.cfg,
+            "task.dataset.cspace_feature_dir",
+            args.cspace_feature_dir,
+            force_add=True,
+        )
+    if args.cspace_feature_filename is not None:
+        OmegaConf.update(
+            workspace.cfg,
+            "task.dataset.cspace_feature_filename",
+            args.cspace_feature_filename,
+            force_add=True,
+        )
+    if args.cspace_workpiece_ids_filename is not None:
+        OmegaConf.update(
+            workspace.cfg,
+            "task.dataset.cspace_workpiece_ids_filename",
+            args.cspace_workpiece_ids_filename,
+            force_add=True,
+        )
     policy = workspace.model
     policy.to(device)
     policy.eval()
@@ -343,6 +412,9 @@ def main() -> None:
                 obs_keys=obs_keys,
                 n_obs_steps=n_obs_steps,
                 device=device,
+                workpiece_id=wid,
+                dataset=val_dataset,
+                policy=policy,
             )
 
             # Inference
