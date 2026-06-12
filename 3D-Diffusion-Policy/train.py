@@ -205,7 +205,22 @@ class TrainDP3Workspace:
 
         # configure dataset
         dataset: BaseDataset
-        dataset = hydra.utils.instantiate(cfg.task.dataset)
+        gpu_dataset_enabled = bool(OmegaConf.select(cfg, 'gpu_dataset', default=False))
+        if gpu_dataset_enabled:
+            cprint("[GPU Dataset] Preloading all data to GPU...", "yellow")
+            import copy as _copy
+            dataset_cfg = _copy.deepcopy(cfg.task.dataset)
+            dataset_cfg._target_ = 'diffusion_policy_3d.dataset.gpu_transition_dataset.GPUTransitionCSpaceDataset'
+            dataset_cfg.device = cfg.training.device
+            dataset = hydra.utils.instantiate(dataset_cfg)
+            cfg.dataloader.num_workers = 0
+            cfg.dataloader.pin_memory = False
+            cfg.dataloader.persistent_workers = False
+            cfg.val_dataloader.num_workers = 0
+            cfg.val_dataloader.pin_memory = False
+            cfg.val_dataloader.persistent_workers = False
+        else:
+            dataset = hydra.utils.instantiate(cfg.task.dataset)
 
         assert isinstance(dataset, BaseDataset), print(f"dataset must be BaseDataset, got {type(dataset)}")
         train_dataloader = DataLoader(dataset, **cfg.dataloader)
@@ -277,6 +292,18 @@ class TrainDP3Workspace:
         if self.ema_model is not None:
             self.ema_model.to(device)
         optimizer_to(self.optimizer, device)
+        
+        # torch.compile for GPU acceleration
+        compile_enabled = bool(OmegaConf.select(cfg, 'training.compile', default=False))
+        if compile_enabled and device.type == 'cuda':
+            cprint("[Compile] Applying torch.compile to model...", "yellow")
+            try:
+                self.model = torch.compile(self.model, mode="reduce-overhead")
+                if self.ema_model is not None:
+                    self.ema_model = torch.compile(self.ema_model, mode="reduce-overhead")
+                cprint("[Compile] torch.compile applied successfully.", "green")
+            except Exception as e:
+                cprint(f"[Compile] torch.compile failed: {e}, continuing without compile.", "red")
         precision_runtime = _build_precision_runtime(cfg, device)
         cprint(
             "[Precision] "

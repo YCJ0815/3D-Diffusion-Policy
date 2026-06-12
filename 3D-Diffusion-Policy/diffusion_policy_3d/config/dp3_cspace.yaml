@@ -4,6 +4,7 @@ defaults:
 
 name: train_simple_dp3_cspace
 
+gpu_dataset: false  # set true to preload all data to GPU
 task_name: ${task.name}
 shape_meta: ${task.shape_meta}
 exp_name: "simple_dp3_cspace"
@@ -135,6 +136,7 @@ training:
   max_train_steps: null
   max_val_steps: null
   tqdm_interval_sec: 1.0
+  compile: false  # torch.compile model for GPU speedup
   performance:
     tf32: true
     amp:

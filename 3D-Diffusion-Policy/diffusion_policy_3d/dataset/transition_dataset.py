@@ -293,11 +293,11 @@ class TransitionTrajectoryDataset(BaseDataset):
     def _sample_to_data(self, sample):
         obs = dict()
         for key in self.obs_keys:
-            obs[key] = sample[key][:].astype(np.float32)
+            obs[key] = np.asarray(sample[key], dtype=np.float32)
 
         data = {
             'obs': obs,
-            'action': sample['action'].astype(np.float32)
+            'action': np.asarray(sample['action'], dtype=np.float32)
         }
         return data
 
