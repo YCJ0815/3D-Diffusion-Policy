@@ -75,6 +75,8 @@ policy:
     use_layernorm: true
     final_norm: layernorm # layernorm, none
     normal_channel: false
+  trajectory_loss:
+    enabled: false
 
 
 ema:
@@ -133,12 +135,12 @@ training:
     warmup_epochs: 20
   pybullet_eval:
     enabled: True
-    stats_path: null
+    stats_path: /root/autodl-tmp/3D-Diffusion-Policy/data/realdex_bspline_stats_free10.npz
     stats_mode: auto
     include_regular_jobs: True
     include_simple_jobs: True
-    jobs_root: data/raw_data/jobs
-    simple_jobs_root: data/raw_data/simple_jobs
+    jobs_root: /root/weld-robot/data_generation/data/generated_jobs
+    simple_jobs_root: /root/weld-robot/data_generation/data/generated_jobs/simple_jobs
     simple_workpiece_id_offset: 1000
     job_name_template: job_{workpiece_id:03d}
     workpiece_filename: workpiece.stl

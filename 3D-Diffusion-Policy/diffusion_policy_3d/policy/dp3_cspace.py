@@ -9,6 +9,9 @@ from einops import reduce
 from diffusion_policy_3d.common.pytorch_util import dict_apply
 from diffusion_policy_3d.model.diffusion.conditional_unet1d import ConditionalUnet1D
 from diffusion_policy_3d.model.diffusion.simple_conditional_unet1d import ConditionalUnet1D as SimpleConditionalUnet1D
+from diffusion_policy_3d.model.diffusion.differentiable_trajectory_loss import (
+    combine_diffusion_and_trajectory_losses,
+)
 from diffusion_policy_3d.policy.dp3 import DP3
 from diffusion_policy_3d.policy.simple_dp3 import SimpleDP3
 
@@ -345,7 +348,12 @@ class DP3CSpace(DP3):
         loss = F.mse_loss(prediction, target, reduction="none")
         loss = loss * loss_mask.type(loss.dtype)
         loss = reduce(loss, "b ... -> b (...)", "mean").mean()
-        return loss, {"bc_loss": loss.item()}
+        return combine_diffusion_and_trajectory_losses(
+            trajectory_loss_module=self.trajectory_loss_module,
+            diffusion_loss=loss,
+            predicted_clean_action=prediction[..., :self.action_dim],
+            batch=batch,
+        )
 
 
 class SimpleDP3CSpace(SimpleDP3):
@@ -611,4 +619,9 @@ class SimpleDP3CSpace(SimpleDP3):
         loss = F.mse_loss(prediction, target, reduction="none")
         loss = loss * loss_mask.type(loss.dtype)
         loss = reduce(loss, "b ... -> b (...)", "mean").mean()
-        return loss, {"bc_loss": loss.item()}
+        return combine_diffusion_and_trajectory_losses(
+            trajectory_loss_module=self.trajectory_loss_module,
+            diffusion_loss=loss,
+            predicted_clean_action=prediction[..., :self.action_dim],
+            batch=batch,
+        )

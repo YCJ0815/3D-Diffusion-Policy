@@ -173,6 +173,22 @@ class TransitionTrajectoryDataset(BaseDataset):
         self.obs_keys = tuple(obs_keys) if obs_keys is not None else self.DEFAULT_OBS_KEYS
 
         self.replay_buffer = ReplayBuffer.copy_from_path(zarr_path, keys=None)
+        self.episode_ends = np.asarray(
+            self.replay_buffer.episode_ends[:],
+            dtype=np.int64,
+        )
+        self.episode_workpiece_ids = None
+        if 'workpiece_ids' in self.replay_buffer.meta:
+            episode_workpiece_ids = np.asarray(
+                self.replay_buffer.meta['workpiece_ids'][:],
+                dtype=np.int64,
+            )
+            if episode_workpiece_ids.shape != (self.replay_buffer.n_episodes,):
+                raise ValueError(
+                    f'`meta/workpiece_ids` must have shape ({self.replay_buffer.n_episodes},), '
+                    f'got {episode_workpiece_ids.shape}'
+                )
+            self.episode_workpiece_ids = episode_workpiece_ids
         if simple_as_train_validation_split:
             if 'workpiece_ids' not in self.replay_buffer.meta:
                 raise KeyError(
@@ -289,4 +305,21 @@ class TransitionTrajectoryDataset(BaseDataset):
         sample = self.sampler.sample_sequence(idx)
         data = self._sample_to_data(sample)
         torch_data = dict_apply(data, torch.from_numpy)
+        if self.episode_workpiece_ids is not None:
+            buffer_start_idx = int(self.sampler.indices[idx, 0])
+            episode_idx = int(
+                np.searchsorted(
+                    self.episode_ends,
+                    buffer_start_idx,
+                    side='right',
+                )
+            )
+            if episode_idx >= self.replay_buffer.n_episodes:
+                raise IndexError(
+                    f'Unable to resolve episode for replay-buffer index {buffer_start_idx}.'
+                )
+            torch_data['workpiece_id'] = torch.tensor(
+                int(self.episode_workpiece_ids[episode_idx]),
+                dtype=torch.long,
+            )
         return torch_data

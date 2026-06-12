@@ -150,16 +150,12 @@ class TransitionTrajectoryCSpaceDataset(TransitionTrajectoryDataset):
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         data = super().__getitem__(idx)
-        buffer_start_idx = int(self.sampler.indices[idx, 0])
-        episode_idx = int(
-            np.searchsorted(self.episode_ends, buffer_start_idx, side="right")
-        )
-        if episode_idx >= self.replay_buffer.n_episodes:
-            raise IndexError(
-                f"Unable to resolve episode for replay-buffer index {buffer_start_idx}."
+        if "workpiece_id" not in data:
+            raise KeyError(
+                "TransitionTrajectoryCSpaceDataset requires the base dataset to "
+                "provide `workpiece_id`."
             )
-
-        workpiece_id = int(self.episode_workpiece_ids[episode_idx])
+        workpiece_id = int(data["workpiece_id"].item())
         feature_row = self.cspace_row_by_workpiece_id[workpiece_id]
         data["obs"]["cspace_feature"] = torch.from_numpy(
             self.cspace_features[feature_row]

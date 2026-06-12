@@ -1,0 +1,12 @@
+regular_jobs_root: /root/weld-robot/data_generation/data/generated_jobs
+simple_jobs_root: /root/weld-robot/data_generation/data/generated_jobs/simple_jobs
+
+regular_results_root: /root/autodl-tmp/data-output/all-jobs-results
+simple_results_root: /root/autodl-tmp/simple_jobs_planning
+
+zarr_root: /root/autodl-tmp/3D-Diffusion-Policy/data
+stats_root: /root/autodl-tmp/3D-Diffusion-Policy/data
+cspace_feature_dir: /root/autodl-tmp/3D-Diffusion-Policy/analysis_outputs/workpiece_key_config_collision_features
+
+default_zarr_name: realdex_bspline_free10.zarr
+default_stats_name: realdex_bspline_stats_free10.npz

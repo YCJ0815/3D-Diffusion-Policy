@@ -61,6 +61,34 @@ policy:
   cspace_hidden_dim: 64
   cspace_output_dim: 64
   fusion_output_dim: 256
+  trajectory_loss:
+    enabled: true
+    stats_path: /root/autodl-tmp/3D-Diffusion-Policy/data/realdex_bspline_stats_free10.npz
+    jobs_sdf_root: /root/weld-robot/data_generation/data/generated_jobs
+    simple_sdf_root: /root/weld-robot/data_generation/data/generated_jobs/simple_jobs
+    simple_workpiece_id_offset: 1000
+    job_name_template: job_{workpiece_id:03d}
+    sdf_filename: workpiece_sdf.npz
+    urdf_path: config/robot-model/ur5e_with_pen.urdf
+    urdf_package_roots: [config/robot-model]
+    num_control_points: 16
+    trajectory_steps: 64
+    link_surface_point_counts:
+      forearm_link: 16
+      wrist_1_link: 32
+      wrist_2_link: 64
+      wrist_3_link: 96
+      pen_link: 128
+    topk: 32
+    softmin_beta: 75.0
+    d_safe: 0.001
+    sdf_collision_weight: 0.2
+    trajectory_collision_weight: 0.3
+    smooth_weight: 0.01
+    sdf_out_of_bounds_distance_m: 1.0
+    query_chunk_size: 262144
+    cpu_cache_size: 32
+    gpu_cache_size: 8
 
 ema:
   _target_: diffusion_policy_3d.model.diffusion.ema_model.EMAModel
@@ -118,12 +146,12 @@ training:
     warmup_epochs: 20
   pybullet_eval:
     enabled: True
-    stats_path: null
+    stats_path: /root/autodl-tmp/3D-Diffusion-Policy/data/realdex_bspline_stats_free10.npz
     stats_mode: auto
     include_regular_jobs: true
     include_simple_jobs: true
-    jobs_root: data/raw_data/jobs
-    simple_jobs_root: data/raw_data/simple_jobs
+    jobs_root: /root/weld-robot/data_generation/data/generated_jobs
+    simple_jobs_root: /root/weld-robot/data_generation/data/generated_jobs/simple_jobs
     simple_workpiece_id_offset: 1000
     job_name_template: job_{workpiece_id:03d}
     workpiece_filename: workpiece.stl

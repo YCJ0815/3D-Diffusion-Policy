@@ -14,6 +14,10 @@ from diffusion_policy_3d.model.common.normalizer import LinearNormalizer
 from diffusion_policy_3d.policy.base_policy import BasePolicy
 from diffusion_policy_3d.model.diffusion.conditional_unet1d import ConditionalUnet1D
 from diffusion_policy_3d.model.diffusion.mask_generator import LowdimMaskGenerator
+from diffusion_policy_3d.model.diffusion.differentiable_trajectory_loss import (
+    build_differentiable_trajectory_loss,
+    combine_diffusion_and_trajectory_losses,
+)
 from diffusion_policy_3d.common.pytorch_util import dict_apply
 from diffusion_policy_3d.common.model_util import print_params
 from diffusion_policy_3d.model.vision.pointnet_extractor import DP3Encoder
@@ -42,6 +46,7 @@ class DP3(BasePolicy):
             pointnet_type="pointnet",
             pointcloud_encoder_cfg=None,
             action_loss_mask_indices=None,
+            trajectory_loss=None,
             # parameters passed to step
             **kwargs):
         super().__init__()
@@ -107,6 +112,11 @@ class DP3(BasePolicy):
         self.obs_encoder = obs_encoder
         self.model = model
         self.noise_scheduler = noise_scheduler
+        self.trajectory_loss_module = build_differentiable_trajectory_loss(
+            config=trajectory_loss,
+            horizon=horizon,
+            prediction_type=noise_scheduler.config.prediction_type,
+        )
         
         
         self.noise_scheduler_pc = copy.deepcopy(noise_scheduler)
@@ -396,14 +406,9 @@ class DP3(BasePolicy):
         loss = loss.mean()
         
 
-        loss_dict = {
-                'bc_loss': loss.item(),
-            }
-
-        # print(f"t2-t1: {t2-t1:.3f}")
-        # print(f"t3-t2: {t3-t2:.3f}")
-        # print(f"t4-t3: {t4-t3:.3f}")
-        # print(f"t5-t4: {t5-t4:.3f}")
-        # print(f"t6-t5: {t6-t5:.3f}")
-        
-        return loss, loss_dict
+        return combine_diffusion_and_trajectory_losses(
+            trajectory_loss_module=self.trajectory_loss_module,
+            diffusion_loss=loss,
+            predicted_clean_action=pred[..., :self.action_dim],
+            batch=batch,
+        )

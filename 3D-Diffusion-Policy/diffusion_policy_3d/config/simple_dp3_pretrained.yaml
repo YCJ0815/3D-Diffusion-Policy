@@ -66,6 +66,8 @@ policy:
     pretrained_checkpoint_path: /root/autodl-tmp/point-net/log/joint_collision_distance/0610/best_model.pth
     freeze_pretrained: true
     unfreeze_last_layer: false
+  trajectory_loss:
+    enabled: false
 
 ema:
   _target_: diffusion_policy_3d.model.diffusion.ema_model.EMAModel

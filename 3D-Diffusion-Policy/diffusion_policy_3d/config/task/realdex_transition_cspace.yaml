@@ -29,7 +29,7 @@ env_runner: null
 
 dataset:
   _target_: diffusion_policy_3d.dataset.transition_cspace_dataset.TransitionTrajectoryCSpaceDataset
-  zarr_path: data/realdex_transition.zarr
+  zarr_path: /root/autodl-tmp/3D-Diffusion-Policy/data/realdex_bspline_free10.zarr
   cspace_feature_dir: /root/autodl-tmp/3D-Diffusion-Policy/analysis_outputs/workpiece_key_config_collision_features
   cspace_feature_filename: workpiece_key_config_features.npy
   cspace_workpiece_ids_filename: workpiece_ids.npy
