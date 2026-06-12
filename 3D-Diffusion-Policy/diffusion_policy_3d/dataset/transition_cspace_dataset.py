@@ -165,3 +165,12 @@ class TransitionTrajectoryCSpaceDataset(TransitionTrajectoryDataset):
             self.cspace_features[feature_row]
         )
         return data
+
+    def get_cspace_feature_by_workpiece_id(self, workpiece_id: int) -> np.ndarray:
+        workpiece_id = int(workpiece_id)
+        if workpiece_id not in self.cspace_row_by_workpiece_id:
+            raise KeyError(
+                f"C-space feature is missing for workpiece_id={workpiece_id}."
+            )
+        feature_row = self.cspace_row_by_workpiece_id[workpiece_id]
+        return np.asarray(self.cspace_features[feature_row], dtype=np.float32)

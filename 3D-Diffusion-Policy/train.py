@@ -373,6 +373,7 @@ class TrainDP3Workspace:
                                 obs_keys=val_dataset.obs_keys,
                                 n_obs_steps=cfg.n_obs_steps,
                                 device=device,
+                                dataset=val_dataset,
                             )
                         )
 

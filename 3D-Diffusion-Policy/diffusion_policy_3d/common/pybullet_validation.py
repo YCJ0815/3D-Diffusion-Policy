@@ -792,9 +792,12 @@ class PyBulletValidationRunner:
         self,
         replay_buffer,
         episode_idx: int,
+        workpiece_id: int,
         obs_keys: tuple[str, ...],
         n_obs_steps: int,
         device: torch.device,
+        dataset=None,
+        policy=None,
     ) -> tuple[dict[str, torch.Tensor], dict[str, np.ndarray]]:
         import torch
 
@@ -814,6 +817,19 @@ class PyBulletValidationRunner:
                 value = np.concatenate([value, pad], axis=0)
             raw_obs[key] = value.copy()
             obs_batch[key] = torch.from_numpy(value[None]).to(device)
+
+        cspace_feature_key = getattr(policy, "cspace_feature_key", None)
+        if cspace_feature_key is not None:
+            if dataset is None or not hasattr(dataset, "get_cspace_feature_by_workpiece_id"):
+                raise KeyError(
+                    "PyBullet validation requires a dataset that can provide "
+                    f"{cspace_feature_key!r} for the current policy."
+                )
+            cspace_feature = dataset.get_cspace_feature_by_workpiece_id(workpiece_id)
+            raw_obs[cspace_feature_key] = cspace_feature.copy()
+            obs_batch[cspace_feature_key] = torch.from_numpy(
+                cspace_feature[None]
+            ).to(device)
         return obs_batch, raw_obs
 
     def run(
@@ -824,6 +840,7 @@ class PyBulletValidationRunner:
         obs_keys: tuple[str, ...],
         n_obs_steps: int,
         device: torch.device,
+        dataset=None,
     ) -> dict[str, float]:
         import torch
 
@@ -846,9 +863,12 @@ class PyBulletValidationRunner:
                 obs_dict, raw_obs = self._build_obs_batch(
                     replay_buffer=replay_buffer,
                     episode_idx=episode_idx,
+                    workpiece_id=int(workpiece_ids[episode_idx]),
                     obs_keys=obs_keys,
                     n_obs_steps=n_obs_steps,
                     device=device,
+                    dataset=dataset,
+                    policy=policy,
                 )
                 result = policy.predict_action(obs_dict)
                 pred_action_horizon = result["action_pred"][0].detach().cpu().numpy().astype(np.float32)
