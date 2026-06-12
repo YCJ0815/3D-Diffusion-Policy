@@ -8,7 +8,7 @@ task_name: ${task.name}
 shape_meta: ${task.shape_meta}
 exp_name: "dp3_cspace"
 
-horizon: 16
+horizon: 10
 n_obs_steps: 1
 n_action_steps: 10
 n_latency_steps: 0
