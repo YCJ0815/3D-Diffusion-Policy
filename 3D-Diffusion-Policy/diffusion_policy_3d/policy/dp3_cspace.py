@@ -248,14 +248,14 @@ class DP3CSpace(DP3):
                 batch_size, *value.shape[2:]
             ),
         )
-        obs_feature = self.obs_encoder(one_step_obs)
+        obs_feature = self.obs_encoder(one_step_obs).clone()
         cspace_feature = self._validate_cspace_feature(
             cspace_feature, batch_size=batch_size
         )
-        z_space = self.cspace_encoder(cspace_feature)
+        z_space = self.cspace_encoder(cspace_feature).clone()
         _print_cspace_encoder_stats_once(self, z_space)
         fused_feature = torch.cat([obs_feature, z_space], dim=-1)
-        return self.fusion_mlp(fused_feature)
+        return self.fusion_mlp(fused_feature).clone()
 
     def _split_observations(self, obs_dict):
         if self.cspace_feature_key not in obs_dict:
@@ -519,14 +519,14 @@ class SimpleDP3CSpace(SimpleDP3):
                 batch_size, *value.shape[2:]
             ),
         )
-        obs_feature = self.obs_encoder(one_step_obs)
+        obs_feature = self.obs_encoder(one_step_obs).clone()
         cspace_feature = self._validate_cspace_feature(
             cspace_feature, batch_size=batch_size
         )
-        z_space = self.cspace_encoder(cspace_feature)
+        z_space = self.cspace_encoder(cspace_feature).clone()
         _print_cspace_encoder_stats_once(self, z_space)
         fused_feature = torch.cat([obs_feature, z_space], dim=-1)
-        return self.fusion_mlp(fused_feature)
+        return self.fusion_mlp(fused_feature).clone()
 
     def _split_observations(self, obs_dict):
         if self.cspace_feature_key not in obs_dict:

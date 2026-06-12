@@ -349,7 +349,7 @@ class TrainDP3Workspace:
         if ema_compile_log:
             cprint("[Compile][ema] " + ", ".join(ema_compile_log), "yellow")
 
-        if hasattr(self.model, "debug_compare_global_condition"):
+        if cfg.training.debug and hasattr(self.model, "debug_compare_global_condition"):
             debug_batch = next(iter(train_dataloader))
             debug_obs_cpu = debug_batch["obs"]
             print("obs keys:", sorted(debug_obs_cpu.keys()))
