@@ -223,15 +223,24 @@ class TrainDP3Workspace:
 
         if hasattr(self.model, "debug_compare_global_condition"):
             debug_batch = next(iter(train_dataloader))
-            print(debug_batch["obs"]["point_cloud"].shape)
-            print(debug_batch["obs"]["low_dim"].shape)
-            print(debug_batch["obs"]["cspace_feature"].shape)
-            print(debug_batch["obs"]["cspace_feature"].mean())
-            print(debug_batch["obs"]["cspace_feature"].std())
-            print(debug_batch["obs"]["cspace_feature"].min())
-            print(debug_batch["obs"]["cspace_feature"].max())
+            debug_obs_cpu = debug_batch["obs"]
+            print("obs keys:", sorted(debug_obs_cpu.keys()))
+            if "point_cloud" in debug_obs_cpu:
+                print('batch["obs"]["point_cloud"].shape =', debug_obs_cpu["point_cloud"].shape)
+            low_dim_keys = [
+                key for key, meta in cfg.task.shape_meta.obs.items()
+                if meta.get("type") == "low_dim" and key in debug_obs_cpu
+            ]
+            for key in low_dim_keys:
+                print(f'batch["obs"]["{key}"].shape =', debug_obs_cpu[key].shape)
+            if "cspace_feature" in debug_obs_cpu:
+                print('batch["obs"]["cspace_feature"].shape =', debug_obs_cpu["cspace_feature"].shape)
+                print('batch["obs"]["cspace_feature"].mean() =', debug_obs_cpu["cspace_feature"].mean())
+                print('batch["obs"]["cspace_feature"].std() =', debug_obs_cpu["cspace_feature"].std())
+                print('batch["obs"]["cspace_feature"].min() =', debug_obs_cpu["cspace_feature"].min())
+                print('batch["obs"]["cspace_feature"].max() =', debug_obs_cpu["cspace_feature"].max())
             debug_obs = dict_apply(
-                debug_batch["obs"],
+                debug_obs_cpu,
                 lambda x: x.to(device, non_blocking=True),
             )
             self.model.eval()
