@@ -559,7 +559,7 @@ class TrainDP3Workspace:
                         obs_dict = batch['obs']
                         gt_action = batch['action']
 
-                        with _autocast_context(precision_runtime, device):
+                        with torch.no_grad():
                             result = policy.predict_action(obs_dict)
                         pred_action = result['action_pred']
                         mse = torch.nn.functional.mse_loss(pred_action, gt_action)
