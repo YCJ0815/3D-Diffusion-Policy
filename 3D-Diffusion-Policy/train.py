@@ -90,11 +90,9 @@ def _resolve_amp_dtype(name: str) -> torch.dtype:
 def _build_precision_runtime(cfg, device: torch.device) -> dict[str, object]:
     perf_cfg = OmegaConf.select(cfg, "training.performance", default={}) or {}
     tf32_enabled = bool(perf_cfg.get("tf32", device.type == "cuda"))
-    cudnn_benchmark = bool(perf_cfg.get("cudnn_benchmark", device.type == "cuda"))
     if device.type == "cuda":
         torch.backends.cuda.matmul.allow_tf32 = tf32_enabled
         torch.backends.cudnn.allow_tf32 = tf32_enabled
-        torch.backends.cudnn.benchmark = cudnn_benchmark
         if tf32_enabled:
             torch.set_float32_matmul_precision("high")
 
@@ -111,7 +109,6 @@ def _build_precision_runtime(cfg, device: torch.device) -> dict[str, object]:
 
     return {
         "tf32_enabled": tf32_enabled,
-        "cudnn_benchmark": cudnn_benchmark,
         "amp_enabled": amp_enabled,
         "amp_dtype_name": amp_dtype_name,
         "amp_dtype": amp_dtype,
@@ -128,62 +125,11 @@ def _autocast_context(precision_runtime: dict[str, object], device: torch.device
     )
 
 
-def _compiler_mark_step_begin() -> None:
-    compiler = getattr(torch, "compiler", None)
-    if compiler is None:
-        return
-    mark_fn = getattr(compiler, "cudagraph_mark_step_begin", None)
-    if mark_fn is None:
-        return
-    mark_fn()
-
-
 def _sanitize_dataloader_cfg(dataloader_cfg):
     if int(dataloader_cfg.get("num_workers", 0)) == 0 and bool(
             dataloader_cfg.get("persistent_workers", False)):
         dataloader_cfg.persistent_workers = False
     return dataloader_cfg
-
-
-def _compile_module_if_requested(
-        owner,
-        module_name: str,
-        performance_cfg,
-        compile_log: list[str]) -> None:
-    compile_cfg = performance_cfg.get("compile", {}) or {}
-    if not bool(compile_cfg.get("enabled", False)):
-        return
-    if not hasattr(torch, "compile"):
-        compile_log.append(f"{module_name}=skip(torch.compile unavailable)")
-        return
-    if not hasattr(owner, module_name):
-        return
-    module = getattr(owner, module_name)
-    if module is None:
-        return
-    mode = str(compile_cfg.get("mode", "reduce-overhead"))
-    fullgraph = bool(compile_cfg.get("fullgraph", False))
-    dynamic = bool(compile_cfg.get("dynamic", False))
-    try:
-        compiled = torch.compile(
-            module,
-            mode=mode,
-            fullgraph=fullgraph,
-            dynamic=dynamic,
-        )
-    except Exception as exc:
-        compile_log.append(f"{module_name}=fallback({type(exc).__name__})")
-        return
-    setattr(owner, module_name, compiled)
-    compile_log.append(f"{module_name}=compiled")
-
-
-def _optimize_policy_modules(policy, cfg) -> list[str]:
-    perf_cfg = OmegaConf.select(cfg, "training.performance", default={}) or {}
-    compile_log = []
-    for module_name in ("obs_encoder", "model", "cspace_encoder", "fusion_mlp"):
-        _compile_module_if_requested(policy, module_name, perf_cfg, compile_log)
-    return compile_log
 
 class TrainDP3Workspace:
     include_keys = ['global_step', 'epoch']
@@ -330,26 +276,17 @@ class TrainDP3Workspace:
         self.model.to(device)
         if self.ema_model is not None:
             self.ema_model.to(device)
-        model_compile_log = _optimize_policy_modules(self.model, cfg)
-        ema_compile_log = []
-        if self.ema_model is not None:
-            ema_compile_log = _optimize_policy_modules(self.ema_model, cfg)
         optimizer_to(self.optimizer, device)
         precision_runtime = _build_precision_runtime(cfg, device)
         cprint(
             "[Precision] "
             f"tf32={precision_runtime['tf32_enabled']} "
-            f"cudnn_benchmark={precision_runtime['cudnn_benchmark']} "
             f"amp={precision_runtime['amp_enabled']} "
             f"dtype={precision_runtime['amp_dtype_name']}",
             "yellow",
         )
-        if model_compile_log:
-            cprint("[Compile][model] " + ", ".join(model_compile_log), "yellow")
-        if ema_compile_log:
-            cprint("[Compile][ema] " + ", ".join(ema_compile_log), "yellow")
 
-        if cfg.training.debug and hasattr(self.model, "debug_compare_global_condition"):
+        if hasattr(self.model, "debug_compare_global_condition"):
             debug_batch = next(iter(train_dataloader))
             debug_obs_cpu = debug_batch["obs"]
             print("obs keys:", sorted(debug_obs_cpu.keys()))
@@ -432,7 +369,6 @@ class TrainDP3Workspace:
                     
                         # compute loss
                         t1_1 = time.time()
-                        _compiler_mark_step_begin()
                         with _autocast_context(precision_runtime, device):
                             raw_loss, loss_dict = self.model.compute_loss(batch)
                         loss = raw_loss / cfg.training.gradient_accumulate_every
@@ -520,7 +456,6 @@ class TrainDP3Workspace:
                                 leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
                             for batch_idx, batch in enumerate(tepoch):
                                 batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-                                _compiler_mark_step_begin()
                                 with _autocast_context(precision_runtime, device):
                                     loss, loss_dict = policy.compute_loss(batch)
                                 val_losses.append(loss)
@@ -596,7 +531,6 @@ class TrainDP3Workspace:
                         obs_dict = batch['obs']
                         gt_action = batch['action']
 
-                        _compiler_mark_step_begin()
                         with _autocast_context(precision_runtime, device):
                             result = policy.predict_action(obs_dict)
                         pred_action = result['action_pred']

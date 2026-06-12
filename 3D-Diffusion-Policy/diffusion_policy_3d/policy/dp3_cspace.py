@@ -51,31 +51,17 @@ def _print_cspace_encoder_stats_once(policy, z_space: torch.Tensor) -> None:
     print("z_space norm:", z_space.norm(dim=-1).mean().item())
 
 
-def _compiler_mark_step_begin() -> None:
-    compiler = getattr(torch, "compiler", None)
-    if compiler is None:
-        return
-    mark_fn = getattr(compiler, "cudagraph_mark_step_begin", None)
-    if mark_fn is None:
-        return
-    mark_fn()
-
-
 def _debug_compare_global_cond(policy, obs_dict: Dict[str, torch.Tensor]) -> None:
     if getattr(policy, "_cspace_debug_global_cond_checked", False):
         return
     policy._cspace_debug_global_cond_checked = True
     with torch.no_grad():
         normalized_obs, cspace_feature = policy._split_observations(obs_dict)
-        _compiler_mark_step_begin()
-        global_cond = policy._encode_global_condition(
-            normalized_obs, cspace_feature
-        ).clone()
+        global_cond = policy._encode_global_condition(normalized_obs, cspace_feature)
         zero_cspace_feature = torch.zeros_like(cspace_feature)
-        _compiler_mark_step_begin()
         global_cond_zeroed = policy._encode_global_condition(
             normalized_obs, zero_cspace_feature
-        ).clone()
+        )
         global_cond_delta = global_cond - global_cond_zeroed
         print("global_cond mean:", global_cond.mean().item())
         print("global_cond std:", global_cond.std().item())
@@ -248,14 +234,14 @@ class DP3CSpace(DP3):
                 batch_size, *value.shape[2:]
             ),
         )
-        obs_feature = self.obs_encoder(one_step_obs).clone()
+        obs_feature = self.obs_encoder(one_step_obs)
         cspace_feature = self._validate_cspace_feature(
             cspace_feature, batch_size=batch_size
         )
-        z_space = self.cspace_encoder(cspace_feature).clone()
+        z_space = self.cspace_encoder(cspace_feature)
         _print_cspace_encoder_stats_once(self, z_space)
         fused_feature = torch.cat([obs_feature, z_space], dim=-1)
-        return self.fusion_mlp(fused_feature).clone()
+        return self.fusion_mlp(fused_feature)
 
     def _split_observations(self, obs_dict):
         if self.cspace_feature_key not in obs_dict:
@@ -519,14 +505,14 @@ class SimpleDP3CSpace(SimpleDP3):
                 batch_size, *value.shape[2:]
             ),
         )
-        obs_feature = self.obs_encoder(one_step_obs).clone()
+        obs_feature = self.obs_encoder(one_step_obs)
         cspace_feature = self._validate_cspace_feature(
             cspace_feature, batch_size=batch_size
         )
-        z_space = self.cspace_encoder(cspace_feature).clone()
+        z_space = self.cspace_encoder(cspace_feature)
         _print_cspace_encoder_stats_once(self, z_space)
         fused_feature = torch.cat([obs_feature, z_space], dim=-1)
-        return self.fusion_mlp(fused_feature).clone()
+        return self.fusion_mlp(fused_feature)
 
     def _split_observations(self, obs_dict):
         if self.cspace_feature_key not in obs_dict:
