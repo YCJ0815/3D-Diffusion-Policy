@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from diffusion_policy_3d.common.bspline import build_bspline_basis_matrix
 from diffusion_policy_3d.common.pybullet_validation import (
     _apply_origin_transform,
     _expand_urdf_package_roots,
@@ -178,10 +179,28 @@ class DifferentiableTrajectoryLoss(nn.Module):
             raise ValueError(f"Trajectory stats std must be positive: {std.tolist()}")
         expected_basis_shape = (self.trajectory_steps, self.num_control_points)
         if basis_matrix.shape != expected_basis_shape:
-            raise ValueError(
-                f"Trajectory basis_matrix must have shape {expected_basis_shape}, "
-                f"got {basis_matrix.shape}"
+            knot_vector = (
+                np.asarray(stats["knot_vector"], dtype=np.float32)
+                if "knot_vector" in stats.files
+                else None
             )
+            if knot_vector is None:
+                raise ValueError(
+                    f"Trajectory basis_matrix must have shape {expected_basis_shape}, "
+                    f"got {basis_matrix.shape}, and no knot_vector is available for rebuild."
+                )
+            spline_degree = knot_vector.shape[0] - self.num_control_points - 1
+            sample_parameters = np.linspace(
+                0.0,
+                1.0,
+                self.trajectory_steps,
+                dtype=np.float64,
+            )
+            basis_matrix = build_bspline_basis_matrix(
+                sample_parameters=sample_parameters,
+                num_control_points=self.num_control_points,
+                degree=spline_degree,
+            ).astype(np.float32)
         if not np.all(np.isfinite(basis_matrix)):
             raise ValueError(f"Trajectory basis matrix contains non-finite values: {self.stats_path}")
         self.register_buffer("delta_w_mean", torch.from_numpy(mean))
