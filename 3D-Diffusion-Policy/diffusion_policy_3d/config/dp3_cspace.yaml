@@ -24,7 +24,7 @@ policy:
   use_mid_condition: true
   use_up_condition: true
   diffusion_step_embed_dim: 128
-  down_dims: [512, 1024, 2048]
+  down_dims: [512, 1024]
   crop_shape: [80, 80]
   encoder_output_dim: 64
   encoder_dropout_prob: 0.1

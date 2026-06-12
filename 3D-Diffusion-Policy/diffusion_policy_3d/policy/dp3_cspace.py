@@ -38,6 +38,18 @@ class CSpaceEncoder(nn.Module):
 
 
 class DP3CSpace(DP3):
+    @staticmethod
+    def _validate_temporal_downsampling_compatibility(horizon, down_dims):
+        horizon = int(horizon)
+        num_downsamples = max(len(tuple(down_dims)) - 1, 0)
+        required_multiple = 2 ** num_downsamples
+        if required_multiple > 1 and (horizon % required_multiple) != 0:
+            raise ValueError(
+                "DP3CSpace requires a horizon compatible with the temporal U-Net "
+                f"downsampling stack. Got horizon={horizon}, down_dims={tuple(down_dims)}; "
+                f"horizon must be divisible by {required_multiple}."
+            )
+
     def __init__(
             self,
             shape_meta: dict,
@@ -78,6 +90,7 @@ class DP3CSpace(DP3):
             raise ValueError(
                 f"n_action_steps ({n_action_steps}) cannot exceed horizon ({horizon})."
             )
+        self._validate_temporal_downsampling_compatibility(horizon, down_dims)
         if condition_type != "film":
             raise ValueError(
                 f"DP3CSpace currently supports condition_type='film', got {condition_type!r}."
