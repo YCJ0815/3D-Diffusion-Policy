@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import multiprocessing as mp
 from dataclasses import dataclass
 from pathlib import Path
 import tempfile
@@ -287,6 +288,10 @@ class PyBulletValidationConfig:
     sdf_out_of_bounds_value_m: float | None = None
     log_legacy_pybullet_metrics: bool = True
     progress_mininterval_sec: float = 1.0
+    num_workers: int = 1
+    inference_batch_size: int = 32
+    worker_start_method: str = "spawn"
+    worker_chunksize: int = 1
 
     @classmethod
     def from_omegaconf(cls, cfg) -> "PyBulletValidationConfig":
@@ -324,7 +329,39 @@ class PyBulletValidationConfig:
             ),
             log_legacy_pybullet_metrics=bool(cfg.get("log_legacy_pybullet_metrics", True)),
             progress_mininterval_sec=float(cfg.get("progress_mininterval_sec", 1.0)),
+            num_workers=int(cfg.get("num_workers", 1)),
+            inference_batch_size=int(cfg.get("inference_batch_size", 32)),
+            worker_start_method=str(cfg.get("worker_start_method", "spawn")),
+            worker_chunksize=int(cfg.get("worker_chunksize", 1)),
         )
+
+
+_PYBULLET_VALIDATION_WORKER: PyBulletCollisionValidator | None = None
+
+
+def _init_pybullet_validation_worker(cfg: PyBulletValidationConfig) -> None:
+    global _PYBULLET_VALIDATION_WORKER
+    _PYBULLET_VALIDATION_WORKER = PyBulletCollisionValidator(cfg)
+
+
+def _run_pybullet_validation_task(task: dict[str, np.ndarray | int]) -> dict[str, float | bool]:
+    global _PYBULLET_VALIDATION_WORKER
+    if _PYBULLET_VALIDATION_WORKER is None:
+        raise RuntimeError("PyBullet validation worker was not initialized.")
+    validator = _PYBULLET_VALIDATION_WORKER
+    start_joint_normalized = np.asarray(task["start_joint_normalized"], dtype=np.float32)
+    joint_trajectory = validator.reconstruct_joint_trajectory(
+        pred_action_horizon=np.asarray(task["pred_action_horizon"], dtype=np.float32),
+        start_joint_normalized=start_joint_normalized,
+        end_joint_normalized=np.asarray(task["end_joint_normalized"], dtype=np.float32),
+    )
+    start_joint_state = validator._unnormalize_joint_state(start_joint_normalized)
+    return validator.evaluate_trajectory(
+        workpiece_id=int(task["workpiece_id"]),
+        joint_trajectory=joint_trajectory,
+        start_joint_state=start_joint_state,
+        goal_position_normalized=np.asarray(task["goal_position_normalized"], dtype=np.float32),
+    )
 
 
 class PyBulletCollisionValidator:
@@ -810,6 +847,42 @@ class PyBulletValidationRunner:
     def close(self) -> None:
         self.validator.close()
 
+    def _build_obs_entry(
+        self,
+        replay_buffer,
+        episode_idx: int,
+        workpiece_id: int,
+        obs_keys: tuple[str, ...],
+        n_obs_steps: int,
+        dataset=None,
+        policy=None,
+    ) -> dict[str, np.ndarray]:
+        episode_ends = np.asarray(replay_buffer.episode_ends[:], dtype=np.int64)
+        start_idx, end_idx = _episode_bounds(episode_ends, episode_idx)
+        episode_length = end_idx - start_idx
+        if episode_length <= 0:
+            raise ValueError(f"Episode {episode_idx} is empty.")
+        raw_obs: dict[str, np.ndarray] = {}
+        for key in obs_keys:
+            value = np.asarray(replay_buffer[key][start_idx:end_idx], dtype=np.float32)
+            value = value[:n_obs_steps]
+            if value.shape[0] < n_obs_steps:
+                pad_count = n_obs_steps - value.shape[0]
+                pad = np.repeat(value[-1:], pad_count, axis=0)
+                value = np.concatenate([value, pad], axis=0)
+            raw_obs[key] = value.copy()
+
+        cspace_feature_key = getattr(policy, "cspace_feature_key", None)
+        if cspace_feature_key is not None:
+            if dataset is None or not hasattr(dataset, "get_cspace_feature_by_workpiece_id"):
+                raise KeyError(
+                    "PyBullet validation requires a dataset that can provide "
+                    f"{cspace_feature_key!r} for the current policy."
+                )
+            cspace_feature = dataset.get_cspace_feature_by_workpiece_id(workpiece_id)
+            raw_obs[cspace_feature_key] = np.asarray(cspace_feature, dtype=np.float32).copy()
+        return raw_obs
+
     def _build_obs_batch(
         self,
         replay_buffer,
@@ -823,36 +896,74 @@ class PyBulletValidationRunner:
     ) -> tuple[dict[str, torch.Tensor], dict[str, np.ndarray]]:
         import torch
 
-        episode_ends = np.asarray(replay_buffer.episode_ends[:], dtype=np.int64)
-        start_idx, end_idx = _episode_bounds(episode_ends, episode_idx)
-        episode_length = end_idx - start_idx
-        if episode_length <= 0:
-            raise ValueError(f"Episode {episode_idx} is empty.")
-        obs_batch: dict[str, torch.Tensor] = {}
-        raw_obs: dict[str, np.ndarray] = {}
-        for key in obs_keys:
-            value = np.asarray(replay_buffer[key][start_idx:end_idx], dtype=np.float32)
-            value = value[:n_obs_steps]
-            if value.shape[0] < n_obs_steps:
-                pad_count = n_obs_steps - value.shape[0]
-                pad = np.repeat(value[-1:], pad_count, axis=0)
-                value = np.concatenate([value, pad], axis=0)
-            raw_obs[key] = value.copy()
-            obs_batch[key] = torch.from_numpy(value[None]).to(device)
-
-        cspace_feature_key = getattr(policy, "cspace_feature_key", None)
-        if cspace_feature_key is not None:
-            if dataset is None or not hasattr(dataset, "get_cspace_feature_by_workpiece_id"):
-                raise KeyError(
-                    "PyBullet validation requires a dataset that can provide "
-                    f"{cspace_feature_key!r} for the current policy."
-                )
-            cspace_feature = dataset.get_cspace_feature_by_workpiece_id(workpiece_id)
-            raw_obs[cspace_feature_key] = cspace_feature.copy()
-            obs_batch[cspace_feature_key] = torch.from_numpy(
-                cspace_feature[None]
-            ).to(device)
+        raw_obs = self._build_obs_entry(
+            replay_buffer=replay_buffer,
+            episode_idx=episode_idx,
+            workpiece_id=workpiece_id,
+            obs_keys=obs_keys,
+            n_obs_steps=n_obs_steps,
+            dataset=dataset,
+            policy=policy,
+        )
+        obs_batch: dict[str, torch.Tensor] = {
+            key: torch.from_numpy(value[None]).to(device)
+            for key, value in raw_obs.items()
+        }
         return obs_batch, raw_obs
+
+    def _build_obs_batch_for_episodes(
+        self,
+        replay_buffer,
+        episode_indices: list[int],
+        workpiece_ids: np.ndarray,
+        obs_keys: tuple[str, ...],
+        n_obs_steps: int,
+        device: torch.device,
+        dataset=None,
+        policy=None,
+    ) -> tuple[dict[str, torch.Tensor], list[dict[str, np.ndarray]]]:
+        import torch
+
+        raw_obs_list = [
+            self._build_obs_entry(
+                replay_buffer=replay_buffer,
+                episode_idx=int(episode_idx),
+                workpiece_id=int(workpiece_ids[int(episode_idx)]),
+                obs_keys=obs_keys,
+                n_obs_steps=n_obs_steps,
+                dataset=dataset,
+                policy=policy,
+            )
+            for episode_idx in episode_indices
+        ]
+        obs_batch = {
+            key: torch.from_numpy(
+                np.stack([raw_obs[key] for raw_obs in raw_obs_list], axis=0)
+            ).to(device)
+            for key in raw_obs_list[0].keys()
+        }
+        return obs_batch, raw_obs_list
+
+    @staticmethod
+    def _update_progress_stats(
+        metric: dict[str, float | bool],
+        processed_count: int,
+        running_collision_count: int,
+        running_valid_sdf_count: int,
+        running_min_sdf_distance_m: float,
+    ) -> tuple[int, int, float]:
+        if metric["has_collision"]:
+            running_collision_count += 1
+        current_min_sdf_distance_m = float(metric["min_sdf_distance_m"])
+        if not np.isnan(current_min_sdf_distance_m):
+            running_valid_sdf_count += 1
+            running_min_sdf_distance_m = min(running_min_sdf_distance_m, current_min_sdf_distance_m)
+        _ = processed_count
+        return (
+            running_collision_count,
+            running_valid_sdf_count,
+            running_min_sdf_distance_m,
+        )
 
     def run(
         self,
@@ -893,29 +1004,47 @@ class PyBulletValidationRunner:
         if episode_indices.size == 0:
             return {}
 
+        if self.cfg.num_workers <= 0:
+            raise ValueError(
+                f"training.pybullet_eval.num_workers must be >= 1, got {self.cfg.num_workers}"
+            )
+        if self.cfg.inference_batch_size <= 0:
+            raise ValueError(
+                "training.pybullet_eval.inference_batch_size must be >= 1, "
+                f"got {self.cfg.inference_batch_size}"
+            )
+        if self.cfg.worker_chunksize <= 0:
+            raise ValueError(
+                "training.pybullet_eval.worker_chunksize must be >= 1, "
+                f"got {self.cfg.worker_chunksize}"
+            )
+
         sample_metrics = []
         running_collision_count = 0
         running_valid_sdf_count = 0
         running_min_sdf_distance_m = float("inf")
         policy.eval()
         episode_list = episode_indices.tolist()
+        tasks: list[dict[str, np.ndarray | int]] = []
         if tqdm is not None:
-            progress = tqdm.tqdm(
-                episode_list,
-                desc="PyBullet validation",
+            inference_progress = tqdm.tqdm(
+                total=len(episode_list),
+                desc="PyBullet inference",
                 leave=True,
                 mininterval=max(float(self.cfg.progress_mininterval_sec), 0.1),
             )
         else:
-            print(f"[PyBullet validation] start {len(episode_list)} episodes")
-            progress = episode_list
+            print(f"[PyBullet inference] start {len(episode_list)} episodes")
+            inference_progress = None
         with torch.no_grad():
-            for step_idx, episode_idx in enumerate(progress, start=1):
-                workpiece_id = int(workpiece_ids[episode_idx])
-                obs_dict, raw_obs = self._build_obs_batch(
+            for batch_start in range(0, len(episode_list), int(self.cfg.inference_batch_size)):
+                batch_episode_indices = episode_list[
+                    batch_start: batch_start + int(self.cfg.inference_batch_size)
+                ]
+                obs_dict, raw_obs_list = self._build_obs_batch_for_episodes(
                     replay_buffer=replay_buffer,
-                    episode_idx=episode_idx,
-                    workpiece_id=workpiece_id,
+                    episode_indices=batch_episode_indices,
+                    workpiece_ids=workpiece_ids,
                     obs_keys=obs_keys,
                     n_obs_steps=n_obs_steps,
                     device=device,
@@ -923,50 +1052,135 @@ class PyBulletValidationRunner:
                     policy=policy,
                 )
                 result = policy.predict_action(obs_dict)
-                pred_action_horizon = result["action_pred"][0].detach().cpu().numpy().astype(np.float32)
+                pred_action_batch = result["action_pred"].detach().cpu().numpy().astype(np.float32)
+                for local_idx, episode_idx in enumerate(batch_episode_indices):
+                    raw_obs = raw_obs_list[local_idx]
+                    tasks.append({
+                        "episode_idx": int(episode_idx),
+                        "workpiece_id": int(workpiece_ids[int(episode_idx)]),
+                        "pred_action_horizon": pred_action_batch[local_idx],
+                        "start_joint_normalized": raw_obs["first_joint_angles_normalized"][0].astype(np.float32),
+                        "end_joint_normalized": raw_obs["last_joint_angles_normalized"][0].astype(np.float32),
+                        "goal_position_normalized": raw_obs["goal_position"][0].astype(np.float32),
+                    })
+                if inference_progress is not None:
+                    inference_progress.update(len(batch_episode_indices))
+                else:
+                    processed = len(tasks)
+                    if processed == len(episode_list) or processed == len(batch_episode_indices) or processed % 10 == 0:
+                        print(f"[PyBullet inference] {processed}/{len(episode_list)} episodes")
+        if inference_progress is not None:
+            inference_progress.close()
+        else:
+            print(f"[PyBullet inference] done {len(episode_list)} episodes")
+
+        if tqdm is not None:
+            validation_progress = tqdm.tqdm(
+                total=len(tasks),
+                desc="PyBullet validation",
+                leave=True,
+                mininterval=max(float(self.cfg.progress_mininterval_sec), 0.1),
+            )
+        else:
+            print(f"[PyBullet validation] start {len(tasks)} episodes")
+            validation_progress = None
+
+        def _report_validation_progress(processed_count: int, workpiece_id: int) -> None:
+            min_d_str = (
+                f"{running_min_sdf_distance_m:.4f}"
+                if running_valid_sdf_count > 0
+                else "nan"
+            )
+            if validation_progress is not None:
+                validation_progress.update(1)
+                validation_progress.set_postfix(
+                    {
+                        "wp": workpiece_id,
+                        "coll_rate": f"{running_collision_count / processed_count:.3f}",
+                        "min_d": min_d_str,
+                    },
+                    refresh=False,
+                )
+            elif processed_count == 1 or processed_count == len(tasks) or processed_count % 10 == 0:
+                print(
+                    "[PyBullet validation] "
+                    f"{processed_count}/{len(tasks)} "
+                    f"workpiece_id={workpiece_id} "
+                    f"collision_rate={running_collision_count / processed_count:.3f} "
+                    f"min_d_min={min_d_str}"
+                )
+
+        if int(self.cfg.num_workers) == 1:
+            for processed_count, task in enumerate(tasks, start=1):
                 joint_trajectory = self.validator.reconstruct_joint_trajectory(
-                    pred_action_horizon=pred_action_horizon,
-                    start_joint_normalized=raw_obs["first_joint_angles_normalized"][0],
-                    end_joint_normalized=raw_obs["last_joint_angles_normalized"][0],
+                    pred_action_horizon=np.asarray(task["pred_action_horizon"], dtype=np.float32),
+                    start_joint_normalized=np.asarray(task["start_joint_normalized"], dtype=np.float32),
+                    end_joint_normalized=np.asarray(task["end_joint_normalized"], dtype=np.float32),
+                )
+                start_joint_state = self.validator._unnormalize_joint_state(
+                    np.asarray(task["start_joint_normalized"], dtype=np.float32)
                 )
                 metric = self.validator.evaluate_trajectory(
-                    workpiece_id=workpiece_id,
+                    workpiece_id=int(task["workpiece_id"]),
                     joint_trajectory=joint_trajectory,
-                    start_joint_state=self.validator._unnormalize_joint_state(raw_obs["first_joint_angles_normalized"][0]),
-                    goal_position_normalized=raw_obs["goal_position"][0],
+                    start_joint_state=start_joint_state,
+                    goal_position_normalized=np.asarray(task["goal_position_normalized"], dtype=np.float32),
                 )
                 sample_metrics.append(metric)
-                if metric["has_collision"]:
-                    running_collision_count += 1
-                current_min_sdf_distance_m = float(metric["min_sdf_distance_m"])
-                if not np.isnan(current_min_sdf_distance_m):
-                    running_valid_sdf_count += 1
-                    running_min_sdf_distance_m = min(running_min_sdf_distance_m, current_min_sdf_distance_m)
-                if tqdm is not None:
-                    postfix = {
-                        "wp": workpiece_id,
-                        "coll_rate": f"{running_collision_count / step_idx:.3f}",
-                    }
-                    if running_valid_sdf_count > 0:
-                        postfix["min_d"] = f"{running_min_sdf_distance_m:.4f}"
-                    else:
-                        postfix["min_d"] = "nan"
-                    progress.set_postfix(postfix, refresh=False)
-                elif step_idx == 1 or step_idx == len(episode_list) or step_idx % 10 == 0:
-                    min_d_str = (
-                        f"{running_min_sdf_distance_m:.4f}"
-                        if running_valid_sdf_count > 0
-                        else "nan"
+                (
+                    running_collision_count,
+                    running_valid_sdf_count,
+                    running_min_sdf_distance_m,
+                ) = self._update_progress_stats(
+                    metric=metric,
+                    processed_count=processed_count,
+                    running_collision_count=running_collision_count,
+                    running_valid_sdf_count=running_valid_sdf_count,
+                    running_min_sdf_distance_m=running_min_sdf_distance_m,
+                )
+                _report_validation_progress(
+                    processed_count=processed_count,
+                    workpiece_id=int(task["workpiece_id"]),
+                )
+        else:
+            mp_context = mp.get_context(self.cfg.worker_start_method)
+            with mp_context.Pool(
+                processes=int(self.cfg.num_workers),
+                initializer=_init_pybullet_validation_worker,
+                initargs=(self.cfg,),
+            ) as pool:
+                for processed_count, (task, metric) in enumerate(
+                    zip(
+                        tasks,
+                        pool.imap(
+                            _run_pybullet_validation_task,
+                            tasks,
+                            chunksize=int(self.cfg.worker_chunksize),
+                        ),
+                    ),
+                    start=1,
+                ):
+                    sample_metrics.append(metric)
+                    (
+                        running_collision_count,
+                        running_valid_sdf_count,
+                        running_min_sdf_distance_m,
+                    ) = self._update_progress_stats(
+                        metric=metric,
+                        processed_count=processed_count,
+                        running_collision_count=running_collision_count,
+                        running_valid_sdf_count=running_valid_sdf_count,
+                        running_min_sdf_distance_m=running_min_sdf_distance_m,
                     )
-                    print(
-                        "[PyBullet validation] "
-                        f"{step_idx}/{len(episode_list)} "
-                        f"workpiece_id={workpiece_id} "
-                        f"collision_rate={running_collision_count / step_idx:.3f} "
-                        f"min_d_min={min_d_str}"
+                    _report_validation_progress(
+                        processed_count=processed_count,
+                        workpiece_id=int(task["workpiece_id"]),
                     )
-        if tqdm is None:
-            print(f"[PyBullet validation] done {len(episode_list)} episodes")
+
+        if validation_progress is not None:
+            validation_progress.close()
+        else:
+            print(f"[PyBullet validation] done {len(tasks)} episodes")
 
         total = float(len(sample_metrics))
         collision_count = sum(1.0 for item in sample_metrics if item["has_collision"])

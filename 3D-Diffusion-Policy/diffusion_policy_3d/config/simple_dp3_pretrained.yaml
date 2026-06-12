@@ -153,6 +153,10 @@ training:
     sdf_out_of_bounds_value_m: null
     log_legacy_pybullet_metrics: True
     progress_mininterval_sec: 1.0
+    num_workers: 1
+    inference_batch_size: 32
+    worker_start_method: spawn
+    worker_chunksize: 1
 
 logging:
   group: ${exp_name}
