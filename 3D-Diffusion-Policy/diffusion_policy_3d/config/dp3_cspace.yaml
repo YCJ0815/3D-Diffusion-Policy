@@ -139,9 +139,15 @@ training:
   tqdm_interval_sec: 1.0
   performance:
     tf32: true
+    cudnn_benchmark: true
     amp:
       enabled: true
       dtype: bf16
+    compile:
+      enabled: true
+      mode: reduce-overhead
+      fullgraph: false
+      dynamic: false
   early_stop:
     enabled: true
     monitor_key: val_loss
