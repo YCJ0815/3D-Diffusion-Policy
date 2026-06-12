@@ -221,6 +221,24 @@ class TrainDP3Workspace:
             self.ema_model.to(device)
         optimizer_to(self.optimizer, device)
 
+        if hasattr(self.model, "debug_compare_global_condition"):
+            debug_batch = next(iter(train_dataloader))
+            print(debug_batch["obs"]["point_cloud"].shape)
+            print(debug_batch["obs"]["low_dim"].shape)
+            print(debug_batch["obs"]["cspace_feature"].shape)
+            print(debug_batch["obs"]["cspace_feature"].mean())
+            print(debug_batch["obs"]["cspace_feature"].std())
+            print(debug_batch["obs"]["cspace_feature"].min())
+            print(debug_batch["obs"]["cspace_feature"].max())
+            debug_obs = dict_apply(
+                debug_batch["obs"],
+                lambda x: x.to(device, non_blocking=True),
+            )
+            self.model.eval()
+            with torch.no_grad():
+                self.model.debug_compare_global_condition(debug_obs)
+            self.model.train()
+
         # save batch for sampling
         train_sampling_batch = None
 

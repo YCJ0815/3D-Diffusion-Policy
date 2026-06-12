@@ -39,6 +39,39 @@ class CSpaceEncoder(nn.Module):
         return self.proj(x)
 
 
+def _print_cspace_encoder_stats_once(policy, z_space: torch.Tensor) -> None:
+    if getattr(policy, "_cspace_debug_stats_printed", False):
+        return
+    policy._cspace_debug_stats_printed = True
+    print("z_space mean:", z_space.mean().item())
+    print("z_space std:", z_space.std().item())
+    print("z_space norm:", z_space.norm(dim=-1).mean().item())
+
+
+def _debug_compare_global_cond(policy, obs_dict: Dict[str, torch.Tensor]) -> None:
+    if getattr(policy, "_cspace_debug_global_cond_checked", False):
+        return
+    policy._cspace_debug_global_cond_checked = True
+    with torch.no_grad():
+        normalized_obs, cspace_feature = policy._split_observations(obs_dict)
+        global_cond = policy._encode_global_condition(normalized_obs, cspace_feature)
+        zero_cspace_feature = torch.zeros_like(cspace_feature)
+        global_cond_zeroed = policy._encode_global_condition(
+            normalized_obs, zero_cspace_feature
+        )
+        global_cond_delta = global_cond - global_cond_zeroed
+        print("global_cond mean:", global_cond.mean().item())
+        print("global_cond std:", global_cond.std().item())
+        print("global_cond_zeroed mean:", global_cond_zeroed.mean().item())
+        print("global_cond_zeroed std:", global_cond_zeroed.std().item())
+        print("global_cond delta mean:", global_cond_delta.abs().mean().item())
+        print("global_cond delta max:", global_cond_delta.abs().max().item())
+        print(
+            "global_cond allclose after zero cspace:",
+            torch.allclose(global_cond, global_cond_zeroed),
+        )
+
+
 class DP3CSpace(DP3):
     @staticmethod
     def _validate_temporal_downsampling_compatibility(horizon, down_dims):
@@ -140,6 +173,8 @@ class DP3CSpace(DP3):
         self.cspace_in_dim = int(cspace_in_dim)
         self.cspace_output_dim = int(cspace_output_dim)
         self.fusion_output_dim = int(fusion_output_dim)
+        self._cspace_debug_stats_printed = False
+        self._cspace_debug_global_cond_checked = False
         self.cspace_encoder = CSpaceEncoder(
             in_dim=self.cspace_in_dim,
             hidden_dim=int(cspace_hidden_dim),
@@ -201,6 +236,7 @@ class DP3CSpace(DP3):
             cspace_feature, batch_size=batch_size
         )
         z_space = self.cspace_encoder(cspace_feature)
+        _print_cspace_encoder_stats_once(self, z_space)
         fused_feature = torch.cat([obs_feature, z_space], dim=-1)
         return self.fusion_mlp(fused_feature)
 
@@ -219,6 +255,9 @@ class DP3CSpace(DP3):
         if not self.use_pc_color:
             normalized_obs["point_cloud"] = normalized_obs["point_cloud"][..., :3]
         return normalized_obs, cspace_feature
+
+    def debug_compare_global_condition(self, obs_dict: Dict[str, torch.Tensor]) -> None:
+        _debug_compare_global_cond(self, obs_dict)
 
     def predict_action(self, obs_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         normalized_obs, cspace_feature = self._split_observations(obs_dict)
@@ -400,6 +439,8 @@ class SimpleDP3CSpace(SimpleDP3):
         self.cspace_in_dim = int(cspace_in_dim)
         self.cspace_output_dim = int(cspace_output_dim)
         self.fusion_output_dim = int(fusion_output_dim)
+        self._cspace_debug_stats_printed = False
+        self._cspace_debug_global_cond_checked = False
         self.cspace_encoder = CSpaceEncoder(
             in_dim=self.cspace_in_dim,
             hidden_dim=int(cspace_hidden_dim),
@@ -461,6 +502,7 @@ class SimpleDP3CSpace(SimpleDP3):
             cspace_feature, batch_size=batch_size
         )
         z_space = self.cspace_encoder(cspace_feature)
+        _print_cspace_encoder_stats_once(self, z_space)
         fused_feature = torch.cat([obs_feature, z_space], dim=-1)
         return self.fusion_mlp(fused_feature)
 
@@ -479,6 +521,9 @@ class SimpleDP3CSpace(SimpleDP3):
         if not self.use_pc_color:
             normalized_obs["point_cloud"] = normalized_obs["point_cloud"][..., :3]
         return normalized_obs, cspace_feature
+
+    def debug_compare_global_condition(self, obs_dict: Dict[str, torch.Tensor]) -> None:
+        _debug_compare_global_cond(self, obs_dict)
 
     def predict_action(self, obs_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         normalized_obs, cspace_feature = self._split_observations(obs_dict)
