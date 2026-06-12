@@ -16,6 +16,22 @@ class TransitionTrajectoryCSpaceDataset(TransitionTrajectoryDataset):
             **kwargs):
         super().__init__(**kwargs)
 
+        if "workpiece_ids" not in self.replay_buffer.meta:
+            raise KeyError(
+                "C-space dataset requires `meta/workpiece_ids` in the zarr dataset."
+            )
+        episode_workpiece_ids = self._read_1d_array(
+            self.replay_buffer.meta["workpiece_ids"],
+            name="zarr meta/workpiece_ids",
+            dtype=np.int64,
+        )
+        if episode_workpiece_ids.shape != (self.replay_buffer.n_episodes,):
+            raise ValueError(
+                "`meta/workpiece_ids` must have shape "
+                f"({self.replay_buffer.n_episodes},), got {episode_workpiece_ids.shape}"
+            )
+        zarr_workpiece_ids = np.unique(episode_workpiece_ids)
+
         feature_dir = self._resolve_feature_dir(cspace_feature_dir)
         feature_path = feature_dir / cspace_feature_filename
         workpiece_ids_path = feature_dir / cspace_workpiece_ids_filename
@@ -30,9 +46,11 @@ class TransitionTrajectoryCSpaceDataset(TransitionTrajectoryDataset):
             )
 
         features = np.asarray(np.load(feature_path), dtype=np.float32)
-        workpiece_ids = np.asarray(
-            np.load(workpiece_ids_path), dtype=np.int64
-        ).reshape(-1)
+        workpiece_ids = self._read_1d_array(
+            np.load(workpiece_ids_path),
+            name=str(workpiece_ids_path),
+            dtype=np.int64,
+        )
 
         if features.ndim != 3 or features.shape[1:] != (128, 2):
             raise ValueError(
@@ -57,24 +75,21 @@ class TransitionTrajectoryCSpaceDataset(TransitionTrajectoryDataset):
                 "C-space workpiece IDs must be unique; duplicates: "
                 f"{duplicate_ids.tolist()}"
             )
-        if "workpiece_ids" not in self.replay_buffer.meta:
-            raise KeyError(
-                "C-space dataset requires `meta/workpiece_ids` in the zarr dataset."
-            )
-
-        episode_workpiece_ids = np.asarray(
-            self.replay_buffer.meta["workpiece_ids"][:], dtype=np.int64
-        )
-        if episode_workpiece_ids.shape != (self.replay_buffer.n_episodes,):
-            raise ValueError(
-                "`meta/workpiece_ids` must have shape "
-                f"({self.replay_buffer.n_episodes},), got {episode_workpiece_ids.shape}"
-            )
-        missing_ids = np.setdiff1d(np.unique(episode_workpiece_ids), unique_ids)
+        missing_ids = np.setdiff1d(zarr_workpiece_ids, unique_ids)
         if missing_ids.size > 0:
             raise KeyError(
                 "C-space features are missing zarr workpiece IDs: "
                 f"{missing_ids.tolist()}"
+            )
+
+        keep_mask = np.isin(workpiece_ids, zarr_workpiece_ids)
+        ignored_ids = workpiece_ids[~keep_mask]
+        features = np.ascontiguousarray(features[keep_mask])
+        workpiece_ids = np.ascontiguousarray(workpiece_ids[keep_mask])
+        if ignored_ids.size > 0:
+            print(
+                "Ignoring C-space features for workpiece IDs absent from zarr: "
+                f"{ignored_ids.tolist()}"
             )
 
         self.cspace_features = np.ascontiguousarray(features)
@@ -84,14 +99,32 @@ class TransitionTrajectoryCSpaceDataset(TransitionTrajectoryDataset):
             for row_index, workpiece_id in enumerate(workpiece_ids)
         }
         self.episode_workpiece_ids = episode_workpiece_ids
-        self.episode_ends = np.asarray(
-            self.replay_buffer.episode_ends[:], dtype=np.int64
+        self.episode_ends = self._read_1d_array(
+            self.replay_buffer.episode_ends,
+            name="zarr meta/episode_ends",
+            dtype=np.int64,
         )
         self.cspace_feature_dir = str(feature_dir)
 
     @staticmethod
     def _resolve_feature_dir(path):
         return Path(path).expanduser().resolve()
+
+    @staticmethod
+    def _read_1d_array(value, name, dtype):
+        if isinstance(value, np.ndarray):
+            array = value
+        else:
+            try:
+                array = value[...]
+            except (IndexError, TypeError):
+                array = np.asarray(value)
+        array = np.asarray(array, dtype=dtype)
+        if array.ndim != 1:
+            raise ValueError(
+                f"{name} must be one-dimensional, got shape {array.shape}."
+            )
+        return array
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         data = super().__getitem__(idx)
