@@ -208,10 +208,9 @@ class TrainDP3Workspace:
         gpu_dataset_enabled = bool(OmegaConf.select(cfg, 'gpu_dataset', default=False))
         if gpu_dataset_enabled:
             cprint("[GPU Dataset] Preloading all data to GPU...", "yellow")
-            import copy as _copy
-            dataset_cfg = _copy.deepcopy(cfg.task.dataset)
-            dataset_cfg._target_ = 'diffusion_policy_3d.dataset.gpu_transition_dataset.GPUTransitionCSpaceDataset'
-            dataset_cfg.device = cfg.training.device
+            dataset_cfg = OmegaConf.to_container(cfg.task.dataset, resolve=True)
+            dataset_cfg['_target_'] = 'diffusion_policy_3d.dataset.gpu_transition_dataset.GPUTransitionCSpaceDataset'
+            dataset_cfg['device'] = cfg.training.device
             dataset = hydra.utils.instantiate(dataset_cfg)
             cfg.dataloader.num_workers = 0
             cfg.dataloader.pin_memory = False
