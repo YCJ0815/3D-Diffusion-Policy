@@ -260,6 +260,8 @@ class PyBulletValidationConfig:
     enabled: bool = False
     stats_path: str | None = None
     stats_mode: str = "auto"
+    include_regular_jobs: bool = True
+    include_simple_jobs: bool = True
     jobs_root: str = "data/raw_data/jobs"
     simple_jobs_root: str | None = "data/raw_data/simple_jobs"
     simple_workpiece_id_offset: int = 1000
@@ -284,6 +286,7 @@ class PyBulletValidationConfig:
     robot_surface_points_per_link: int = 256
     sdf_out_of_bounds_value_m: float | None = None
     log_legacy_pybullet_metrics: bool = True
+    progress_mininterval_sec: float = 1.0
 
     @classmethod
     def from_omegaconf(cls, cfg) -> "PyBulletValidationConfig":
@@ -292,6 +295,8 @@ class PyBulletValidationConfig:
             enabled=bool(cfg.get("enabled", False)),
             stats_path=cfg.get("stats_path"),
             stats_mode=str(cfg.get("stats_mode", "auto")),
+            include_regular_jobs=bool(cfg.get("include_regular_jobs", True)),
+            include_simple_jobs=bool(cfg.get("include_simple_jobs", True)),
             jobs_root=str(cfg.get("jobs_root", "data/raw_data/jobs")),
             simple_jobs_root=cfg.get("simple_jobs_root", "data/raw_data/simple_jobs"),
             simple_workpiece_id_offset=int(cfg.get("simple_workpiece_id_offset", 1000)),
@@ -318,6 +323,7 @@ class PyBulletValidationConfig:
                 None if sdf_out_of_bounds_value_m is None else float(sdf_out_of_bounds_value_m)
             ),
             log_legacy_pybullet_metrics=bool(cfg.get("log_legacy_pybullet_metrics", True)),
+            progress_mininterval_sec=float(cfg.get("progress_mininterval_sec", 1.0)),
         )
 
 
@@ -859,6 +865,10 @@ class PyBulletValidationRunner:
         dataset=None,
     ) -> dict[str, float]:
         import torch
+        try:
+            import tqdm
+        except ModuleNotFoundError:
+            tqdm = None
 
         if "workpiece_ids" not in replay_buffer.meta:
             raise KeyError(
@@ -867,19 +877,45 @@ class PyBulletValidationRunner:
             )
         workpiece_ids = np.asarray(replay_buffer.meta["workpiece_ids"][:], dtype=np.int64)
         episode_indices = np.flatnonzero(np.asarray(episode_mask, dtype=bool))
+        if not self.cfg.include_regular_jobs or not self.cfg.include_simple_jobs:
+            selected_episode_indices = []
+            for episode_idx in episode_indices.tolist():
+                workpiece_id = int(workpiece_ids[episode_idx])
+                is_simple_job = workpiece_id >= int(self.cfg.simple_workpiece_id_offset)
+                if is_simple_job and not self.cfg.include_simple_jobs:
+                    continue
+                if (not is_simple_job) and not self.cfg.include_regular_jobs:
+                    continue
+                selected_episode_indices.append(episode_idx)
+            episode_indices = np.asarray(selected_episode_indices, dtype=np.int64)
         if self.cfg.max_episodes is not None:
             episode_indices = episode_indices[: int(self.cfg.max_episodes)]
         if episode_indices.size == 0:
             return {}
 
         sample_metrics = []
+        running_collision_count = 0
+        running_valid_sdf_count = 0
+        running_min_sdf_distance_m = float("inf")
         policy.eval()
+        episode_list = episode_indices.tolist()
+        if tqdm is not None:
+            progress = tqdm.tqdm(
+                episode_list,
+                desc="PyBullet validation",
+                leave=True,
+                mininterval=max(float(self.cfg.progress_mininterval_sec), 0.1),
+            )
+        else:
+            print(f"[PyBullet validation] start {len(episode_list)} episodes")
+            progress = episode_list
         with torch.no_grad():
-            for episode_idx in episode_indices.tolist():
+            for step_idx, episode_idx in enumerate(progress, start=1):
+                workpiece_id = int(workpiece_ids[episode_idx])
                 obs_dict, raw_obs = self._build_obs_batch(
                     replay_buffer=replay_buffer,
                     episode_idx=episode_idx,
-                    workpiece_id=int(workpiece_ids[episode_idx]),
+                    workpiece_id=workpiece_id,
                     obs_keys=obs_keys,
                     n_obs_steps=n_obs_steps,
                     device=device,
@@ -894,12 +930,43 @@ class PyBulletValidationRunner:
                     end_joint_normalized=raw_obs["last_joint_angles_normalized"][0],
                 )
                 metric = self.validator.evaluate_trajectory(
-                    workpiece_id=int(workpiece_ids[episode_idx]),
+                    workpiece_id=workpiece_id,
                     joint_trajectory=joint_trajectory,
                     start_joint_state=self.validator._unnormalize_joint_state(raw_obs["first_joint_angles_normalized"][0]),
                     goal_position_normalized=raw_obs["goal_position"][0],
                 )
                 sample_metrics.append(metric)
+                if metric["has_collision"]:
+                    running_collision_count += 1
+                current_min_sdf_distance_m = float(metric["min_sdf_distance_m"])
+                if not np.isnan(current_min_sdf_distance_m):
+                    running_valid_sdf_count += 1
+                    running_min_sdf_distance_m = min(running_min_sdf_distance_m, current_min_sdf_distance_m)
+                if tqdm is not None:
+                    postfix = {
+                        "wp": workpiece_id,
+                        "coll_rate": f"{running_collision_count / step_idx:.3f}",
+                    }
+                    if running_valid_sdf_count > 0:
+                        postfix["min_d"] = f"{running_min_sdf_distance_m:.4f}"
+                    else:
+                        postfix["min_d"] = "nan"
+                    progress.set_postfix(postfix, refresh=False)
+                elif step_idx == 1 or step_idx == len(episode_list) or step_idx % 10 == 0:
+                    min_d_str = (
+                        f"{running_min_sdf_distance_m:.4f}"
+                        if running_valid_sdf_count > 0
+                        else "nan"
+                    )
+                    print(
+                        "[PyBullet validation] "
+                        f"{step_idx}/{len(episode_list)} "
+                        f"workpiece_id={workpiece_id} "
+                        f"collision_rate={running_collision_count / step_idx:.3f} "
+                        f"min_d_min={min_d_str}"
+                    )
+        if tqdm is None:
+            print(f"[PyBullet validation] done {len(episode_list)} episodes")
 
         total = float(len(sample_metrics))
         collision_count = sum(1.0 for item in sample_metrics if item["has_collision"])

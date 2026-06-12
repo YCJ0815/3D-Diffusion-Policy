@@ -129,6 +129,8 @@ training:
     enabled: False
     stats_path: null
     stats_mode: auto
+    include_regular_jobs: True
+    include_simple_jobs: True
     jobs_root: data/raw_data/jobs
     simple_jobs_root: data/raw_data/simple_jobs
     simple_workpiece_id_offset: 1000
@@ -153,6 +155,7 @@ training:
     robot_surface_points_per_link: 256
     sdf_out_of_bounds_value_m: null
     log_legacy_pybullet_metrics: True
+    progress_mininterval_sec: 1.0
 
 logging:
   group: ${exp_name}

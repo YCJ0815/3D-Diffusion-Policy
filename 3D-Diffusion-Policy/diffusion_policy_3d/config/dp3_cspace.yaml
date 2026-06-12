@@ -2,11 +2,11 @@ defaults:
   - task: realdex_transition_cspace
   - _self_
 
-name: train_dp3_cspace
+name: train_simple_dp3_cspace
 
 task_name: ${task.name}
 shape_meta: ${task.shape_meta}
-exp_name: "dp3_cspace"
+exp_name: "simple_dp3_cspace"
 
 horizon: 10
 n_obs_steps: 1
@@ -17,17 +17,18 @@ keypoint_visible_rate: 1.0
 obs_as_global_cond: true
 
 policy:
-  _target_: diffusion_policy_3d.policy.dp3_cspace.DP3CSpace
+  _target_: diffusion_policy_3d.policy.dp3_cspace.SimpleDP3CSpace
   use_point_crop: true
   condition_type: film
   use_down_condition: true
   use_mid_condition: true
   use_up_condition: true
-  diffusion_step_embed_dim: 128
-  down_dims: [512, 1024]
+  diffusion_step_embed_dim: 64
+  down_dims: [64, 128]
   crop_shape: [80, 80]
   encoder_output_dim: 64
   encoder_dropout_prob: 0.1
+  state_mlp_size: [32, 32]
   horizon: ${horizon}
   kernel_size: 5
   n_action_steps: ${n_action_steps}
@@ -119,6 +120,8 @@ training:
     enabled: True
     stats_path: null
     stats_mode: auto
+    include_regular_jobs: true
+    include_simple_jobs: true
     jobs_root: data/raw_data/jobs
     simple_jobs_root: data/raw_data/simple_jobs
     simple_workpiece_id_offset: 1000
@@ -143,6 +146,7 @@ training:
     robot_surface_points_per_link: 256
     sdf_out_of_bounds_value_m: null
     log_legacy_pybullet_metrics: true
+    progress_mininterval_sec: 1.0
 
 logging:
   group: ${exp_name}
@@ -152,7 +156,7 @@ logging:
   project: dp3
   resume: false
   tags:
-    - dp3
+    - simple_dp3
     - cspace
 
 checkpoint:
