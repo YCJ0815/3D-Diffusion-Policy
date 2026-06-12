@@ -727,9 +727,14 @@ class DifferentiableTrajectoryLoss(nn.Module):
                 "workpiece_id must have shape [B] matching world points, "
                 f"got {tuple(workpiece_ids.shape)} and {tuple(world_points.shape)}"
             )
-        result_by_sample = [None] * world_points.shape[0]
-        for workpiece_id_tensor in torch.unique(workpiece_ids.detach().cpu()):
-            workpiece_id = int(workpiece_id_tensor.item())
+        result = torch.empty(
+            world_points.shape[:-1],
+            device=world_points.device,
+            dtype=world_points.dtype,
+        )
+        unique_workpiece_ids = torch.unique(workpiece_ids.detach()).cpu().tolist()
+        for workpiece_id in unique_workpiece_ids:
+            workpiece_id = int(workpiece_id)
             sample_indices = torch.nonzero(
                 workpiece_ids == workpiece_id,
                 as_tuple=False,
@@ -743,9 +748,8 @@ class DifferentiableTrajectoryLoss(nn.Module):
                 world_points.index_select(0, sample_indices),
                 grid,
             )
-            for local_idx, batch_idx in enumerate(sample_indices.tolist()):
-                result_by_sample[batch_idx] = distances[local_idx]
-        return torch.stack(result_by_sample, dim=0)
+            result.index_copy_(0, sample_indices, distances)
+        return result
 
     def forward(
         self,

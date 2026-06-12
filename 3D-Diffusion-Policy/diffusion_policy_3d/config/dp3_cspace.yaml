@@ -99,18 +99,18 @@ ema:
   max_value: 0.9999
 
 dataloader:
-  batch_size: 128
+  batch_size: 64
   num_workers: 8
   shuffle: true
   pin_memory: true
-  persistent_workers: false
+  persistent_workers: true
 
 val_dataloader:
-  batch_size: 128
+  batch_size: 64
   num_workers: 8
   shuffle: false
   pin_memory: true
-  persistent_workers: false
+  persistent_workers: true
 
 optimizer:
   _target_: torch.optim.AdamW
@@ -137,6 +137,11 @@ training:
   max_train_steps: null
   max_val_steps: null
   tqdm_interval_sec: 1.0
+  performance:
+    tf32: true
+    amp:
+      enabled: true
+      dtype: bf16
   early_stop:
     enabled: true
     monitor_key: val_loss

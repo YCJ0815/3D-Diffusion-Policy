@@ -9,6 +9,7 @@ if __name__ == "__main__":
 
 import os
 import json
+import contextlib
 import hydra
 import torch
 import dill
@@ -76,6 +77,60 @@ def _override_optimizer_lr(optimizer, lr: float):
         # Keep scheduler initialization consistent with the overridden LR.
         param_group["initial_lr"] = lr
 
+
+def _resolve_amp_dtype(name: str) -> torch.dtype:
+    amp_dtype = str(name).lower()
+    if amp_dtype in ("fp16", "float16", "half"):
+        return torch.float16
+    if amp_dtype in ("bf16", "bfloat16"):
+        return torch.bfloat16
+    raise ValueError(f"Unsupported AMP dtype: {name}")
+
+
+def _build_precision_runtime(cfg, device: torch.device) -> dict[str, object]:
+    perf_cfg = OmegaConf.select(cfg, "training.performance", default={}) or {}
+    tf32_enabled = bool(perf_cfg.get("tf32", device.type == "cuda"))
+    if device.type == "cuda":
+        torch.backends.cuda.matmul.allow_tf32 = tf32_enabled
+        torch.backends.cudnn.allow_tf32 = tf32_enabled
+        if tf32_enabled:
+            torch.set_float32_matmul_precision("high")
+
+    amp_cfg = perf_cfg.get("amp", {}) or {}
+    amp_enabled = bool(amp_cfg.get("enabled", device.type == "cuda"))
+    amp_dtype_name = str(amp_cfg.get("dtype", "bf16"))
+    amp_dtype = _resolve_amp_dtype(amp_dtype_name)
+    if amp_enabled and device.type != "cuda":
+        amp_enabled = False
+
+    scaler = None
+    if amp_enabled and amp_dtype == torch.float16:
+        scaler = torch.cuda.amp.GradScaler(enabled=True)
+
+    return {
+        "tf32_enabled": tf32_enabled,
+        "amp_enabled": amp_enabled,
+        "amp_dtype_name": amp_dtype_name,
+        "amp_dtype": amp_dtype,
+        "scaler": scaler,
+    }
+
+
+def _autocast_context(precision_runtime: dict[str, object], device: torch.device):
+    if not precision_runtime["amp_enabled"]:
+        return contextlib.nullcontext()
+    return torch.autocast(
+        device_type=device.type,
+        dtype=precision_runtime["amp_dtype"],
+    )
+
+
+def _sanitize_dataloader_cfg(dataloader_cfg):
+    if int(dataloader_cfg.get("num_workers", 0)) == 0 and bool(
+            dataloader_cfg.get("persistent_workers", False)):
+        dataloader_cfg.persistent_workers = False
+    return dataloader_cfg
+
 class TrainDP3Workspace:
     include_keys = ['global_step', 'epoch']
     exclude_keys = tuple()
@@ -130,6 +185,8 @@ class TrainDP3Workspace:
             verbose = False
         
         RUN_VALIDATION = bool(getattr(cfg.training, 'run_validation', True))
+        _sanitize_dataloader_cfg(cfg.dataloader)
+        _sanitize_dataloader_cfg(cfg.val_dataloader)
         
         # resume training
         if cfg.training.resume:
@@ -220,6 +277,14 @@ class TrainDP3Workspace:
         if self.ema_model is not None:
             self.ema_model.to(device)
         optimizer_to(self.optimizer, device)
+        precision_runtime = _build_precision_runtime(cfg, device)
+        cprint(
+            "[Precision] "
+            f"tf32={precision_runtime['tf32_enabled']} "
+            f"amp={precision_runtime['amp_enabled']} "
+            f"dtype={precision_runtime['amp_dtype_name']}",
+            "yellow",
+        )
 
         if hasattr(self.model, "debug_compare_global_condition"):
             debug_batch = next(iter(train_dataloader))
@@ -304,16 +369,25 @@ class TrainDP3Workspace:
                     
                         # compute loss
                         t1_1 = time.time()
-                        raw_loss, loss_dict = self.model.compute_loss(batch)
+                        with _autocast_context(precision_runtime, device):
+                            raw_loss, loss_dict = self.model.compute_loss(batch)
                         loss = raw_loss / cfg.training.gradient_accumulate_every
-                        loss.backward()
+                        scaler = precision_runtime["scaler"]
+                        if scaler is not None:
+                            scaler.scale(loss).backward()
+                        else:
+                            loss.backward()
                         
                         t1_2 = time.time()
 
                         # step optimizer
                         if self.global_step % cfg.training.gradient_accumulate_every == 0:
-                            self.optimizer.step()
-                            self.optimizer.zero_grad()
+                            if scaler is not None:
+                                scaler.step(self.optimizer)
+                                scaler.update()
+                            else:
+                                self.optimizer.step()
+                            self.optimizer.zero_grad(set_to_none=True)
                             lr_scheduler.step()
                         t1_3 = time.time()
                         # update ema
@@ -382,7 +456,8 @@ class TrainDP3Workspace:
                                 leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
                             for batch_idx, batch in enumerate(tepoch):
                                 batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-                                loss, loss_dict = policy.compute_loss(batch)
+                                with _autocast_context(precision_runtime, device):
+                                    loss, loss_dict = policy.compute_loss(batch)
                                 val_losses.append(loss)
                                 if (cfg.training.max_val_steps is not None) \
                                     and batch_idx >= (cfg.training.max_val_steps-1):
@@ -455,8 +530,9 @@ class TrainDP3Workspace:
                         batch = dict_apply(train_sampling_batch, lambda x: x.to(device, non_blocking=True))
                         obs_dict = batch['obs']
                         gt_action = batch['action']
-                        
-                        result = policy.predict_action(obs_dict)
+
+                        with _autocast_context(precision_runtime, device):
+                            result = policy.predict_action(obs_dict)
                         pred_action = result['action_pred']
                         mse = torch.nn.functional.mse_loss(pred_action, gt_action)
                         step_log['train_action_mse_error'] = mse.item()
