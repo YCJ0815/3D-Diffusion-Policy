@@ -115,10 +115,32 @@ class TransitionTrajectoryCSpaceDataset(TransitionTrajectoryDataset):
         if isinstance(value, np.ndarray):
             array = value
         else:
-            try:
-                array = value[...]
-            except (IndexError, TypeError):
-                array = np.asarray(value)
+            array = None
+            errors = []
+            read_attempts = (
+                ("slice_all", lambda current: current[:]),
+                ("ellipsis", lambda current: current[...]),
+                ("scalar_tuple", lambda current: current[()]),
+                ("numpy_asarray", lambda current: np.asarray(current)),
+            )
+            for label, reader in read_attempts:
+                try:
+                    candidate = reader(value)
+                except Exception as exc:
+                    errors.append(f"{label}: {type(exc).__name__}({exc})")
+                    continue
+                candidate = np.asarray(candidate)
+                if candidate.ndim == 0:
+                    errors.append(
+                        f"{label}: ValueError({name} resolved to scalar shape {candidate.shape})"
+                    )
+                    continue
+                array = candidate
+                break
+            if array is None:
+                raise RuntimeError(
+                    f"Unable to read {name} as a 1D array. Attempts: {errors}"
+                )
         array = np.asarray(array, dtype=dtype)
         if array.ndim != 1:
             raise ValueError(
