@@ -297,10 +297,13 @@ class TrainDP3Workspace:
         if compile_enabled and device.type == 'cuda':
             cprint("[Compile] Applying torch.compile to model...", "yellow")
             try:
+                self._raw_model = self.model  # keep uncompiled ref for EMA
                 self.model = torch.compile(self.model, mode="reduce-overhead")
                 cprint("[Compile] torch.compile applied successfully.", "green")
             except Exception as e:
                 cprint(f"[Compile] torch.compile failed: {e}, continuing without compile.", "red")
+        else:
+            self._raw_model = self.model
         precision_runtime = _build_precision_runtime(cfg, device)
         cprint(
             "[Precision] "
@@ -416,7 +419,7 @@ class TrainDP3Workspace:
                         t1_3 = time.time()
                         # update ema
                         if cfg.training.use_ema:
-                            ema.step(self.model)
+                            ema.step(getattr(self, '_raw_model', self.model))
                         t1_4 = time.time()
                         # logging
                         raw_loss_cpu = raw_loss.item()
