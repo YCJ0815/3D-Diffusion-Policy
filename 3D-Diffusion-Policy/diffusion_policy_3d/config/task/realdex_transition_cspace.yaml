@@ -44,7 +44,7 @@ dataset:
   workpiece_split_strategy: tail
   train_workpiece_ids: null
   val_workpiece_ids: null
-  simple_as_train_validation_split: true
+  simple_as_train_validation_split: false
   max_train_episodes: null
   point_cloud_key: point_cloud
   obs_keys:
