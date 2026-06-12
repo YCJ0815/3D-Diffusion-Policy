@@ -7,6 +7,7 @@ import xml.etree.ElementTree as ET
 
 import numpy as np
 from diffusion_policy_3d.common.bspline import (
+    FIXED_CONTROL_POINTS_PER_SIDE,
     load_delta_w_stats,
     reconstruct_trajectory_from_normalized_free_residual,
     unnormalize_joint_trajectory_with_urdf_limits,
@@ -650,13 +651,28 @@ class PyBulletCollisionValidator:
                 f"Predicted action horizon must have shape [T, 6] for pybullet validation, got {pred_action_horizon.shape}"
             )
         if self.stats_mode == "bspline":
+            predicted_free_control_points = int(pred_action_horizon.shape[0])
+            inferred_num_control_points = (
+                predicted_free_control_points + 2 * FIXED_CONTROL_POINTS_PER_SIDE
+            )
+            configured_free_control_points = (
+                int(self.cfg.num_control_points) - 2 * FIXED_CONTROL_POINTS_PER_SIDE
+            )
+            num_control_points = int(self.cfg.num_control_points)
+            if configured_free_control_points != predicted_free_control_points:
+                print(
+                    "[PyBulletValidation] overriding num_control_points from "
+                    f"{self.cfg.num_control_points} to {inferred_num_control_points} "
+                    f"to match predicted free control points={predicted_free_control_points}."
+                )
+                num_control_points = inferred_num_control_points
             recon_result = reconstruct_trajectory_from_normalized_free_residual(
                 normalized_free_delta_w=pred_action_horizon,
                 start_state=np.asarray(start_joint_normalized, dtype=np.float32),
                 end_state=np.asarray(end_joint_normalized, dtype=np.float32),
                 mean=self.stats_mean,
                 std=self.stats_std,
-                num_control_points=self.cfg.num_control_points,
+                num_control_points=num_control_points,
                 num_steps=self.cfg.target_steps,
                 degree=self.cfg.spline_degree,
             )

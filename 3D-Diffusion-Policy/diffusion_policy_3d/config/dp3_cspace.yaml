@@ -117,6 +117,32 @@ training:
     warmup_epochs: 20
   pybullet_eval:
     enabled: True
+    stats_path: null
+    stats_mode: auto
+    jobs_root: data/raw_data/jobs
+    simple_jobs_root: data/raw_data/simple_jobs
+    simple_workpiece_id_offset: 1000
+    job_name_template: job_{workpiece_id:03d}
+    workpiece_filename: workpiece.stl
+    urdf_path: null
+    urdf_package_roots: [config/robot-model]
+    tcp_link_name: tool0
+    stl_x_offset_m: 0.5
+    collision_distance_threshold: 0.0
+    interpolate_for_collision: true
+    max_joint_step_rad: 0.01
+    min_interpolated_steps_per_segment: 1
+    goal_position_norm_m: 0.1
+    goal_tolerance_m: 0.01
+    num_control_points: 16
+    spline_degree: 5
+    target_steps: 64
+    max_episodes: null
+    sdf_filename: workpiece_sdf.npz
+    sdf_required: true
+    robot_surface_points_per_link: 256
+    sdf_out_of_bounds_value_m: null
+    log_legacy_pybullet_metrics: true
 
 logging:
   group: ${exp_name}
