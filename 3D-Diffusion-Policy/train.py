@@ -435,12 +435,13 @@ class TrainDP3Workspace:
                         step_log.update(loss_dict)
                         t2 = time.time()
                         
-                        if verbose:
-                            print(f"total one step time: {t2-t1:.3f}")
-                            print(f" compute loss time: {t1_2-t1_1:.3f}")
-                            print(f" step optimizer time: {t1_3-t1_2:.3f}")
-                            print(f" update ema time: {t1_4-t1_3:.3f}")
-                            print(f" logging time: {t1_5-t1_4:.3f}")
+                        if verbose or (self.global_step > 0 and self.global_step % 20 == 0):
+                            print(f"[step {self.global_step}] total={t2-t1:.4f}s "
+                                  f"| loss={t1_2-t1_1:.4f}s "
+                                  f"| opt={t1_3-t1_2:.4f}s "
+                                  f"| ema={t1_4-t1_3:.4f}s "
+                                  f"| log={t1_5-t1_4:.4f}s "
+                                  f"| post={t2-t1_5:.4f}s")
 
                         is_last_batch = (batch_idx == (len(train_dataloader)-1))
                         if not is_last_batch:
