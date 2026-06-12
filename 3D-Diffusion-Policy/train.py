@@ -128,6 +128,16 @@ def _autocast_context(precision_runtime: dict[str, object], device: torch.device
     )
 
 
+def _compiler_mark_step_begin() -> None:
+    compiler = getattr(torch, "compiler", None)
+    if compiler is None:
+        return
+    mark_fn = getattr(compiler, "cudagraph_mark_step_begin", None)
+    if mark_fn is None:
+        return
+    mark_fn()
+
+
 def _sanitize_dataloader_cfg(dataloader_cfg):
     if int(dataloader_cfg.get("num_workers", 0)) == 0 and bool(
             dataloader_cfg.get("persistent_workers", False)):
@@ -422,6 +432,7 @@ class TrainDP3Workspace:
                     
                         # compute loss
                         t1_1 = time.time()
+                        _compiler_mark_step_begin()
                         with _autocast_context(precision_runtime, device):
                             raw_loss, loss_dict = self.model.compute_loss(batch)
                         loss = raw_loss / cfg.training.gradient_accumulate_every
@@ -509,6 +520,7 @@ class TrainDP3Workspace:
                                 leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
                             for batch_idx, batch in enumerate(tepoch):
                                 batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
+                                _compiler_mark_step_begin()
                                 with _autocast_context(precision_runtime, device):
                                     loss, loss_dict = policy.compute_loss(batch)
                                 val_losses.append(loss)
@@ -584,6 +596,7 @@ class TrainDP3Workspace:
                         obs_dict = batch['obs']
                         gt_action = batch['action']
 
+                        _compiler_mark_step_begin()
                         with _autocast_context(precision_runtime, device):
                             result = policy.predict_action(obs_dict)
                         pred_action = result['action_pred']
