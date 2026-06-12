@@ -72,10 +72,8 @@ policy:
     urdf_path: config/robot-model/ur5e_with_pen.urdf
     urdf_package_roots: [config/robot-model]
     num_control_points: 16
-    trajectory_steps: 64
+    trajectory_steps: 32
     link_surface_point_counts:
-      forearm_link: 16
-      wrist_1_link: 32
       wrist_2_link: 64
       wrist_3_link: 96
       pen_link: 128
