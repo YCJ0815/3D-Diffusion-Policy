@@ -10,7 +10,7 @@ def create_indices(
     episode_mask: np.ndarray,
     pad_before: int=0, pad_after: int=0,
     debug:bool=True) -> np.ndarray:
-    episode_mask.shape == episode_ends.shape        
+    assert episode_mask.shape == episode_ends.shape
     pad_before = min(max(pad_before, 0), sequence_length-1)
     pad_after = min(max(pad_after, 0), sequence_length-1)
 
@@ -45,6 +45,79 @@ def create_indices(
                 sample_start_idx, sample_end_idx])
     indices = np.array(indices)
     return indices
+
+
+def create_indices_python(
+    episode_ends: np.ndarray,
+    sequence_length: int,
+    episode_mask: np.ndarray,
+    pad_before: int = 0,
+    pad_after: int = 0,
+    debug: bool = True,
+) -> np.ndarray:
+    episode_ends = np.asarray(episode_ends, dtype=np.int64).reshape(-1)
+    episode_mask = np.asarray(episode_mask, dtype=bool).reshape(-1)
+    if episode_mask.shape != episode_ends.shape:
+        raise ValueError(
+            "episode_mask and episode_ends must have the same shape, got "
+            f"{episode_mask.shape} and {episode_ends.shape}"
+        )
+
+    pad_before = min(max(int(pad_before), 0), sequence_length - 1)
+    pad_after = min(max(int(pad_after), 0), sequence_length - 1)
+    indices = []
+    for episode_idx in range(len(episode_ends)):
+        if not episode_mask[episode_idx]:
+            continue
+        start_idx = 0 if episode_idx == 0 else int(episode_ends[episode_idx - 1])
+        end_idx = int(episode_ends[episode_idx])
+        episode_length = end_idx - start_idx
+
+        min_start = -pad_before
+        max_start = episode_length - sequence_length + pad_after
+        for idx in range(min_start, max_start + 1):
+            buffer_start_idx = max(idx, 0) + start_idx
+            buffer_end_idx = min(idx + sequence_length, episode_length) + start_idx
+            start_offset = buffer_start_idx - (idx + start_idx)
+            end_offset = (idx + sequence_length + start_idx) - buffer_end_idx
+            sample_start_idx = start_offset
+            sample_end_idx = sequence_length - end_offset
+            if debug:
+                assert start_offset >= 0
+                assert end_offset >= 0
+                assert (sample_end_idx - sample_start_idx) == (
+                    buffer_end_idx - buffer_start_idx
+                )
+            indices.append(
+                [
+                    buffer_start_idx,
+                    buffer_end_idx,
+                    sample_start_idx,
+                    sample_end_idx,
+                ]
+            )
+    if len(indices) == 0:
+        return np.zeros((0, 4), dtype=np.int64)
+    return np.asarray(indices, dtype=np.int64)
+
+
+def validate_episode_ends(episode_ends: np.ndarray) -> np.ndarray:
+    episode_ends = np.asarray(episode_ends, dtype=np.int64).reshape(-1)
+    if episode_ends.ndim != 1:
+        raise ValueError(f"episode_ends must be 1D, got shape {episode_ends.shape}")
+    if episode_ends.size == 0:
+        return episode_ends
+    if np.any(episode_ends <= 0):
+        bad = episode_ends[episode_ends <= 0][:10].tolist()
+        raise ValueError(f"episode_ends must be positive, found {bad}")
+    if np.any(np.diff(episode_ends) <= 0):
+        diff = np.diff(episode_ends)
+        bad_indices = np.flatnonzero(diff <= 0)[:10].tolist()
+        raise ValueError(
+            "episode_ends must be strictly increasing; first bad indices: "
+            f"{bad_indices}"
+        )
+    return episode_ends
 
 
 def get_val_mask(n_episodes, val_ratio, seed=0):
@@ -94,16 +167,37 @@ class SequenceSampler:
         if keys is None:
             keys = list(replay_buffer.keys())
         
-        episode_ends = replay_buffer.episode_ends[:]
+        episode_ends = validate_episode_ends(replay_buffer.episode_ends[:])
         if episode_mask is None:
             episode_mask = np.ones(episode_ends.shape, dtype=bool)
+        else:
+            episode_mask = np.asarray(episode_mask, dtype=bool).reshape(-1)
+            if episode_mask.shape != episode_ends.shape:
+                raise ValueError(
+                    "episode_mask and episode_ends must have the same shape, got "
+                    f"{episode_mask.shape} and {episode_ends.shape}"
+                )
 
         if np.any(episode_mask):
-            indices = create_indices(episode_ends, 
-                sequence_length=sequence_length, 
-                pad_before=pad_before, 
-                pad_after=pad_after,
-                episode_mask=episode_mask
+            try:
+                indices = create_indices(
+                    episode_ends,
+                    sequence_length=sequence_length,
+                    pad_before=pad_before,
+                    pad_after=pad_after,
+                    episode_mask=episode_mask,
+                )
+            except Exception as exc:
+                print(
+                    "[SequenceSampler] numba create_indices failed; "
+                    f"falling back to Python implementation: {type(exc).__name__}({exc})"
+                )
+                indices = create_indices_python(
+                    episode_ends,
+                    sequence_length=sequence_length,
+                    pad_before=pad_before,
+                    pad_after=pad_after,
+                    episode_mask=episode_mask,
                 )
         else:
             indices = np.zeros((0,4), dtype=np.int64)
