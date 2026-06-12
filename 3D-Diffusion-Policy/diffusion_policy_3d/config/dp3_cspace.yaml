@@ -1,81 +1,65 @@
 defaults:
-  - task: realdex_transition
+  - task: realdex_transition_cspace
   - _self_
 
-name: train_simple_dp3
-
+name: train_dp3_cspace
 
 task_name: ${task.name}
 shape_meta: ${task.shape_meta}
-exp_name: "debug"
+exp_name: "dp3_cspace"
 
-# horizon: 4
 horizon: 16
-n_obs_steps: 2
-# n_action_steps: 3
-n_action_steps: 8
+n_obs_steps: 1
+n_action_steps: 10
 n_latency_steps: 0
 dataset_obs_steps: ${n_obs_steps}
 keypoint_visible_rate: 1.0
-obs_as_global_cond: True
+obs_as_global_cond: true
 
 policy:
-  _target_: diffusion_policy_3d.policy.simple_dp3.SimpleDP3
+  _target_: diffusion_policy_3d.policy.dp3_cspace.DP3CSpace
   use_point_crop: true
   condition_type: film
   use_down_condition: true
   use_mid_condition: true
   use_up_condition: true
-  
-  diffusion_step_embed_dim: 64
-  down_dims:
-  - 64
-  - 128
-  - 128
-  crop_shape:
-  - 80
-  - 80
+  diffusion_step_embed_dim: 128
+  down_dims: [512, 1024, 2048]
+  crop_shape: [80, 80]
   encoder_output_dim: 64
   encoder_dropout_prob: 0.1
-  state_mlp_size: [32, 32]
   horizon: ${horizon}
   kernel_size: 5
   n_action_steps: ${n_action_steps}
   n_groups: 8
   n_obs_steps: ${n_obs_steps}
-
   noise_scheduler:
     _target_: diffusers.schedulers.scheduling_ddim.DDIMScheduler
     num_train_timesteps: 100
     beta_start: 0.0001
     beta_end: 0.02
     beta_schedule: squaredcos_cap_v2
-    clip_sample: True
-    set_alpha_to_one: True
+    clip_sample: true
+    set_alpha_to_one: true
     steps_offset: 0
     prediction_type: sample
-
-
   num_inference_steps: 10
   obs_as_global_cond: true
   shape_meta: ${shape_meta}
   action_loss_mask_indices: [5]
-
-
-
-  # whether to use point cloud's color
   use_pc_color: false
-  # type of pointnet
-  pointnet_type: "pointnet"
-
-
+  pointnet_type: pointnet
   pointcloud_encoder_cfg:
     in_channels: 3
     out_channels: ${policy.encoder_output_dim}
     use_layernorm: true
-    final_norm: layernorm # layernorm, none
+    final_norm: layernorm
     normal_channel: false
-
+  cspace_feature_key: cspace_feature
+  cspace_in_dim: 2
+  cspace_hidden_dim: 64
+  cspace_output_dim: 64
+  fusion_output_dim: 256
 
 ema:
   _target_: diffusion_policy_3d.model.diffusion.ema_model.EMAModel
@@ -88,16 +72,16 @@ ema:
 dataloader:
   batch_size: 128
   num_workers: 8
-  shuffle: True
-  pin_memory: True
-  persistent_workers: False
+  shuffle: true
+  pin_memory: true
+  persistent_workers: false
 
 val_dataloader:
   batch_size: 128
   num_workers: 8
-  shuffle: False
-  pin_memory: True
-  persistent_workers: False
+  shuffle: false
+  pin_memory: true
+  persistent_workers: false
 
 optimizer:
   _target_: torch.optim.AdamW
@@ -109,14 +93,14 @@ optimizer:
 training:
   device: "cuda:0"
   seed: 42
-  debug: False
-  resume: True
-  run_validation: True
+  debug: false
+  resume: false
+  run_validation: true
   lr_scheduler: cosine
   lr_warmup_steps: 500
   num_epochs: 300
   gradient_accumulate_every: 1
-  use_ema: True
+  use_ema: true
   rollout_every: 200
   checkpoint_every: 50
   val_every: 1
@@ -125,7 +109,7 @@ training:
   max_val_steps: null
   tqdm_interval_sec: 1.0
   early_stop:
-    enabled: True
+    enabled: true
     monitor_key: val_loss
     mode: min
     patience: 50
@@ -133,32 +117,6 @@ training:
     warmup_epochs: 20
   pybullet_eval:
     enabled: True
-    stats_path: null
-    stats_mode: auto
-    jobs_root: data/raw_data/jobs
-    simple_jobs_root: data/raw_data/simple_jobs
-    simple_workpiece_id_offset: 1000
-    job_name_template: job_{workpiece_id:03d}
-    workpiece_filename: workpiece.stl
-    urdf_path: null
-    urdf_package_roots: [config/robot-model]
-    tcp_link_name: tool0
-    stl_x_offset_m: 0.5
-    collision_distance_threshold: 0.0
-    interpolate_for_collision: True
-    max_joint_step_rad: 0.01
-    min_interpolated_steps_per_segment: 1
-    goal_position_norm_m: 0.1
-    goal_tolerance_m: 0.01
-    num_control_points: 12
-    spline_degree: 5
-    target_steps: 64
-    max_episodes: null
-    sdf_filename: workpiece_sdf.npz
-    sdf_required: True
-    robot_surface_points_per_link: 256
-    sdf_out_of_bounds_value_m: null
-    log_legacy_pybullet_metrics: True
 
 logging:
   group: ${exp_name}
@@ -166,15 +124,15 @@ logging:
   mode: online
   name: ${training.seed}
   project: dp3
-  resume: true
+  resume: false
   tags:
-  - dp3
-
+    - dp3
+    - cspace
 
 checkpoint:
-  save_ckpt: True # if True, save checkpoint every checkpoint_every and top-k checkpoints
+  save_ckpt: true
   generalization_gap:
-    enabled: True
+    enabled: true
     target: 0.2
     tolerance: 0.02
     window: 3
@@ -184,8 +142,8 @@ checkpoint:
     mode: min
     k: 3
     format_str: 'epoch={epoch:04d}-val_loss={val_loss:.6f}.ckpt'
-  save_last_ckpt: True # this only saves when save_ckpt is True
-  save_last_snapshot: False
+  save_last_ckpt: true
+  save_last_snapshot: false
 
 multi_run:
   run_dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}

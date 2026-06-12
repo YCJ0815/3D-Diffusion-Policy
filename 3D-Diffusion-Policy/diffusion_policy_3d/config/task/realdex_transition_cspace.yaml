@@ -1,0 +1,55 @@
+name: realdex_transition_cspace
+
+task_name: transition_cspace
+
+shape_meta: &shape_meta
+  obs:
+    point_cloud:
+      shape: [1024, 3]
+      type: point_cloud
+    goal_position:
+      shape: [3]
+      type: low_dim
+    goal_direction:
+      shape: [6]
+      type: low_dim
+    first_joint_angles_normalized:
+      shape: [6]
+      type: low_dim
+    last_joint_angles_normalized:
+      shape: [6]
+      type: low_dim
+    cspace_feature:
+      shape: [128, 2]
+      type: cspace
+  action:
+    shape: [6]
+
+env_runner: null
+
+dataset:
+  _target_: diffusion_policy_3d.dataset.transition_cspace_dataset.TransitionTrajectoryCSpaceDataset
+  zarr_path: data/realdex_transition.zarr
+  cspace_feature_dir: /root/autodl-tmp/3D-Diffusion-Policy/analysis_outputs/workpiece_key_config_collision_features
+  cspace_feature_filename: workpiece_key_config_features.npy
+  cspace_workpiece_ids_filename: workpiece_ids.npy
+  horizon: ${horizon}
+  pad_before: 0
+  pad_after: 0
+  seed: 42
+  val_ratio: 0.1
+  split_by_workpiece: true
+  stratify_workpiece_split: true
+  simple_workpiece_id_offset: 1000
+  workpiece_split_strategy: tail
+  train_workpiece_ids: null
+  val_workpiece_ids: null
+  simple_as_train_validation_split: true
+  max_train_episodes: null
+  point_cloud_key: point_cloud
+  obs_keys:
+    - point_cloud
+    - goal_position
+    - goal_direction
+    - first_joint_angles_normalized
+    - last_joint_angles_normalized
