@@ -135,14 +135,6 @@ class DifferentiableTrajectoryLoss(nn.Module):
                 f"got {self.cpu_cache_size}/{self.gpu_cache_size}"
             )
 
-    def _maybe_sync_cuda(self, reference_tensor: torch.Tensor) -> None:
-        if (
-            self.timing_enabled
-            and self.timing_sync_cuda
-            and reference_tensor.is_cuda
-        ):
-            torch.cuda.synchronize(reference_tensor.device)
-
         self.stats_path = Path(
             str(_config_get(config, "stats_path"))
         ).expanduser().resolve()
@@ -248,6 +240,14 @@ class DifferentiableTrajectoryLoss(nn.Module):
         self._gpu_sdf_cache: OrderedDict[
             tuple[int, str, torch.dtype], dict[str, torch.Tensor]
         ] = OrderedDict()
+
+    def _maybe_sync_cuda(self, reference_tensor: torch.Tensor) -> None:
+        if (
+            self.timing_enabled
+            and self.timing_sync_cuda
+            and reference_tensor.is_cuda
+        ):
+            torch.cuda.synchronize(reference_tensor.device)
 
     def _build_robot_geometry(self) -> None:
         try:
