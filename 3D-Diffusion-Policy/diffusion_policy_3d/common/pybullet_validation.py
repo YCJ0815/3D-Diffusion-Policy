@@ -295,7 +295,7 @@ class PyBulletValidationConfig:
     random_seed: int = 42
     diffusion_sampling_seed: int | None = None
     inference_num_steps: int | None = None
-    num_candidates: int = 8
+    num_candidates: int = 16
     candidate_selection: str = "max_min_sdf"
     sdf_filename: str = "workpiece_sdf.npz"
     sdf_required: bool = True
@@ -348,7 +348,7 @@ class PyBulletValidationConfig:
                 if cfg.get("inference_num_steps", None) is None
                 else int(cfg.get("inference_num_steps"))
             ),
-            num_candidates=int(cfg.get("num_candidates", 8)),
+            num_candidates=int(cfg.get("num_candidates", 16)),
             candidate_selection=str(cfg.get("candidate_selection", "max_min_sdf")),
             sdf_filename=str(cfg.get("sdf_filename", "workpiece_sdf.npz")),
             sdf_required=bool(cfg.get("sdf_required", True)),
