@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import OrderedDict
 import math
 from pathlib import Path
+import time
 import xml.etree.ElementTree as ET
 
 import numpy as np
@@ -103,6 +104,8 @@ class DifferentiableTrajectoryLoss(nn.Module):
         )
         self.cpu_cache_size = int(_config_get(config, "cpu_cache_size", 32))
         self.gpu_cache_size = int(_config_get(config, "gpu_cache_size", 8))
+        self.timing_enabled = bool(_config_get(config, "timing_enabled", True))
+        self.timing_sync_cuda = bool(_config_get(config, "timing_sync_cuda", True))
         if self.topk <= 0:
             raise ValueError(f"trajectory_loss.topk must be positive, got {self.topk}")
         if self.softmin_beta <= 0:
@@ -131,6 +134,14 @@ class DifferentiableTrajectoryLoss(nn.Module):
                 "trajectory_loss CPU/GPU cache sizes must be non-negative, "
                 f"got {self.cpu_cache_size}/{self.gpu_cache_size}"
             )
+
+    def _maybe_sync_cuda(self, reference_tensor: torch.Tensor) -> None:
+        if (
+            self.timing_enabled
+            and self.timing_sync_cuda
+            and reference_tensor.is_cuda
+        ):
+            torch.cuda.synchronize(reference_tensor.device)
 
         self.stats_path = Path(
             str(_config_get(config, "stats_path"))
@@ -843,6 +854,10 @@ class DifferentiableTrajectoryLoss(nn.Module):
                     f"Trajectory collision loss requires batch['obs'][{key!r}]."
                 )
         predicted_clean_action = predicted_clean_action.float()
+        timing = {}
+        if self.timing_enabled:
+            self._maybe_sync_cuda(predicted_clean_action)
+            timing_start = time.perf_counter()
         control_points, normalized_trajectory = (
             self.reconstruct_control_points_and_trajectory(
                 predicted_clean_action,
@@ -850,8 +865,14 @@ class DifferentiableTrajectoryLoss(nn.Module):
                 obs["last_joint_angles_normalized"],
             )
         )
+        if self.timing_enabled:
+            self._maybe_sync_cuda(control_points)
+            timing_after_reconstruct = time.perf_counter()
         joint_trajectory = self.normalized_to_joint_angles(normalized_trajectory)
         world_points = self.robot_surface_points_world(joint_trajectory)
+        if self.timing_enabled:
+            self._maybe_sync_cuda(world_points)
+            timing_after_fk = time.perf_counter()
         distances = self.query_workpiece_sdf(
             world_points,
             batch["workpiece_id"].to(
@@ -867,6 +888,9 @@ class DifferentiableTrajectoryLoss(nn.Module):
             device=world_points.device,
             dtype=world_points.dtype,
         )
+        if self.timing_enabled:
+            self._maybe_sync_cuda(distances)
+            timing_after_query = time.perf_counter()
         violations = F.relu((self.d_safe - distances) / self.d_safe)
         flattened_violations = violations.reshape(violations.shape[0], -1)
         topk = min(self.topk, flattened_violations.shape[1])
@@ -897,12 +921,23 @@ class DifferentiableTrajectoryLoss(nn.Module):
             + self.oob_weight * oob_loss
             + self.smooth_weight * smooth_loss
         )
+        if self.timing_enabled:
+            self._maybe_sync_cuda(weighted_auxiliary_loss)
+            timing_end = time.perf_counter()
+            timing = {
+                "timing_traj_reconstruct_sec": timing_after_reconstruct - timing_start,
+                "timing_traj_fk_sec": timing_after_fk - timing_after_reconstruct,
+                "timing_traj_sdf_query_sec": timing_after_query - timing_after_fk,
+                "timing_traj_loss_agg_sec": timing_end - timing_after_query,
+                "timing_traj_total_sec": timing_end - timing_start,
+            }
         return {
             "sdf_collision_loss": sdf_collision_loss,
             "trajectory_collision_loss": trajectory_collision_loss,
             "oob_loss": oob_loss,
             "smooth_loss": smooth_loss,
             "weighted_auxiliary_loss": weighted_auxiliary_loss,
+            **timing,
         }
 
 
@@ -954,4 +989,9 @@ def combine_diffusion_and_trajectory_losses(
         "oob_loss": float(auxiliary["oob_loss"].detach().item()),
         "smooth_loss": float(auxiliary["smooth_loss"].detach().item()),
         "total_loss": float(total_loss.detach().item()),
+        **{
+            key: float(value)
+            for key, value in auxiliary.items()
+            if key.startswith("timing_")
+        },
     }

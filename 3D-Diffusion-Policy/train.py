@@ -458,7 +458,13 @@ class TrainDP3Workspace:
                             'train_loss': raw_loss_cpu,
                             'global_step': self.global_step,
                             'epoch': self.epoch,
-                            'lr': lr_scheduler.get_last_lr()[0]
+                            'lr': lr_scheduler.get_last_lr()[0],
+                            'timing_train_total_sec': t2 - t1,
+                            'timing_train_loss_backward_sec': t1_2 - t1_1,
+                            'timing_train_opt_sec': t1_3 - t1_2,
+                            'timing_train_ema_sec': t1_4 - t1_3,
+                            'timing_train_log_prep_sec': t1_5 - t1_4,
+                            'timing_train_post_sec': t2 - t1_5,
                         }
                         t1_5 = time.time()
                         step_log.update(loss_dict)
