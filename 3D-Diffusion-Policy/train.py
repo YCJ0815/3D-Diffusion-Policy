@@ -793,7 +793,8 @@ class TrainDP3Workspace:
         payload = torch.load(path.open('rb'), pickle_module=dill, map_location='cpu')
         self.load_payload(payload, 
             exclude_keys=exclude_keys, 
-            include_keys=include_keys)
+            include_keys=include_keys,
+            **kwargs)
         return payload
     
     @classmethod
