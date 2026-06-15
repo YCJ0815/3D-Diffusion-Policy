@@ -80,8 +80,8 @@ policy:
     topk: 64
     softmin_beta: 75.0
     d_safe: 0.02
-    sdf_collision_weight: 0.1
-    trajectory_collision_weight: 0.1
+    sdf_collision_weight: 0.2
+    trajectory_collision_weight: 0.2
     oob_weight: 0.05
     oob_margin: 0.02
     smooth_weight: 0.01
