@@ -295,7 +295,7 @@ class PyBulletValidationConfig:
     random_seed: int = 42
     diffusion_sampling_seed: int | None = None
     inference_num_steps: int | None = None
-    num_candidates: int = 8
+    num_candidates: int = 16
     candidate_selection: str = "max_min_sdf"
     sdf_filename: str = "workpiece_sdf.npz"
     sdf_required: bool = True
