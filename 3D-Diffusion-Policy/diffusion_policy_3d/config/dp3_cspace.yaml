@@ -183,7 +183,7 @@ training:
     random_seed: ${training.seed}
     diffusion_sampling_seed: ${training.seed}
     inference_num_steps: ${policy.num_inference_steps}
-    num_candidates: 16
+    num_candidates: 8
     candidate_selection: max_min_sdf
     sdf_filename: workpiece_sdf.npz
     sdf_required: true

@@ -10,6 +10,7 @@ if __name__ == "__main__":
 import pathlib
 
 import hydra
+from omegaconf import open_dict
 
 from train import TrainDP3Workspace
 
@@ -22,6 +23,14 @@ from train import TrainDP3Workspace
     config_name="dp3_cspace",
 )
 def main(cfg):
+    with open_dict(cfg):
+        cfg.checkpoint.topk.monitor_key = "val_pybullet_collision_rate"
+        cfg.checkpoint.topk.mode = "min"
+        cfg.checkpoint.topk.k = 3
+        cfg.checkpoint.topk.format_str = (
+            "epoch={epoch:04d}-val_pybullet_collision_rate="
+            "{val_pybullet_collision_rate:.6f}.ckpt"
+        )
     workspace = TrainDP3Workspace(cfg)
     workspace.run()
 
