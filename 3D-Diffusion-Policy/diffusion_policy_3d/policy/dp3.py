@@ -180,20 +180,24 @@ class DP3(BasePolicy):
             condition_data_pc=None, condition_mask_pc=None,
             local_cond=None, global_cond=None,
             generator=None,
+            num_inference_steps=None,
             # keyword arguments to scheduler.step
             **kwargs
             ):
         model = self.model
         scheduler = self.noise_scheduler
 
+        if num_inference_steps is None:
+            num_inference_steps = self.num_inference_steps
 
         trajectory = torch.randn(
             size=condition_data.shape, 
             dtype=condition_data.dtype,
-            device=condition_data.device)
+            device=condition_data.device,
+            generator=generator)
 
         # set step values
-        scheduler.set_timesteps(self.num_inference_steps)
+        scheduler.set_timesteps(num_inference_steps)
 
 
         for t in scheduler.timesteps:
@@ -217,7 +221,12 @@ class DP3(BasePolicy):
         return trajectory
 
 
-    def predict_action(self, obs_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    def predict_action(
+        self,
+        obs_dict: Dict[str, torch.Tensor],
+        generator=None,
+        num_inference_steps=None,
+    ) -> Dict[str, torch.Tensor]:
         """
         obs_dict: must include "obs" key
         result: must include "action" key
@@ -274,6 +283,8 @@ class DP3(BasePolicy):
             cond_mask,
             local_cond=local_cond,
             global_cond=global_cond,
+            generator=generator,
+            num_inference_steps=num_inference_steps,
             **self.kwargs)
         
         # unnormalize prediction

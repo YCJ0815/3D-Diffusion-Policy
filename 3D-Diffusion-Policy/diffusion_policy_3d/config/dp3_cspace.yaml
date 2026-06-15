@@ -181,6 +181,8 @@ training:
     max_episodes: 100
     random_sample_episodes: true
     random_seed: ${training.seed}
+    diffusion_sampling_seed: ${training.seed}
+    inference_num_steps: ${policy.num_inference_steps}
     sdf_filename: workpiece_sdf.npz
     sdf_required: true
     robot_surface_points_per_link: 256

@@ -262,7 +262,12 @@ class DP3CSpace(DP3):
     def debug_compare_global_condition(self, obs_dict: Dict[str, torch.Tensor]) -> None:
         _debug_compare_global_cond(self, obs_dict)
 
-    def predict_action(self, obs_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    def predict_action(
+        self,
+        obs_dict: Dict[str, torch.Tensor],
+        generator=None,
+        num_inference_steps=None,
+    ) -> Dict[str, torch.Tensor]:
         normalized_obs, cspace_feature = self._split_observations(obs_dict)
         first_value = next(iter(normalized_obs.values()))
         batch_size = int(first_value.shape[0])
@@ -281,6 +286,8 @@ class DP3CSpace(DP3):
             condition_mask,
             local_cond=None,
             global_cond=global_cond,
+            generator=generator,
+            num_inference_steps=num_inference_steps,
             **self.kwargs,
         )
 
@@ -533,7 +540,12 @@ class SimpleDP3CSpace(SimpleDP3):
     def debug_compare_global_condition(self, obs_dict: Dict[str, torch.Tensor]) -> None:
         _debug_compare_global_cond(self, obs_dict)
 
-    def predict_action(self, obs_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    def predict_action(
+        self,
+        obs_dict: Dict[str, torch.Tensor],
+        generator=None,
+        num_inference_steps=None,
+    ) -> Dict[str, torch.Tensor]:
         normalized_obs, cspace_feature = self._split_observations(obs_dict)
         first_value = next(iter(normalized_obs.values()))
         batch_size = int(first_value.shape[0])
@@ -552,6 +564,8 @@ class SimpleDP3CSpace(SimpleDP3):
             condition_mask,
             local_cond=None,
             global_cond=global_cond,
+            generator=generator,
+            num_inference_steps=num_inference_steps,
             **self.kwargs,
         )
 

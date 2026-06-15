@@ -284,6 +284,8 @@ class PyBulletValidationConfig:
     max_episodes: int | None = None
     random_sample_episodes: bool = False
     random_seed: int = 42
+    diffusion_sampling_seed: int | None = None
+    inference_num_steps: int | None = None
     sdf_filename: str = "workpiece_sdf.npz"
     sdf_required: bool = True
     robot_surface_points_per_link: int = 256
@@ -325,6 +327,16 @@ class PyBulletValidationConfig:
             max_episodes=cfg.get("max_episodes"),
             random_sample_episodes=bool(cfg.get("random_sample_episodes", False)),
             random_seed=int(cfg.get("random_seed", 42)),
+            diffusion_sampling_seed=(
+                None
+                if cfg.get("diffusion_sampling_seed", None) is None
+                else int(cfg.get("diffusion_sampling_seed"))
+            ),
+            inference_num_steps=(
+                None
+                if cfg.get("inference_num_steps", None) is None
+                else int(cfg.get("inference_num_steps"))
+            ),
             sdf_filename=str(cfg.get("sdf_filename", "workpiece_sdf.npz")),
             sdf_required=bool(cfg.get("sdf_required", True)),
             robot_surface_points_per_link=int(cfg.get("robot_surface_points_per_link", 256)),
@@ -1101,7 +1113,17 @@ class PyBulletValidationRunner:
                     dataset=dataset,
                     policy=policy,
                 )
-                result = policy.predict_action(obs_dict)
+                generator = None
+                if self.cfg.diffusion_sampling_seed is not None:
+                    generator = torch.Generator(device=device)
+                    generator.manual_seed(
+                        int(self.cfg.diffusion_sampling_seed) + int(batch_start)
+                    )
+                result = policy.predict_action(
+                    obs_dict,
+                    generator=generator,
+                    num_inference_steps=self.cfg.inference_num_steps,
+                )
                 pred_action_batch = result["action_pred"].detach().cpu().numpy().astype(np.float32)
                 for local_idx, episode_idx in enumerate(batch_episode_indices):
                     raw_obs = raw_obs_list[local_idx]
@@ -1262,6 +1284,14 @@ class PyBulletValidationRunner:
             "val_pybullet_eval_episodes": total,
             "val_sdf_valid_rate": float(np.mean(valid_sdf_mask.astype(np.float32))),
         }
+        if self.cfg.diffusion_sampling_seed is not None:
+            log_data["val_pybullet_diffusion_sampling_seed"] = float(
+                self.cfg.diffusion_sampling_seed
+            )
+        if self.cfg.inference_num_steps is not None:
+            log_data["val_pybullet_inference_num_steps"] = float(
+                self.cfg.inference_num_steps
+            )
         if self.cfg.log_legacy_pybullet_metrics:
             log_data.update({
                 "val_pybullet_collision_rate": collision_count / total,
