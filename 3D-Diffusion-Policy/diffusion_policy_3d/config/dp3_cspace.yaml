@@ -170,19 +170,21 @@ training:
     tcp_link_name: tool0
     stl_x_offset_m: 0.5
     collision_distance_threshold: 0.0
-    interpolate_for_collision: true
+    interpolate_for_collision: false
     max_joint_step_rad: 0.01
     min_interpolated_steps_per_segment: 1
     goal_position_norm_m: 0.1
     goal_tolerance_m: 0.01
     num_control_points: 16
     spline_degree: 5
-    target_steps: 64
+    target_steps: 32
     max_episodes: 100
     random_sample_episodes: true
     random_seed: ${training.seed}
     diffusion_sampling_seed: ${training.seed}
     inference_num_steps: ${policy.num_inference_steps}
+    num_candidates: 8
+    candidate_selection: max_min_sdf
     sdf_filename: workpiece_sdf.npz
     sdf_required: true
     robot_surface_points_per_link: 256

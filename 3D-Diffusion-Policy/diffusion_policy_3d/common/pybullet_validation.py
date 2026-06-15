@@ -178,6 +178,15 @@ def _select_deterministic_surface_points(points: np.ndarray, max_points: int) ->
     return points[indices].astype(np.float32)
 
 
+def _select_best_candidate_index(scores: np.ndarray) -> int:
+    scores = np.asarray(scores, dtype=np.float32).reshape(-1)
+    valid_mask = np.isfinite(scores)
+    if not np.any(valid_mask):
+        raise ValueError("All PyBullet validation candidates have invalid SDF scores.")
+    ranked_scores = np.where(valid_mask, scores, -np.inf)
+    return int(np.argmax(ranked_scores))
+
+
 @dataclass
 class SDFGrid:
     sdf: np.ndarray
@@ -273,19 +282,21 @@ class PyBulletValidationConfig:
     tcp_link_name: str = "tool0"
     stl_x_offset_m: float = 0.5
     collision_distance_threshold: float = 0.0
-    interpolate_for_collision: bool = True
+    interpolate_for_collision: bool = False
     max_joint_step_rad: float = 0.01
     min_interpolated_steps_per_segment: int = 1
     goal_position_norm_m: float = 0.1
     goal_tolerance_m: float = 0.01
     num_control_points: int = 12
     spline_degree: int = 5
-    target_steps: int = 64
+    target_steps: int = 32
     max_episodes: int | None = None
     random_sample_episodes: bool = False
     random_seed: int = 42
     diffusion_sampling_seed: int | None = None
     inference_num_steps: int | None = None
+    num_candidates: int = 8
+    candidate_selection: str = "max_min_sdf"
     sdf_filename: str = "workpiece_sdf.npz"
     sdf_required: bool = True
     robot_surface_points_per_link: int = 256
@@ -316,14 +327,14 @@ class PyBulletValidationConfig:
             tcp_link_name=str(cfg.get("tcp_link_name", "tool0")),
             stl_x_offset_m=float(cfg.get("stl_x_offset_m", 0.5)),
             collision_distance_threshold=float(cfg.get("collision_distance_threshold", 0.0)),
-            interpolate_for_collision=bool(cfg.get("interpolate_for_collision", True)),
+            interpolate_for_collision=bool(cfg.get("interpolate_for_collision", False)),
             max_joint_step_rad=float(cfg.get("max_joint_step_rad", 0.01)),
             min_interpolated_steps_per_segment=int(cfg.get("min_interpolated_steps_per_segment", 1)),
             goal_position_norm_m=float(cfg.get("goal_position_norm_m", 0.1)),
             goal_tolerance_m=float(cfg.get("goal_tolerance_m", 0.01)),
             num_control_points=int(cfg.get("num_control_points", 12)),
             spline_degree=int(cfg.get("spline_degree", 5)),
-            target_steps=int(cfg.get("target_steps", 64)),
+            target_steps=int(cfg.get("target_steps", 32)),
             max_episodes=cfg.get("max_episodes"),
             random_sample_episodes=bool(cfg.get("random_sample_episodes", False)),
             random_seed=int(cfg.get("random_seed", 42)),
@@ -337,6 +348,8 @@ class PyBulletValidationConfig:
                 if cfg.get("inference_num_steps", None) is None
                 else int(cfg.get("inference_num_steps"))
             ),
+            num_candidates=int(cfg.get("num_candidates", 8)),
+            candidate_selection=str(cfg.get("candidate_selection", "max_min_sdf")),
             sdf_filename=str(cfg.get("sdf_filename", "workpiece_sdf.npz")),
             sdf_required=bool(cfg.get("sdf_required", True)),
             robot_surface_points_per_link=int(cfg.get("robot_surface_points_per_link", 256)),
@@ -360,21 +373,16 @@ def _init_pybullet_validation_worker(cfg: PyBulletValidationConfig) -> None:
     _PYBULLET_VALIDATION_WORKER = PyBulletCollisionValidator(cfg)
 
 
-def _run_pybullet_validation_task(task: dict[str, np.ndarray | int]) -> dict[str, float | bool]:
+def _run_pybullet_validation_task(task: dict[str, np.ndarray | int | float]) -> dict[str, float | bool]:
     global _PYBULLET_VALIDATION_WORKER
     if _PYBULLET_VALIDATION_WORKER is None:
         raise RuntimeError("PyBullet validation worker was not initialized.")
     validator = _PYBULLET_VALIDATION_WORKER
     start_joint_normalized = np.asarray(task["start_joint_normalized"], dtype=np.float32)
-    joint_trajectory = validator.reconstruct_joint_trajectory(
-        pred_action_horizon=np.asarray(task["pred_action_horizon"], dtype=np.float32),
-        start_joint_normalized=start_joint_normalized,
-        end_joint_normalized=np.asarray(task["end_joint_normalized"], dtype=np.float32),
-    )
     start_joint_state = validator._unnormalize_joint_state(start_joint_normalized)
     return validator.evaluate_trajectory(
         workpiece_id=int(task["workpiece_id"]),
-        joint_trajectory=joint_trajectory,
+        joint_trajectory=np.asarray(task["joint_trajectory"], dtype=np.float32),
         start_joint_state=start_joint_state,
         goal_position_normalized=np.asarray(task["goal_position_normalized"], dtype=np.float32),
     )
@@ -657,6 +665,41 @@ class PyBulletCollisionValidator:
             return float("nan")
         return float(np.nanmin(sdf_values))
 
+    def score_joint_trajectory_sdf(
+        self,
+        workpiece_id: int,
+        joint_trajectory: np.ndarray,
+    ) -> float:
+        sdf_grid = self._load_workpiece_sdf(workpiece_id)
+        if sdf_grid is None:
+            return float("-inf")
+        joint_trajectory = np.asarray(joint_trajectory, dtype=np.float32)
+        expected_shape = (int(self.cfg.target_steps), len(self.revolute_joint_indices))
+        if joint_trajectory.shape != expected_shape:
+            raise ValueError(
+                "SDF candidate scoring expects joint trajectory shape "
+                f"{expected_shape}, got {joint_trajectory.shape}."
+            )
+
+        trajectory_min_distance = float("inf")
+        for joint_state in joint_trajectory:
+            self._set_robot_joints(joint_state)
+            robot_points = self._robot_surface_points_world()
+            if robot_points.size == 0:
+                return float("-inf")
+            sdf_values = sdf_grid.query(robot_points)
+            if sdf_values.size == 0 or not np.all(np.isfinite(sdf_values)):
+                return float("-inf")
+            trajectory_min_distance = min(
+                trajectory_min_distance,
+                float(np.min(sdf_values)),
+            )
+        return (
+            trajectory_min_distance
+            if np.isfinite(trajectory_min_distance)
+            else float("-inf")
+        )
+
     def _set_robot_joints(self, joint_state: np.ndarray) -> None:
         joint_state = np.asarray(joint_state, dtype=np.float32).reshape(-1)
         if joint_state.shape[0] != len(self.revolute_joint_indices):
@@ -858,6 +901,31 @@ class PyBulletCollisionValidator:
 class PyBulletValidationRunner:
     def __init__(self, cfg: PyBulletValidationConfig):
         self.cfg = cfg
+        if self.cfg.target_steps != 32:
+            raise ValueError(
+                "PyBullet multi-candidate validation requires target_steps=32, "
+                f"got {self.cfg.target_steps}"
+            )
+        if self.cfg.interpolate_for_collision:
+            raise ValueError(
+                "PyBullet multi-candidate validation requires "
+                "interpolate_for_collision=false."
+            )
+        if self.cfg.num_candidates <= 0:
+            raise ValueError(
+                "training.pybullet_eval.num_candidates must be positive, "
+                f"got {self.cfg.num_candidates}"
+            )
+        if self.cfg.candidate_selection != "max_min_sdf":
+            raise ValueError(
+                "training.pybullet_eval.candidate_selection must be "
+                f"`max_min_sdf`, got {self.cfg.candidate_selection!r}"
+            )
+        if self.cfg.num_candidates > 1 and self.cfg.diffusion_sampling_seed is None:
+            raise ValueError(
+                "training.pybullet_eval.diffusion_sampling_seed is required "
+                "for deterministic multi-candidate validation."
+            )
         self.validator = PyBulletCollisionValidator(cfg)
         self._fixed_episode_indices: np.ndarray | None = None
 
@@ -1085,9 +1153,13 @@ class PyBulletValidationRunner:
         running_collision_count = 0
         running_valid_sdf_count = 0
         running_min_sdf_distance_m = float("inf")
+        invalid_candidate_count = 0
+        selected_candidate_indices = []
+        selected_candidate_scores = []
+        selected_candidate_gains = []
         policy.eval()
         episode_list = episode_indices.tolist()
-        tasks: list[dict[str, np.ndarray | int]] = []
+        tasks: list[dict[str, np.ndarray | int | float]] = []
         if tqdm is not None:
             inference_progress = tqdm.tqdm(
                 total=len(episode_list),
@@ -1113,27 +1185,85 @@ class PyBulletValidationRunner:
                     dataset=dataset,
                     policy=policy,
                 )
-                generator = None
-                if self.cfg.diffusion_sampling_seed is not None:
+                candidate_action_batches = []
+                for candidate_idx in range(int(self.cfg.num_candidates)):
                     generator = torch.Generator(device=device)
                     generator.manual_seed(
-                        int(self.cfg.diffusion_sampling_seed) + int(batch_start)
+                        int(self.cfg.diffusion_sampling_seed)
+                        + candidate_idx * 1_000_003
+                        + int(batch_start)
                     )
-                result = policy.predict_action(
-                    obs_dict,
-                    generator=generator,
-                    num_inference_steps=self.cfg.inference_num_steps,
-                )
-                pred_action_batch = result["action_pred"].detach().cpu().numpy().astype(np.float32)
+                    result = policy.predict_action(
+                        obs_dict,
+                        generator=generator,
+                        num_inference_steps=self.cfg.inference_num_steps,
+                    )
+                    candidate_action_batches.append(
+                        result["action_pred"].detach().cpu().numpy().astype(np.float32)
+                    )
+                candidate_action_batch = np.stack(candidate_action_batches, axis=1)
                 for local_idx, episode_idx in enumerate(batch_episode_indices):
                     raw_obs = raw_obs_list[local_idx]
+                    workpiece_id = int(workpiece_ids[int(episode_idx)])
+                    start_joint_normalized = raw_obs[
+                        "first_joint_angles_normalized"
+                    ][0].astype(np.float32)
+                    end_joint_normalized = raw_obs[
+                        "last_joint_angles_normalized"
+                    ][0].astype(np.float32)
+                    candidate_joint_trajectories = []
+                    candidate_scores = []
+                    for candidate_idx in range(int(self.cfg.num_candidates)):
+                        joint_trajectory = self.validator.reconstruct_joint_trajectory(
+                            pred_action_horizon=candidate_action_batch[
+                                local_idx, candidate_idx
+                            ],
+                            start_joint_normalized=start_joint_normalized,
+                            end_joint_normalized=end_joint_normalized,
+                        )
+                        candidate_joint_trajectories.append(joint_trajectory)
+                        candidate_scores.append(
+                            self.validator.score_joint_trajectory_sdf(
+                                workpiece_id=workpiece_id,
+                                joint_trajectory=joint_trajectory,
+                            )
+                        )
+                    candidate_scores_array = np.asarray(
+                        candidate_scores,
+                        dtype=np.float32,
+                    )
+                    invalid_candidate_count += int(
+                        np.count_nonzero(~np.isfinite(candidate_scores_array))
+                    )
+                    try:
+                        selected_candidate_idx = _select_best_candidate_index(
+                            candidate_scores_array
+                        )
+                    except ValueError as exc:
+                        raise ValueError(
+                            "All SDF candidates are invalid for PyBullet validation "
+                            f"episode_idx={episode_idx}, workpiece_id={workpiece_id}."
+                        ) from exc
+                    selected_score = float(
+                        candidate_scores_array[selected_candidate_idx]
+                    )
+                    baseline_score = float(candidate_scores_array[0])
+                    selected_candidate_indices.append(selected_candidate_idx)
+                    selected_candidate_scores.append(selected_score)
+                    if np.isfinite(baseline_score):
+                        selected_candidate_gains.append(
+                            selected_score - baseline_score
+                        )
                     tasks.append({
                         "episode_idx": int(episode_idx),
-                        "workpiece_id": int(workpiece_ids[int(episode_idx)]),
-                        "pred_action_horizon": pred_action_batch[local_idx],
-                        "start_joint_normalized": raw_obs["first_joint_angles_normalized"][0].astype(np.float32),
-                        "end_joint_normalized": raw_obs["last_joint_angles_normalized"][0].astype(np.float32),
+                        "workpiece_id": workpiece_id,
+                        "joint_trajectory": candidate_joint_trajectories[
+                            selected_candidate_idx
+                        ],
+                        "start_joint_normalized": start_joint_normalized,
                         "goal_position_normalized": raw_obs["goal_position"][0].astype(np.float32),
+                        "selected_candidate_index": selected_candidate_idx,
+                        "selected_candidate_score": selected_score,
                     })
                 if inference_progress is not None:
                     inference_progress.update(len(batch_episode_indices))
@@ -1184,17 +1314,15 @@ class PyBulletValidationRunner:
 
         if int(self.cfg.num_workers) == 1:
             for processed_count, task in enumerate(tasks, start=1):
-                joint_trajectory = self.validator.reconstruct_joint_trajectory(
-                    pred_action_horizon=np.asarray(task["pred_action_horizon"], dtype=np.float32),
-                    start_joint_normalized=np.asarray(task["start_joint_normalized"], dtype=np.float32),
-                    end_joint_normalized=np.asarray(task["end_joint_normalized"], dtype=np.float32),
-                )
                 start_joint_state = self.validator._unnormalize_joint_state(
                     np.asarray(task["start_joint_normalized"], dtype=np.float32)
                 )
                 metric = self.validator.evaluate_trajectory(
                     workpiece_id=int(task["workpiece_id"]),
-                    joint_trajectory=joint_trajectory,
+                    joint_trajectory=np.asarray(
+                        task["joint_trajectory"],
+                        dtype=np.float32,
+                    ),
                     start_joint_state=start_joint_state,
                     goal_position_normalized=np.asarray(task["goal_position_normalized"], dtype=np.float32),
                 )
@@ -1283,6 +1411,22 @@ class PyBulletValidationRunner:
             "val_mean_min_sdf_distance_m": mean_min_sdf_distance_m,
             "val_pybullet_eval_episodes": total,
             "val_sdf_valid_rate": float(np.mean(valid_sdf_mask.astype(np.float32))),
+            "val_pybullet_num_candidates": float(self.cfg.num_candidates),
+            "val_selected_candidate_mean_min_sdf_m": float(
+                np.mean(np.asarray(selected_candidate_scores, dtype=np.float32))
+            ),
+            "val_selected_candidate_mean_sdf_gain_m": (
+                float(np.mean(np.asarray(selected_candidate_gains, dtype=np.float32)))
+                if selected_candidate_gains
+                else float("nan")
+            ),
+            "val_invalid_candidate_rate": (
+                invalid_candidate_count
+                / (total * float(self.cfg.num_candidates))
+            ),
+            "val_selected_candidate_index_mean": float(
+                np.mean(np.asarray(selected_candidate_indices, dtype=np.float32))
+            ),
         }
         if self.cfg.diffusion_sampling_seed is not None:
             log_data["val_pybullet_diffusion_sampling_seed"] = float(
