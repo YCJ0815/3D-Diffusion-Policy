@@ -73,7 +73,7 @@ policy:
     urdf_path: config/robot-model/ur5e_with_pen.urdf
     urdf_package_roots: [config/robot-model]
     num_control_points: 16
-    trajectory_steps: 32
+    trajectory_steps: 16
     link_surface_point_counts:
       wrist_3_link: 32
       pen_link: 64
@@ -101,14 +101,14 @@ ema:
   max_value: 0.9999
 
 dataloader:
-  batch_size: 64
+  batch_size: 192
   num_workers: 8
   shuffle: true
   pin_memory: true
   persistent_workers: true
 
 val_dataloader:
-  batch_size: 64
+  batch_size: 192
   num_workers: 8
   shuffle: false
   pin_memory: true
