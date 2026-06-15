@@ -22,7 +22,7 @@ from diffusion_policy_3d.common.pybullet_validation import (
 
 
 DEFAULT_LINK_SURFACE_POINT_COUNTS = {
-    "wrist_3_link": 48,
+    "wrist_3_link": 32,
     "pen_link": 64,
 }
 
@@ -408,9 +408,9 @@ class DifferentiableTrajectoryLoss(nn.Module):
             self.register_buffer(buffer_name, torch.from_numpy(selected))
             self.link_point_buffer_names[link_name] = buffer_name
         self.total_surface_points = sum(self.link_surface_point_counts.values())
-        if self.total_surface_points != 112:
+        if self.total_surface_points != 96:
             raise ValueError(
-                f"Terminal-priority point schedule must total 112, got {self.total_surface_points}"
+                f"Terminal-priority point schedule must total 96, got {self.total_surface_points}"
             )
 
     @staticmethod
