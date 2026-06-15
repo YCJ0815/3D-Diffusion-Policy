@@ -407,6 +407,10 @@ class TrainDP3Workspace:
                     "training.pybullet_eval currently supports TransitionTrajectoryDataset only."
                 )
             pybullet_validation_runner = PyBulletValidationRunner(pybullet_eval_cfg)
+            pybullet_validation_runner.prepare_episode_subset(
+                replay_buffer=val_dataset.replay_buffer,
+                episode_mask=val_dataset.train_mask,
+            )
 
         try:
             for local_epoch_idx in range(cfg.training.num_epochs):

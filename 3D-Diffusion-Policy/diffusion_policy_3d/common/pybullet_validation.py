@@ -847,9 +847,68 @@ class PyBulletValidationRunner:
     def __init__(self, cfg: PyBulletValidationConfig):
         self.cfg = cfg
         self.validator = PyBulletCollisionValidator(cfg)
+        self._fixed_episode_indices: np.ndarray | None = None
 
     def close(self) -> None:
         self.validator.close()
+
+    def prepare_episode_subset(
+        self,
+        replay_buffer,
+        episode_mask: np.ndarray,
+    ) -> np.ndarray:
+        if "workpiece_ids" not in replay_buffer.meta:
+            raise KeyError(
+                "PyBullet validation requires `meta/workpiece_ids` in the zarr dataset. "
+                "Rebuild the dataset with workpiece metadata."
+            )
+        workpiece_ids = np.asarray(
+            replay_buffer.meta["workpiece_ids"][:],
+            dtype=np.int64,
+        )
+        episode_indices = np.flatnonzero(np.asarray(episode_mask, dtype=bool))
+        if not self.cfg.include_regular_jobs or not self.cfg.include_simple_jobs:
+            selected_episode_indices = []
+            for episode_idx in episode_indices.tolist():
+                workpiece_id = int(workpiece_ids[episode_idx])
+                is_simple_job = (
+                    workpiece_id >= int(self.cfg.simple_workpiece_id_offset)
+                )
+                if is_simple_job and not self.cfg.include_simple_jobs:
+                    continue
+                if (not is_simple_job) and not self.cfg.include_regular_jobs:
+                    continue
+                selected_episode_indices.append(episode_idx)
+            episode_indices = np.asarray(
+                selected_episode_indices,
+                dtype=np.int64,
+            )
+        if self.cfg.max_episodes is not None:
+            max_episodes = int(self.cfg.max_episodes)
+            if max_episodes <= 0:
+                raise ValueError(
+                    "training.pybullet_eval.max_episodes must be positive, "
+                    f"got {max_episodes}"
+                )
+            if episode_indices.size > max_episodes:
+                if self.cfg.random_sample_episodes:
+                    rng = np.random.default_rng(self.cfg.random_seed)
+                    episode_indices = np.sort(
+                        rng.choice(
+                            episode_indices,
+                            size=max_episodes,
+                            replace=False,
+                        )
+                    )
+                else:
+                    episode_indices = episode_indices[:max_episodes]
+        self._fixed_episode_indices = episode_indices.copy()
+        print(
+            "[PyBullet validation] fixed episode subset prepared: "
+            f"{self._fixed_episode_indices.size} episodes "
+            f"(seed={self.cfg.random_seed})"
+        )
+        return self._fixed_episode_indices.copy()
 
     def _build_obs_entry(
         self,
@@ -985,43 +1044,13 @@ class PyBulletValidationRunner:
         except ModuleNotFoundError:
             tqdm = None
 
-        if "workpiece_ids" not in replay_buffer.meta:
-            raise KeyError(
-                "PyBullet validation requires `meta/workpiece_ids` in the zarr dataset. "
-                "Rebuild the dataset with workpiece metadata."
+        if self._fixed_episode_indices is None:
+            self.prepare_episode_subset(
+                replay_buffer=replay_buffer,
+                episode_mask=episode_mask,
             )
         workpiece_ids = np.asarray(replay_buffer.meta["workpiece_ids"][:], dtype=np.int64)
-        episode_indices = np.flatnonzero(np.asarray(episode_mask, dtype=bool))
-        if not self.cfg.include_regular_jobs or not self.cfg.include_simple_jobs:
-            selected_episode_indices = []
-            for episode_idx in episode_indices.tolist():
-                workpiece_id = int(workpiece_ids[episode_idx])
-                is_simple_job = workpiece_id >= int(self.cfg.simple_workpiece_id_offset)
-                if is_simple_job and not self.cfg.include_simple_jobs:
-                    continue
-                if (not is_simple_job) and not self.cfg.include_regular_jobs:
-                    continue
-                selected_episode_indices.append(episode_idx)
-            episode_indices = np.asarray(selected_episode_indices, dtype=np.int64)
-        if self.cfg.max_episodes is not None:
-            max_episodes = int(self.cfg.max_episodes)
-            if max_episodes <= 0:
-                raise ValueError(
-                    "training.pybullet_eval.max_episodes must be positive, "
-                    f"got {max_episodes}"
-                )
-            if episode_indices.size > max_episodes:
-                if self.cfg.random_sample_episodes:
-                    rng = np.random.default_rng(self.cfg.random_seed)
-                    episode_indices = np.sort(
-                        rng.choice(
-                            episode_indices,
-                            size=max_episodes,
-                            replace=False,
-                        )
-                    )
-                else:
-                    episode_indices = episode_indices[:max_episodes]
+        episode_indices = self._fixed_episode_indices
         if episode_indices.size == 0:
             return {}
 
