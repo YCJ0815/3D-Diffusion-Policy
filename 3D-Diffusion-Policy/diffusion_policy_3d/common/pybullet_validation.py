@@ -282,6 +282,8 @@ class PyBulletValidationConfig:
     spline_degree: int = 5
     target_steps: int = 64
     max_episodes: int | None = None
+    random_sample_episodes: bool = False
+    random_seed: int = 42
     sdf_filename: str = "workpiece_sdf.npz"
     sdf_required: bool = True
     robot_surface_points_per_link: int = 256
@@ -321,6 +323,8 @@ class PyBulletValidationConfig:
             spline_degree=int(cfg.get("spline_degree", 5)),
             target_steps=int(cfg.get("target_steps", 64)),
             max_episodes=cfg.get("max_episodes"),
+            random_sample_episodes=bool(cfg.get("random_sample_episodes", False)),
+            random_seed=int(cfg.get("random_seed", 42)),
             sdf_filename=str(cfg.get("sdf_filename", "workpiece_sdf.npz")),
             sdf_required=bool(cfg.get("sdf_required", True)),
             robot_surface_points_per_link=int(cfg.get("robot_surface_points_per_link", 256)),
@@ -1000,7 +1004,24 @@ class PyBulletValidationRunner:
                 selected_episode_indices.append(episode_idx)
             episode_indices = np.asarray(selected_episode_indices, dtype=np.int64)
         if self.cfg.max_episodes is not None:
-            episode_indices = episode_indices[: int(self.cfg.max_episodes)]
+            max_episodes = int(self.cfg.max_episodes)
+            if max_episodes <= 0:
+                raise ValueError(
+                    "training.pybullet_eval.max_episodes must be positive, "
+                    f"got {max_episodes}"
+                )
+            if episode_indices.size > max_episodes:
+                if self.cfg.random_sample_episodes:
+                    rng = np.random.default_rng(self.cfg.random_seed)
+                    episode_indices = np.sort(
+                        rng.choice(
+                            episode_indices,
+                            size=max_episodes,
+                            replace=False,
+                        )
+                    )
+                else:
+                    episode_indices = episode_indices[:max_episodes]
         if episode_indices.size == 0:
             return {}
 

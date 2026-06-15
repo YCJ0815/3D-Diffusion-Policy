@@ -116,7 +116,7 @@ val_dataloader:
 
 optimizer:
   _target_: torch.optim.AdamW
-  lr: 1.0e-4
+  lr: 2.5e-5
   betas: [0.95, 0.999]
   eps: 1.0e-8
   weight_decay: 1.0e-4
@@ -159,7 +159,7 @@ training:
     stats_path: /root/autodl-tmp/3D-Diffusion-Policy/data/realdex_bspline_stats_free10.npz
     stats_mode: auto
     include_regular_jobs: true
-    include_simple_jobs: true
+    include_simple_jobs: false
     jobs_root: /root/weld-robot/data_generation/data/generated_jobs
     simple_jobs_root: /root/weld-robot/data_generation/data/generated_jobs/simple_jobs
     simple_workpiece_id_offset: 1000
@@ -178,7 +178,9 @@ training:
     num_control_points: 16
     spline_degree: 5
     target_steps: 64
-    max_episodes: null
+    max_episodes: 100
+    random_sample_episodes: true
+    random_seed: ${training.seed}
     sdf_filename: workpiece_sdf.npz
     sdf_required: true
     robot_surface_points_per_link: 256
