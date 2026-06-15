@@ -22,9 +22,8 @@ from diffusion_policy_3d.common.pybullet_validation import (
 
 
 DEFAULT_LINK_SURFACE_POINT_COUNTS = {
-    "wrist_2_link": 64,
-    "wrist_3_link": 96,
-    "pen_link": 128,
+    "wrist_3_link": 48,
+    "pen_link": 64,
 }
 
 
@@ -75,15 +74,17 @@ class DifferentiableTrajectoryLoss(nn.Module):
                 f"expected horizon={expected_horizon}."
             )
 
-        self.topk = int(_config_get(config, "topk", 32))
+        self.topk = int(_config_get(config, "topk", 64))
         self.softmin_beta = float(_config_get(config, "softmin_beta", 75.0))
-        self.d_safe = float(_config_get(config, "d_safe", 0.001))
+        self.d_safe = float(_config_get(config, "d_safe", 0.02))
         self.sdf_collision_weight = float(
             _config_get(config, "sdf_collision_weight", 0.2)
         )
         self.trajectory_collision_weight = float(
             _config_get(config, "trajectory_collision_weight", 0.3)
         )
+        self.oob_weight = float(_config_get(config, "oob_weight", 0.1))
+        self.oob_margin = float(_config_get(config, "oob_margin", 0.02))
         self.smooth_weight = float(_config_get(config, "smooth_weight", 0.01))
         self.simple_workpiece_id_offset = int(
             _config_get(config, "simple_workpiece_id_offset", 1000)
@@ -111,6 +112,14 @@ class DifferentiableTrajectoryLoss(nn.Module):
         if self.d_safe <= 0:
             raise ValueError(
                 f"trajectory_loss.d_safe must be positive, got {self.d_safe}"
+            )
+        if self.oob_weight < 0:
+            raise ValueError(
+                f"trajectory_loss.oob_weight must be non-negative, got {self.oob_weight}"
+            )
+        if self.oob_margin <= 0:
+            raise ValueError(
+                f"trajectory_loss.oob_margin must be positive, got {self.oob_margin}"
             )
         if self.query_chunk_size <= 0:
             raise ValueError(
@@ -399,9 +408,9 @@ class DifferentiableTrajectoryLoss(nn.Module):
             self.register_buffer(buffer_name, torch.from_numpy(selected))
             self.link_point_buffer_names[link_name] = buffer_name
         self.total_surface_points = sum(self.link_surface_point_counts.values())
-        if self.total_surface_points != 288:
+        if self.total_surface_points != 112:
             raise ValueError(
-                f"Terminal-priority point schedule must total 288, got {self.total_surface_points}"
+                f"Terminal-priority point schedule must total 112, got {self.total_surface_points}"
             )
 
     @staticmethod
@@ -768,6 +777,45 @@ class DifferentiableTrajectoryLoss(nn.Module):
             result.index_copy_(0, sample_indices, distances)
         return result
 
+    def workpiece_bounds(
+        self,
+        workpiece_ids: torch.Tensor,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if workpiece_ids.ndim != 1:
+            raise ValueError(
+                f"workpiece_id must have shape [B], got {tuple(workpiece_ids.shape)}"
+            )
+        batch_size = workpiece_ids.shape[0]
+        grid_min = torch.empty((batch_size, 3), device=device, dtype=dtype)
+        grid_max = torch.empty((batch_size, 3), device=device, dtype=dtype)
+        unique_workpiece_ids = torch.unique(workpiece_ids.detach()).cpu().tolist()
+        for workpiece_id in unique_workpiece_ids:
+            workpiece_id = int(workpiece_id)
+            sample_indices = torch.nonzero(
+                workpiece_ids == workpiece_id,
+                as_tuple=False,
+            ).reshape(-1)
+            grid = self._load_sdf_device(workpiece_id, device, dtype)
+            min_values = torch.stack(
+                [grid["x"][0], grid["y"][0], grid["z"][0]]
+            ).reshape(1, 3)
+            max_values = torch.stack(
+                [grid["x"][-1], grid["y"][-1], grid["z"][-1]]
+            ).reshape(1, 3)
+            grid_min.index_copy_(
+                0,
+                sample_indices,
+                min_values.repeat(sample_indices.shape[0], 1),
+            )
+            grid_max.index_copy_(
+                0,
+                sample_indices,
+                max_values.repeat(sample_indices.shape[0], 1),
+            )
+        return grid_min, grid_max
+
     def forward(
         self,
         predicted_clean_action: torch.Tensor,
@@ -811,7 +859,14 @@ class DifferentiableTrajectoryLoss(nn.Module):
                 dtype=torch.long,
             ),
         )
-
+        grid_min, grid_max = self.workpiece_bounds(
+            batch["workpiece_id"].to(
+                device=world_points.device,
+                dtype=torch.long,
+            ),
+            device=world_points.device,
+            dtype=world_points.dtype,
+        )
         violations = F.relu((self.d_safe - distances) / self.d_safe)
         flattened_violations = violations.reshape(violations.shape[0], -1)
         topk = min(self.topk, flattened_violations.shape[1])
@@ -820,17 +875,16 @@ class DifferentiableTrajectoryLoss(nn.Module):
             .values.pow(2)
             .mean()
         )
-        flattened_distances = distances.reshape(distances.shape[0], -1)
-        soft_min_distance = -(
-            torch.logsumexp(
-                -self.softmin_beta * flattened_distances,
-                dim=1,
-            )
-            - math.log(flattened_distances.shape[1])
-        ) / self.softmin_beta
+        sdf_flat = distances.reshape(distances.shape[0], -1)
+        worst_k = min(128, sdf_flat.shape[1])
+        worst_k_dist = torch.topk(-sdf_flat, k=worst_k, dim=1).values.neg()
+        d_worst_mean = worst_k_dist.mean(dim=1)
         trajectory_collision_loss = F.relu(
-            (self.d_safe - soft_min_distance) / self.d_safe
+            (self.d_safe - d_worst_mean) / self.d_safe
         ).pow(2).mean()
+        lower_vio = F.relu(grid_min[:, None, None, :] + self.oob_margin - world_points)
+        upper_vio = F.relu(world_points - (grid_max[:, None, None, :] - self.oob_margin))
+        oob_loss = (lower_vio.pow(2) + upper_vio.pow(2)).mean()
         second_difference = (
             control_points[:, 2:, :]
             - 2.0 * control_points[:, 1:-1, :]
@@ -840,11 +894,13 @@ class DifferentiableTrajectoryLoss(nn.Module):
         weighted_auxiliary_loss = (
             self.sdf_collision_weight * sdf_collision_loss
             + self.trajectory_collision_weight * trajectory_collision_loss
+            + self.oob_weight * oob_loss
             + self.smooth_weight * smooth_loss
         )
         return {
             "sdf_collision_loss": sdf_collision_loss,
             "trajectory_collision_loss": trajectory_collision_loss,
+            "oob_loss": oob_loss,
             "smooth_loss": smooth_loss,
             "weighted_auxiliary_loss": weighted_auxiliary_loss,
         }
@@ -877,6 +933,7 @@ def combine_diffusion_and_trajectory_losses(
             "diffusion_loss": value,
             "sdf_collision_loss": 0.0,
             "trajectory_collision_loss": 0.0,
+            "oob_loss": 0.0,
             "smooth_loss": 0.0,
             "total_loss": value,
         }
@@ -894,6 +951,7 @@ def combine_diffusion_and_trajectory_losses(
         "trajectory_collision_loss": float(
             auxiliary["trajectory_collision_loss"].detach().item()
         ),
+        "oob_loss": float(auxiliary["oob_loss"].detach().item()),
         "smooth_loss": float(auxiliary["smooth_loss"].detach().item()),
         "total_loss": float(total_loss.detach().item()),
     }

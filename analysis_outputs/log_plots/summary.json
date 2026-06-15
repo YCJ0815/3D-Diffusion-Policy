@@ -1,0 +1,11 @@
+{
+  "num_rows": 81,
+  "epoch_start": 0,
+  "epoch_end": 80,
+  "best_train_loss": 1.9927362373897008,
+  "best_train_epoch": 79,
+  "best_val_loss": 0.9568387866020203,
+  "best_val_epoch": 80,
+  "best_test_score": -1.9927362373897008,
+  "best_test_epoch": 79
+}

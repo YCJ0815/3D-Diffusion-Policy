@@ -75,14 +75,15 @@ policy:
     num_control_points: 16
     trajectory_steps: 32
     link_surface_point_counts:
-      wrist_2_link: 64
-      wrist_3_link: 96
-      pen_link: 128
-    topk: 32
+      wrist_3_link: 32
+      pen_link: 64
+    topk: 64
     softmin_beta: 75.0
-    d_safe: 0.001
-    sdf_collision_weight: 0.2
-    trajectory_collision_weight: 0.3
+    d_safe: 0.02
+    sdf_collision_weight: 0.1
+    trajectory_collision_weight: 0.1
+    oob_weight: 0.05
+    oob_margin: 0.02
     smooth_weight: 0.01
     sdf_out_of_bounds_distance_m: 1.0
     query_chunk_size: 262144
@@ -123,6 +124,8 @@ training:
   seed: 42
   debug: false
   resume: false
+  init_checkpoint: null
+  init_checkpoint_strict: false
   run_validation: true
   lr_scheduler: cosine
   lr_warmup_steps: 500

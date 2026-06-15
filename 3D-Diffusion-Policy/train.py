@@ -202,6 +202,35 @@ class TrainDP3Workspace:
                         f"Overriding resumed optimizer lr to {float(resume_override_lr):.6g}",
                         "yellow",
                     )
+        else:
+            init_checkpoint = OmegaConf.select(
+                cfg, "training.init_checkpoint", default=None
+            )
+            if init_checkpoint:
+                init_checkpoint_path = pathlib.Path(
+                    str(init_checkpoint)
+                ).expanduser().resolve()
+                if not init_checkpoint_path.is_file():
+                    raise FileNotFoundError(
+                        f"training.init_checkpoint does not exist: {init_checkpoint_path}"
+                    )
+                init_strict = bool(
+                    OmegaConf.select(
+                        cfg,
+                        "training.init_checkpoint_strict",
+                        default=False,
+                    )
+                )
+                print(
+                    f"Initializing model from checkpoint {init_checkpoint_path} "
+                    f"(strict={init_strict})"
+                )
+                self.load_checkpoint(
+                    path=init_checkpoint_path,
+                    exclude_keys=("optimizer",),
+                    include_keys=(),
+                    strict=init_strict,
+                )
 
         # configure dataset
         dataset: BaseDataset
