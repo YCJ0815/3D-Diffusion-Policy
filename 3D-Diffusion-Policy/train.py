@@ -454,21 +454,23 @@ class TrainDP3Workspace:
                         raw_loss_cpu = raw_loss.item()
                         tepoch.set_postfix(loss=raw_loss_cpu, refresh=False)
                         train_losses.append(raw_loss_cpu)
+                        t1_5 = time.time()
                         step_log = {
                             'train_loss': raw_loss_cpu,
                             'global_step': self.global_step,
                             'epoch': self.epoch,
                             'lr': lr_scheduler.get_last_lr()[0],
+                        }
+                        step_log.update(loss_dict)
+                        t2 = time.time()
+                        step_log.update({
                             'timing_train_total_sec': t2 - t1,
                             'timing_train_loss_backward_sec': t1_2 - t1_1,
                             'timing_train_opt_sec': t1_3 - t1_2,
                             'timing_train_ema_sec': t1_4 - t1_3,
                             'timing_train_log_prep_sec': t1_5 - t1_4,
                             'timing_train_post_sec': t2 - t1_5,
-                        }
-                        t1_5 = time.time()
-                        step_log.update(loss_dict)
-                        t2 = time.time()
+                        })
                         
                         if verbose or (self.global_step > 0 and self.global_step % 20 == 0):
                             print(f"[step {self.global_step}] total={t2-t1:.4f}s "
