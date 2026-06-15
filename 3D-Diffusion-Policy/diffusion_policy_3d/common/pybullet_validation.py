@@ -682,21 +682,24 @@ class PyBulletCollisionValidator:
             )
 
         trajectory_min_distance = float("inf")
+        valid_sdf_point_count = 0
         for joint_state in joint_trajectory:
             self._set_robot_joints(joint_state)
             robot_points = self._robot_surface_points_world()
             if robot_points.size == 0:
                 return float("-inf")
             sdf_values = sdf_grid.query(robot_points)
-            if sdf_values.size == 0 or not np.all(np.isfinite(sdf_values)):
-                return float("-inf")
+            valid_sdf_values = sdf_values[np.isfinite(sdf_values)]
+            if valid_sdf_values.size == 0:
+                continue
+            valid_sdf_point_count += int(valid_sdf_values.size)
             trajectory_min_distance = min(
                 trajectory_min_distance,
-                float(np.min(sdf_values)),
+                float(np.min(valid_sdf_values)),
             )
         return (
             trajectory_min_distance
-            if np.isfinite(trajectory_min_distance)
+            if valid_sdf_point_count > 0 and np.isfinite(trajectory_min_distance)
             else float("-inf")
         )
 
