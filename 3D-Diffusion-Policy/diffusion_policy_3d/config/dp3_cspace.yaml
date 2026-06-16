@@ -185,6 +185,8 @@ training:
     inference_num_steps: ${policy.num_inference_steps}
     num_candidates: 16
     candidate_scheduler_eta: 1.0
+    candidate_action_noise_std: 0.02
+    candidate_action_noise_clip: 0.06
     candidate_selection: weighted_sdf
     selection_topk: 128
     selection_d_safe: 0.01

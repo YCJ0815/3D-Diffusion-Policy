@@ -382,6 +382,8 @@ class PyBulletValidationConfig:
     inference_num_steps: int | None = None
     num_candidates: int = 16
     candidate_scheduler_eta: float | None = 1.0
+    candidate_action_noise_std: float = 0.0
+    candidate_action_noise_clip: float | None = None
     candidate_selection: str = "weighted_sdf"
     selection_topk: int = 128
     selection_d_safe: float = 0.005
@@ -447,6 +449,12 @@ class PyBulletValidationConfig:
                 None
                 if cfg.get("candidate_scheduler_eta", 1.0) is None
                 else float(cfg.get("candidate_scheduler_eta", 1.0))
+            ),
+            candidate_action_noise_std=float(cfg.get("candidate_action_noise_std", 0.0)),
+            candidate_action_noise_clip=(
+                None
+                if cfg.get("candidate_action_noise_clip", None) is None
+                else float(cfg.get("candidate_action_noise_clip"))
             ),
             candidate_selection=str(cfg.get("candidate_selection", "weighted_sdf")),
             selection_topk=int(cfg.get("selection_topk", 128)),
@@ -1462,6 +1470,19 @@ class PyBulletValidationRunner:
             "[PyBullet validation] policy class="
             f"{policy.__class__.__module__}.{policy.__class__.__name__}"
         )
+        scheduler = getattr(policy, "noise_scheduler", None)
+        print(
+            "[PyBullet validation] scheduler class="
+            f"{scheduler.__class__.__module__}.{scheduler.__class__.__name__}"
+            if scheduler is not None
+            else "[PyBullet validation] scheduler class=None"
+        )
+        print(
+            "[PyBullet validation] candidate sampling "
+            f"eta={self.cfg.candidate_scheduler_eta} "
+            f"action_noise_std={self.cfg.candidate_action_noise_std} "
+            f"action_noise_clip={self.cfg.candidate_action_noise_clip}"
+        )
         if tqdm is not None:
             inference_progress = tqdm.tqdm(
                 total=len(episode_list),
@@ -1507,9 +1528,22 @@ class PyBulletValidationRunner:
                         num_inference_steps=self.cfg.inference_num_steps,
                         scheduler_step_kwargs=scheduler_step_kwargs,
                     )
-                    candidate_action_batches.append(
-                        result["action_pred"].detach().cpu().numpy().astype(np.float32)
-                    )
+                    candidate_action = result["action_pred"].detach().cpu().numpy().astype(np.float32)
+                    if candidate_idx > 0 and self.cfg.candidate_action_noise_std > 0.0:
+                        rng = np.random.default_rng(candidate_seed)
+                        candidate_noise = rng.normal(
+                            loc=0.0,
+                            scale=float(self.cfg.candidate_action_noise_std),
+                            size=candidate_action.shape,
+                        ).astype(np.float32)
+                        if self.cfg.candidate_action_noise_clip is not None:
+                            candidate_noise = np.clip(
+                                candidate_noise,
+                                -float(self.cfg.candidate_action_noise_clip),
+                                float(self.cfg.candidate_action_noise_clip),
+                            ).astype(np.float32)
+                        candidate_action = (candidate_action + candidate_noise).astype(np.float32)
+                    candidate_action_batches.append(candidate_action)
                 candidate_action_batch = np.stack(candidate_action_batches, axis=1)
                 for local_idx, episode_idx in enumerate(batch_episode_indices):
                     raw_obs = raw_obs_list[local_idx]
@@ -1943,6 +1977,13 @@ class PyBulletValidationRunner:
         if self.cfg.candidate_scheduler_eta is not None:
             log_data["val_pybullet_candidate_scheduler_eta"] = float(
                 self.cfg.candidate_scheduler_eta
+            )
+        log_data["val_pybullet_candidate_action_noise_std"] = float(
+            self.cfg.candidate_action_noise_std
+        )
+        if self.cfg.candidate_action_noise_clip is not None:
+            log_data["val_pybullet_candidate_action_noise_clip"] = float(
+                self.cfg.candidate_action_noise_clip
             )
         if self.cfg.log_legacy_pybullet_metrics:
             log_data.update({

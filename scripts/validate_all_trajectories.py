@@ -242,6 +242,12 @@ def _build_pybullet_config(
             if pyb_cfg_raw.get("candidate_scheduler_eta", 1.0) is None
             else float(pyb_cfg_raw.get("candidate_scheduler_eta", 1.0))
         ),
+        candidate_action_noise_std=float(pyb_cfg_raw.get("candidate_action_noise_std", 0.0)),
+        candidate_action_noise_clip=(
+            None
+            if pyb_cfg_raw.get("candidate_action_noise_clip", None) is None
+            else float(pyb_cfg_raw.get("candidate_action_noise_clip"))
+        ),
         sdf_filename=str(pyb_cfg_raw.get("sdf_filename", "workpiece_sdf.npz")),
         sdf_required=bool(pyb_cfg_raw.get("sdf_required", True)),
         robot_surface_points_per_link=int(pyb_cfg_raw.get("robot_surface_points_per_link", 256)),
