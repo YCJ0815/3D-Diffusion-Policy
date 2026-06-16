@@ -406,6 +406,10 @@ class TrainDP3Workspace:
                 raise TypeError(
                     "training.pybullet_eval currently supports TransitionTrajectoryDataset only."
                 )
+            if pybullet_eval_cfg.collision_log_path is None:
+                pybullet_eval_cfg.collision_log_path = str(
+                    pathlib.Path(self.output_dir).joinpath("pybullet_collision_events.jsonl")
+                )
             pybullet_validation_runner = PyBulletValidationRunner(pybullet_eval_cfg)
             pybullet_validation_runner.prepare_episode_subset(
                 replay_buffer=val_dataset.replay_buffer,

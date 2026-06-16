@@ -202,6 +202,7 @@ def _build_pybullet_config(
     workspace: TrainDP3Workspace,
     stats_path: str,
     num_control_points: int,
+    collision_log_path: Optional[str] = None,
     jobs_root: Optional[str] = None,
     simple_jobs_root: Optional[str] = None,
 ) -> PyBulletValidationConfig:
@@ -241,7 +242,17 @@ def _build_pybullet_config(
         robot_surface_points_per_link=int(pyb_cfg_raw.get("robot_surface_points_per_link", 256)),
         sdf_out_of_bounds_value_m=pyb_cfg_raw.get("sdf_out_of_bounds_value_m"),
         log_legacy_pybullet_metrics=bool(pyb_cfg_raw.get("log_legacy_pybullet_metrics", True)),
+        collision_log_path=collision_log_path,
     )
+
+
+def _append_collision_events(log_path: pathlib.Path, collision_events: list[dict]) -> None:
+    if not collision_events:
+        return
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(log_path, "a", encoding="utf-8") as f:
+        for event in collision_events:
+            f.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")
 
 
 def _build_obs_batch(
@@ -382,6 +393,7 @@ def main() -> None:
         workspace=workspace,
         stats_path=str(stats_path),
         num_control_points=args.num_control_points,
+        collision_log_path=str(output_dir / "pybullet_collision_events.jsonl"),
         jobs_root=args.jobs_root,
         simple_jobs_root=args.simple_jobs_root,
     )
@@ -447,6 +459,11 @@ def main() -> None:
                     raw_obs["first_joint_angles_normalized"][0]
                 ),
                 goal_position_normalized=raw_obs["goal_position"][0],
+                episode_idx=int(ep_idx),
+            )
+            _append_collision_events(
+                output_dir / "pybullet_collision_events.jsonl",
+                metric.get("collision_events", []),
             )
 
             collision_steps = float(metric["segment_collision_steps"])

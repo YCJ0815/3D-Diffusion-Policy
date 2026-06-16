@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import multiprocessing as mp
 from dataclasses import dataclass
 from pathlib import Path
@@ -178,32 +179,23 @@ def _select_deterministic_surface_points(points: np.ndarray, max_points: int) ->
     return points[indices].astype(np.float32)
 
 
-def _select_lowest_candidate_score_index(scores: np.ndarray) -> int:
-    scores = np.asarray(scores, dtype=np.float32).reshape(-1)
-    valid_mask = np.isfinite(scores)
+def _select_lowest_candidate_score_index(score_keys: np.ndarray) -> int:
+    score_keys = np.asarray(score_keys, dtype=np.float32)
+    if score_keys.ndim == 1:
+        score_keys = score_keys.reshape(-1, 1)
+    valid_mask = np.all(np.isfinite(score_keys), axis=1)
     if not np.any(valid_mask):
         raise ValueError("All PyBullet validation candidates have invalid SDF scores.")
-    ranked_scores = np.where(valid_mask, scores, np.inf)
-    return int(np.argmin(ranked_scores))
+    ranked_score_keys = np.where(valid_mask[:, None], score_keys, np.inf)
+    sort_keys = tuple(ranked_score_keys[:, col] for col in range(ranked_score_keys.shape[1] - 1, -1, -1))
+    return int(np.lexsort(sort_keys)[0])
 
 
-def _score_weighted_sdf_candidate(
-    normalized_control_points: np.ndarray,
-    joint_trajectory: np.ndarray,
+def _score_safety_sdf_candidate(
     sdf_values: np.ndarray,
     topk: int,
-    d_safe: float,
-    d_pen: float,
-    margin_weight: float,
-    penetration_weight: float,
-    smooth_weight: float,
-    length_weight: float,
+    d_select: float,
 ) -> dict[str, float]:
-    normalized_control_points = np.asarray(
-        normalized_control_points,
-        dtype=np.float32,
-    )
-    joint_trajectory = np.asarray(joint_trajectory, dtype=np.float32)
     sdf_values = np.asarray(sdf_values, dtype=np.float32).reshape(-1)
     valid_sdf_values = sdf_values[np.isfinite(sdf_values)]
     valid_ratio = (
@@ -213,75 +205,30 @@ def _score_weighted_sdf_candidate(
     )
     if valid_sdf_values.size == 0:
         return {
-            "total": float("inf"),
-            "margin": float("inf"),
-            "penetration": float("inf"),
-            "smooth": float("inf"),
-            "length": float("inf"),
+            "num_pen": float("inf"),
+            "neg_min_sdf": float("inf"),
+            "neg_worstk_mean": float("inf"),
+            "margin_violation": float("inf"),
             "min_sdf_distance_m": float("nan"),
             "valid_sdf_ratio": valid_ratio,
         }
     if topk <= 0:
         raise ValueError(f"selection_topk must be positive, got {topk}")
-    if d_safe <= 0:
-        raise ValueError(f"selection_d_safe must be positive, got {d_safe}")
-    if d_pen <= 0:
-        raise ValueError(f"selection_d_pen must be positive, got {d_pen}")
-    if normalized_control_points.ndim != 2:
-        raise ValueError(
-            "normalized_control_points must have shape [N, J], "
-            f"got {normalized_control_points.shape}"
-        )
-    if joint_trajectory.ndim != 2:
-        raise ValueError(
-            f"joint_trajectory must have shape [T, J], got {joint_trajectory.shape}"
-        )
+    if d_select <= 0:
+        raise ValueError(f"selection_d_safe must be positive, got {d_select}")
 
     worst_k = min(int(topk), int(valid_sdf_values.size))
-    worst_distances = np.partition(
-        valid_sdf_values,
-        worst_k - 1,
-    )[:worst_k]
-    margin_violation = np.maximum(
-        0.0,
-        (float(d_safe) - worst_distances) / float(d_safe),
-    )
-    penetration_violation = np.maximum(
-        0.0,
-        -worst_distances / float(d_pen),
-    )
-    margin_loss = float(np.mean(np.square(margin_violation)))
-    penetration_loss = float(np.mean(np.square(penetration_violation)))
-
-    if normalized_control_points.shape[0] >= 3:
-        control_acceleration = (
-            normalized_control_points[2:]
-            - 2.0 * normalized_control_points[1:-1]
-            + normalized_control_points[:-2]
-        )
-        smooth_loss = float(np.mean(np.square(control_acceleration)))
-    else:
-        smooth_loss = 0.0
-
-    if joint_trajectory.shape[0] >= 2:
-        joint_delta = joint_trajectory[1:] - joint_trajectory[:-1]
-        length_loss = float(np.mean(np.square(joint_delta)))
-    else:
-        length_loss = 0.0
-
-    total_score = (
-        float(margin_weight) * margin_loss
-        + float(penetration_weight) * penetration_loss
-        + float(smooth_weight) * smooth_loss
-        + float(length_weight) * length_loss
-    )
+    worst_distances = np.partition(valid_sdf_values, worst_k - 1)[:worst_k]
+    num_pen = float(np.sum(valid_sdf_values < 0.0))
+    min_sdf = float(np.min(valid_sdf_values))
+    worstk_mean = float(np.mean(worst_distances))
+    margin_violation = float(np.mean(np.maximum(0.0, float(d_select) - worst_distances)))
     return {
-        "total": float(total_score),
-        "margin": margin_loss,
-        "penetration": penetration_loss,
-        "smooth": smooth_loss,
-        "length": length_loss,
-        "min_sdf_distance_m": float(np.min(valid_sdf_values)),
+        "num_pen": num_pen,
+        "neg_min_sdf": -min_sdf,
+        "neg_worstk_mean": -worstk_mean,
+        "margin_violation": margin_violation,
+        "min_sdf_distance_m": min_sdf,
         "valid_sdf_ratio": valid_ratio,
     }
 
@@ -408,6 +355,7 @@ class PyBulletValidationConfig:
     robot_surface_points_per_link: int = 256
     sdf_out_of_bounds_value_m: float | None = None
     log_legacy_pybullet_metrics: bool = True
+    collision_log_path: str | None = None
     progress_mininterval_sec: float = 1.0
     num_workers: int = 1
     inference_batch_size: int = 32
@@ -478,6 +426,7 @@ class PyBulletValidationConfig:
                 None if sdf_out_of_bounds_value_m is None else float(sdf_out_of_bounds_value_m)
             ),
             log_legacy_pybullet_metrics=bool(cfg.get("log_legacy_pybullet_metrics", True)),
+            collision_log_path=cfg.get("collision_log_path", None),
             progress_mininterval_sec=float(cfg.get("progress_mininterval_sec", 1.0)),
             num_workers=int(cfg.get("num_workers", 1)),
             inference_batch_size=int(cfg.get("inference_batch_size", 32)),
@@ -494,7 +443,7 @@ def _init_pybullet_validation_worker(cfg: PyBulletValidationConfig) -> None:
     _PYBULLET_VALIDATION_WORKER = PyBulletCollisionValidator(cfg)
 
 
-def _run_pybullet_validation_task(task: dict[str, np.ndarray | int | float]) -> dict[str, float | bool]:
+def _run_pybullet_validation_task(task: dict[str, object]) -> dict[str, object]:
     global _PYBULLET_VALIDATION_WORKER
     if _PYBULLET_VALIDATION_WORKER is None:
         raise RuntimeError("PyBullet validation worker was not initialized.")
@@ -506,6 +455,7 @@ def _run_pybullet_validation_task(task: dict[str, np.ndarray | int | float]) -> 
         joint_trajectory=np.asarray(task["joint_trajectory"], dtype=np.float32),
         start_joint_state=start_joint_state,
         goal_position_normalized=np.asarray(task["goal_position_normalized"], dtype=np.float32),
+        episode_idx=int(task["episode_idx"]) if "episode_idx" in task else None,
     )
 
 
@@ -542,11 +492,13 @@ class PyBulletCollisionValidator:
         )
         self.revolute_joint_indices = []
         self.link_name_to_index = {}
+        self.link_index_to_name = {-1: "base_link"}
         for joint_idx in range(pb.getNumJoints(self.robot_id, physicsClientId=self.client_id)):
             joint_info = pb.getJointInfo(self.robot_id, joint_idx, physicsClientId=self.client_id)
             joint_type = joint_info[2]
             child_link_name = joint_info[12].decode("utf-8")
             self.link_name_to_index[child_link_name] = joint_idx
+            self.link_index_to_name[joint_idx] = child_link_name
             if joint_type == pb.JOINT_REVOLUTE:
                 self.revolute_joint_indices.append(joint_idx)
         if len(self.revolute_joint_indices) != len(self.joint_names):
@@ -577,6 +529,7 @@ class PyBulletCollisionValidator:
                 f"got {self.cfg.robot_surface_points_per_link}"
             )
         self.workpiece_cache: dict[int, int] = {}
+        self.workpiece_stl_path_cache: dict[int, Path] = {}
         self.sdf_cache: dict[int, SDFGrid] = {}
         self.robot_surface_points_by_link = self._build_robot_collision_surface_points(
             resolved_urdf_path=self.resolved_urdf_path,
@@ -622,6 +575,7 @@ class PyBulletCollisionValidator:
             job_name_template=self.cfg.job_name_template,
             workpiece_filename=self.cfg.workpiece_filename,
         )
+        self.workpiece_stl_path_cache[workpiece_id] = stl_path
         collision_shape = self.pb.createCollisionShape(
             shapeType=self.pb.GEOM_MESH,
             fileName=str(stl_path),
@@ -638,6 +592,21 @@ class PyBulletCollisionValidator:
         )
         self.workpiece_cache[workpiece_id] = body_id
         return body_id
+
+    def _workpiece_collision_object_name(self, workpiece_id: int) -> str:
+        workpiece_id = int(workpiece_id)
+        stl_path = self.workpiece_stl_path_cache.get(workpiece_id)
+        if stl_path is None:
+            stl_path = _resolve_workpiece_stl_path(
+                workpiece_id=workpiece_id,
+                jobs_root=self.cfg.jobs_root,
+                simple_jobs_root=self.cfg.simple_jobs_root,
+                simple_workpiece_id_offset=self.cfg.simple_workpiece_id_offset,
+                job_name_template=self.cfg.job_name_template,
+                workpiece_filename=self.cfg.workpiece_filename,
+            )
+            self.workpiece_stl_path_cache[workpiece_id] = stl_path
+        return f"workpiece_id={workpiece_id} path={stl_path}"
 
     def _load_workpiece_sdf(self, workpiece_id: int) -> SDFGrid | None:
         workpiece_id = int(workpiece_id)
@@ -775,16 +744,42 @@ class PyBulletCollisionValidator:
             return np.empty((0, 3), dtype=np.float32)
         return np.concatenate(world_points, axis=0).astype(np.float32)
 
-    def _min_sdf_distance_for_current_robot_state(self, sdf_grid: SDFGrid | None) -> float:
+    def _min_sdf_detail_for_current_robot_state(
+        self,
+        sdf_grid: SDFGrid | None,
+    ) -> dict[str, float | int | str | None]:
         if sdf_grid is None:
-            return float("nan")
-        robot_points = self._robot_surface_points_world()
-        if robot_points.size == 0:
-            return float("nan")
-        sdf_values = sdf_grid.query(robot_points)
-        if np.all(np.isnan(sdf_values)):
-            return float("nan")
-        return float(np.nanmin(sdf_values))
+            return {
+                "min_sdf_distance_m": float("nan"),
+                "nearest_sdf_link_index": None,
+                "nearest_sdf_link_name": None,
+            }
+        best_distance = float("nan")
+        best_link_index = None
+        best_link_name = None
+        for link_index, local_points in self.robot_surface_points_by_link.items():
+            position, orientation = self._get_link_pose(link_index)
+            rotation = np.asarray(
+                self.pb.getMatrixFromQuaternion(orientation),
+                dtype=np.float32,
+            ).reshape(3, 3)
+            world_points = local_points @ rotation.T + position.reshape(1, 3)
+            sdf_values = sdf_grid.query(world_points)
+            if np.all(np.isnan(sdf_values)):
+                continue
+            link_min = float(np.nanmin(sdf_values))
+            if np.isnan(best_distance) or link_min < best_distance:
+                best_distance = link_min
+                best_link_index = int(link_index)
+                best_link_name = self.link_index_to_name.get(int(link_index), str(link_index))
+        return {
+            "min_sdf_distance_m": float(best_distance),
+            "nearest_sdf_link_index": best_link_index,
+            "nearest_sdf_link_name": best_link_name,
+        }
+
+    def _min_sdf_distance_for_current_robot_state(self, sdf_grid: SDFGrid | None) -> float:
+        return float(self._min_sdf_detail_for_current_robot_state(sdf_grid)["min_sdf_distance_m"])
 
     def collect_joint_trajectory_sdf(
         self,
@@ -826,17 +821,11 @@ class PyBulletCollisionValidator:
             workpiece_id=workpiece_id,
             joint_trajectory=joint_trajectory,
         )
-        return _score_weighted_sdf_candidate(
-            normalized_control_points=normalized_control_points,
-            joint_trajectory=joint_trajectory,
+        _ = normalized_control_points
+        return _score_safety_sdf_candidate(
             sdf_values=sdf_values,
             topk=self.cfg.selection_topk,
-            d_safe=self.cfg.selection_d_safe,
-            d_pen=self.cfg.selection_d_pen,
-            margin_weight=self.cfg.selection_margin_weight,
-            penetration_weight=self.cfg.selection_penetration_weight,
-            smooth_weight=self.cfg.selection_smooth_weight,
-            length_weight=self.cfg.selection_length_weight,
+            d_select=self.cfg.selection_d_safe,
         )
 
     def _set_robot_joints(self, joint_state: np.ndarray) -> None:
@@ -989,9 +978,11 @@ class PyBulletCollisionValidator:
         joint_trajectory: np.ndarray,
         start_joint_state: np.ndarray,
         goal_position_normalized: np.ndarray,
-    ) -> dict[str, float | bool]:
+        episode_idx: int | None = None,
+    ) -> dict[str, object]:
         workpiece_body_id = self._load_workpiece_body(workpiece_id)
         sdf_grid = self._load_workpiece_sdf(workpiece_id)
+        collision_object_name = self._workpiece_collision_object_name(workpiece_id)
         target_world_position = self._target_world_position(start_joint_state, goal_position_normalized)
         joint_trajectory = np.asarray(joint_trajectory, dtype=np.float32)
         if joint_trajectory.ndim != 2 or joint_trajectory.shape[1] != len(self.revolute_joint_indices):
@@ -1008,7 +999,8 @@ class PyBulletCollisionValidator:
         segment_collision_steps = 0
         min_sdf_distance_m = float("nan")
         final_tcp_position = None
-        for joint_state in joint_trajectory:
+        collision_events = []
+        for timestep, joint_state in enumerate(joint_trajectory):
             self._set_robot_joints(joint_state)
             self.pb.performCollisionDetection(physicsClientId=self.client_id)
             contacts = self.pb.getClosestPoints(
@@ -1017,10 +1009,25 @@ class PyBulletCollisionValidator:
                 distance=self.cfg.collision_distance_threshold,
                 physicsClientId=self.client_id,
             )
+            sdf_detail = self._min_sdf_detail_for_current_robot_state(sdf_grid)
             if contacts:
                 has_collision = True
                 segment_collision_steps += 1
-            step_min_sdf_distance_m = self._min_sdf_distance_for_current_robot_state(sdf_grid)
+                collision_link_indices = sorted({int(contact[3]) for contact in contacts})
+                for collision_link_index in collision_link_indices:
+                    collision_events.append({
+                        "episode_idx": None if episode_idx is None else int(episode_idx),
+                        "workpiece_id": int(workpiece_id),
+                        "collision_link_name": self.link_index_to_name.get(
+                            collision_link_index,
+                            str(collision_link_index),
+                        ),
+                        "collision_object_name": collision_object_name,
+                        "collision_timestep": int(timestep),
+                        "timestep_min_sdf_distance_m": float(sdf_detail["min_sdf_distance_m"]),
+                        "nearest_sdf_link_name": sdf_detail["nearest_sdf_link_name"],
+                    })
+            step_min_sdf_distance_m = float(sdf_detail["min_sdf_distance_m"])
             if not np.isnan(step_min_sdf_distance_m):
                 if np.isnan(min_sdf_distance_m):
                     min_sdf_distance_m = step_min_sdf_distance_m
@@ -1061,6 +1068,7 @@ class PyBulletCollisionValidator:
             "goal_error_m": goal_error,
             "goal_reached": bool(goal_reached),
             "success": success,
+            "collision_events": collision_events,
         }
 
 
@@ -1092,22 +1100,10 @@ class PyBulletValidationRunner:
                 "training.pybullet_eval.selection_topk must be positive, "
                 f"got {self.cfg.selection_topk}"
             )
-        if self.cfg.selection_d_safe <= 0 or self.cfg.selection_d_pen <= 0:
+        if self.cfg.selection_d_safe <= 0:
             raise ValueError(
-                "training.pybullet_eval selection distances must be positive, "
-                f"got d_safe={self.cfg.selection_d_safe}, "
-                f"d_pen={self.cfg.selection_d_pen}"
-            )
-        selection_weights = (
-            self.cfg.selection_margin_weight,
-            self.cfg.selection_penetration_weight,
-            self.cfg.selection_smooth_weight,
-            self.cfg.selection_length_weight,
-        )
-        if any(weight < 0 for weight in selection_weights):
-            raise ValueError(
-                "training.pybullet_eval selection weights must be non-negative, "
-                f"got {selection_weights}"
+                "training.pybullet_eval.selection_d_safe must be positive, "
+                f"got {self.cfg.selection_d_safe}"
             )
         if self.cfg.num_candidates > 1 and self.cfg.diffusion_sampling_seed is None:
             raise ValueError(
@@ -1117,12 +1113,25 @@ class PyBulletValidationRunner:
         self.validator = PyBulletCollisionValidator(cfg)
         if self.validator.stats_mode != "bspline":
             raise ValueError(
-                "Weighted PyBullet candidate selection requires B-spline stats."
+                "Safety-key PyBullet candidate selection requires B-spline stats."
             )
+        if self.cfg.collision_log_path is not None:
+            log_path = Path(self.cfg.collision_log_path).expanduser()
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_text("", encoding="utf-8")
         self._fixed_episode_indices: np.ndarray | None = None
 
     def close(self) -> None:
         self.validator.close()
+
+    def _append_collision_events(self, collision_events: list[dict[str, object]]) -> None:
+        if not collision_events or self.cfg.collision_log_path is None:
+            return
+        log_path = Path(self.cfg.collision_log_path).expanduser()
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as f:
+            for event in collision_events:
+                f.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")
 
     def prepare_episode_subset(
         self,
@@ -1281,7 +1290,7 @@ class PyBulletValidationRunner:
 
     @staticmethod
     def _update_progress_stats(
-        metric: dict[str, float | bool],
+        metric: dict[str, object],
         processed_count: int,
         running_collision_count: int,
         running_valid_sdf_count: int,
@@ -1349,16 +1358,14 @@ class PyBulletValidationRunner:
         selected_candidate_indices = []
         selected_candidate_min_sdf = []
         selected_candidate_min_sdf_gains = []
-        selected_candidate_total_scores = []
-        selected_candidate_score_improvements = []
-        selected_candidate_margin_scores = []
-        selected_candidate_penetration_scores = []
-        selected_candidate_smooth_scores = []
-        selected_candidate_length_scores = []
+        selected_candidate_num_pen_scores = []
+        selected_candidate_neg_min_sdf_scores = []
+        selected_candidate_neg_worstk_mean_scores = []
+        selected_candidate_margin_violation_scores = []
         selected_candidate_valid_sdf_ratios = []
         policy.eval()
         episode_list = episode_indices.tolist()
-        tasks: list[dict[str, np.ndarray | int | float]] = []
+        tasks: list[dict[str, object]] = []
         if tqdm is not None:
             inference_progress = tqdm.tqdm(
                 total=len(episode_list),
@@ -1432,19 +1439,24 @@ class PyBulletValidationRunner:
                                 ],
                             )
                         )
-                    candidate_scores_array = np.asarray(
+                    candidate_score_keys_array = np.asarray(
                         [
-                            score_details["total"]
+                            [
+                                score_details["num_pen"],
+                                score_details["neg_min_sdf"],
+                                score_details["neg_worstk_mean"],
+                                score_details["margin_violation"],
+                            ]
                             for score_details in candidate_score_details
                         ],
                         dtype=np.float32,
                     )
                     invalid_candidate_count += int(
-                        np.count_nonzero(~np.isfinite(candidate_scores_array))
+                        np.count_nonzero(~np.all(np.isfinite(candidate_score_keys_array), axis=1))
                     )
                     try:
                         selected_candidate_idx = _select_lowest_candidate_score_index(
-                            candidate_scores_array
+                            candidate_score_keys_array
                         )
                     except ValueError as exc:
                         raise ValueError(
@@ -1455,8 +1467,6 @@ class PyBulletValidationRunner:
                         selected_candidate_idx
                     ]
                     baseline_details = candidate_score_details[0]
-                    selected_total_score = float(selected_details["total"])
-                    baseline_total_score = float(baseline_details["total"])
                     selected_min_sdf = float(
                         selected_details["min_sdf_distance_m"]
                     )
@@ -1464,27 +1474,22 @@ class PyBulletValidationRunner:
                         baseline_details["min_sdf_distance_m"]
                     )
                     selected_candidate_indices.append(selected_candidate_idx)
-                    selected_candidate_total_scores.append(selected_total_score)
                     selected_candidate_min_sdf.append(selected_min_sdf)
-                    selected_candidate_margin_scores.append(
-                        float(selected_details["margin"])
+                    selected_candidate_num_pen_scores.append(
+                        float(selected_details["num_pen"])
                     )
-                    selected_candidate_penetration_scores.append(
-                        float(selected_details["penetration"])
+                    selected_candidate_neg_min_sdf_scores.append(
+                        float(selected_details["neg_min_sdf"])
                     )
-                    selected_candidate_smooth_scores.append(
-                        float(selected_details["smooth"])
+                    selected_candidate_neg_worstk_mean_scores.append(
+                        float(selected_details["neg_worstk_mean"])
                     )
-                    selected_candidate_length_scores.append(
-                        float(selected_details["length"])
+                    selected_candidate_margin_violation_scores.append(
+                        float(selected_details["margin_violation"])
                     )
                     selected_candidate_valid_sdf_ratios.append(
                         float(selected_details["valid_sdf_ratio"])
                     )
-                    if np.isfinite(baseline_total_score):
-                        selected_candidate_score_improvements.append(
-                            baseline_total_score - selected_total_score
-                        )
                     if np.isfinite(baseline_min_sdf):
                         selected_candidate_min_sdf_gains.append(
                             selected_min_sdf - baseline_min_sdf
@@ -1498,7 +1503,12 @@ class PyBulletValidationRunner:
                         "start_joint_normalized": start_joint_normalized,
                         "goal_position_normalized": raw_obs["goal_position"][0].astype(np.float32),
                         "selected_candidate_index": selected_candidate_idx,
-                        "selected_candidate_score": selected_total_score,
+                        "selected_candidate_score_key": [
+                            float(selected_details["num_pen"]),
+                            float(selected_details["neg_min_sdf"]),
+                            float(selected_details["neg_worstk_mean"]),
+                            float(selected_details["margin_violation"]),
+                        ],
                     })
                 if inference_progress is not None:
                     inference_progress.update(len(batch_episode_indices))
@@ -1560,8 +1570,10 @@ class PyBulletValidationRunner:
                     ),
                     start_joint_state=start_joint_state,
                     goal_position_normalized=np.asarray(task["goal_position_normalized"], dtype=np.float32),
+                    episode_idx=int(task["episode_idx"]),
                 )
                 sample_metrics.append(metric)
+                self._append_collision_events(metric.get("collision_events", []))
                 (
                     running_collision_count,
                     running_valid_sdf_count,
@@ -1596,6 +1608,7 @@ class PyBulletValidationRunner:
                     start=1,
                 ):
                     sample_metrics.append(metric)
+                    self._append_collision_events(metric.get("collision_events", []))
                     (
                         running_collision_count,
                         running_valid_sdf_count,
@@ -1623,8 +1636,6 @@ class PyBulletValidationRunner:
         goal_reached_count = sum(1.0 for item in sample_metrics if item["goal_reached"])
         total_segment_collision_steps = sum(float(item["segment_collision_steps"]) for item in sample_metrics)
         total_segment_steps = sum(float(item["segment_steps"]) for item in sample_metrics)
-        total_legacy_collision_steps = sum(float(item["legacy_collision_steps"]) for item in sample_metrics)
-        total_legacy_steps = sum(float(item["legacy_trajectory_steps"]) for item in sample_metrics)
         mean_goal_error = sum(float(item["goal_error_m"]) for item in sample_metrics) / total
         min_sdf_distances = np.asarray(
             [float(item["min_sdf_distance_m"]) for item in sample_metrics],
@@ -1662,57 +1673,37 @@ class PyBulletValidationRunner:
                 if selected_candidate_min_sdf_gains
                 else float("nan")
             ),
-            "val_selected_candidate_mean_margin_score": float(
+            "val_selected_candidate_mean_num_pen": float(
                 np.mean(
                     np.asarray(
-                        selected_candidate_margin_scores,
+                        selected_candidate_num_pen_scores,
                         dtype=np.float32,
                     )
                 )
             ),
-            "val_selected_candidate_mean_penetration_score": float(
+            "val_selected_candidate_mean_neg_min_sdf": float(
                 np.mean(
                     np.asarray(
-                        selected_candidate_penetration_scores,
+                        selected_candidate_neg_min_sdf_scores,
                         dtype=np.float32,
                     )
                 )
             ),
-            "val_selected_candidate_mean_smooth_score": float(
+            "val_selected_candidate_mean_neg_worstk_mean": float(
                 np.mean(
                     np.asarray(
-                        selected_candidate_smooth_scores,
+                        selected_candidate_neg_worstk_mean_scores,
                         dtype=np.float32,
                     )
                 )
             ),
-            "val_selected_candidate_mean_length_score": float(
+            "val_selected_candidate_mean_margin_violation": float(
                 np.mean(
                     np.asarray(
-                        selected_candidate_length_scores,
+                        selected_candidate_margin_violation_scores,
                         dtype=np.float32,
                     )
                 )
-            ),
-            "val_selected_candidate_mean_total_score": float(
-                np.mean(
-                    np.asarray(
-                        selected_candidate_total_scores,
-                        dtype=np.float32,
-                    )
-                )
-            ),
-            "val_selected_candidate_mean_score_improvement": (
-                float(
-                    np.mean(
-                        np.asarray(
-                            selected_candidate_score_improvements,
-                            dtype=np.float32,
-                        )
-                    )
-                )
-                if selected_candidate_score_improvements
-                else float("nan")
             ),
             "val_selected_candidate_mean_valid_sdf_ratio": float(
                 np.mean(
@@ -1740,14 +1731,8 @@ class PyBulletValidationRunner:
             )
         if self.cfg.log_legacy_pybullet_metrics:
             log_data.update({
-                "val_pybullet_collision_rate": collision_count / total,
                 "val_pybullet_success_rate": success_count / total,
                 "val_pybullet_goal_reached_rate": goal_reached_count / total,
-                "val_pybullet_collision_step_rate": (
-                    total_legacy_collision_steps / total_legacy_steps
-                    if total_legacy_steps > 0
-                    else 0.0
-                ),
                 "val_pybullet_mean_goal_error_m": mean_goal_error,
             })
         return log_data
