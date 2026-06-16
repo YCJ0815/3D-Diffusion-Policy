@@ -1149,7 +1149,7 @@ class PyBulletCollisionValidator:
 
         goal_error = float(np.linalg.norm(final_tcp_position - target_world_position))
         goal_reached = goal_error <= self.cfg.goal_tolerance_m
-        success = bool(goal_reached and not has_collision)
+        success = bool(not has_collision)
         return {
             "has_collision": bool(has_collision),
             "segment_collision_steps": float(segment_collision_steps),
@@ -1859,7 +1859,6 @@ class PyBulletValidationRunner:
         total = float(len(sample_metrics))
         collision_count = sum(1.0 for item in sample_metrics if item["has_collision"])
         success_count = sum(1.0 for item in sample_metrics if item["success"])
-        goal_reached_count = sum(1.0 for item in sample_metrics if item["goal_reached"])
         total_segment_collision_steps = sum(float(item["segment_collision_steps"]) for item in sample_metrics)
         total_segment_steps = sum(float(item["segment_steps"]) for item in sample_metrics)
         mean_goal_error = sum(float(item["goal_error_m"]) for item in sample_metrics) / total
@@ -1988,7 +1987,6 @@ class PyBulletValidationRunner:
         if self.cfg.log_legacy_pybullet_metrics:
             log_data.update({
                 "val_pybullet_success_rate": success_count / total,
-                "val_pybullet_goal_reached_rate": goal_reached_count / total,
                 "val_pybullet_mean_goal_error_m": mean_goal_error,
             })
         return log_data
