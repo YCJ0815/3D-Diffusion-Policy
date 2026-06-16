@@ -34,6 +34,16 @@ def _resolve_stats_mode(stats_path: str) -> str:
     return "increment"
 
 
+def _sanitize_metric_suffix(name: str) -> str:
+    safe = []
+    for char in str(name):
+        if char.isalnum():
+            safe.append(char.lower())
+        else:
+            safe.append("_")
+    return "".join(safe).strip("_")
+
+
 def _resolve_workpiece_stl_path(
     workpiece_id: int,
     jobs_root: str,
@@ -195,22 +205,38 @@ def _score_safety_sdf_candidate(
     sdf_values: np.ndarray,
     topk: int,
     d_select: float,
-) -> dict[str, float]:
-    sdf_values = np.asarray(sdf_values, dtype=np.float32).reshape(-1)
-    valid_sdf_values = sdf_values[np.isfinite(sdf_values)]
+    sdf_values_by_link: dict[str, np.ndarray] | None = None,
+) -> dict[str, object]:
+    sdf_values = np.asarray(sdf_values, dtype=np.float32)
+    flat_sdf_values = sdf_values.reshape(-1)
+    valid_sdf_values = flat_sdf_values[np.isfinite(flat_sdf_values)]
     valid_ratio = (
-        float(valid_sdf_values.size / sdf_values.size)
-        if sdf_values.size > 0
+        float(valid_sdf_values.size / flat_sdf_values.size)
+        if flat_sdf_values.size > 0
         else 0.0
     )
+    sdf_finite_ratio_by_link: dict[str, float] = {}
+    if sdf_values_by_link is not None:
+        for link_name, link_sdf_values in sdf_values_by_link.items():
+            link_sdf_values = np.asarray(link_sdf_values, dtype=np.float32).reshape(-1)
+            if link_sdf_values.size == 0:
+                sdf_finite_ratio_by_link[str(link_name)] = 0.0
+            else:
+                sdf_finite_ratio_by_link[str(link_name)] = float(
+                    np.isfinite(link_sdf_values).sum() / link_sdf_values.size
+                )
     if valid_sdf_values.size == 0:
         return {
+            "has_pen": float("inf"),
+            "pen_step_count": float("inf"),
+            "pen_point_count": float("inf"),
             "num_pen": float("inf"),
             "neg_min_sdf": float("inf"),
             "neg_worstk_mean": float("inf"),
             "margin_violation": float("inf"),
             "min_sdf_distance_m": float("nan"),
-            "valid_sdf_ratio": valid_ratio,
+            "sdf_finite_ratio": valid_ratio,
+            "sdf_finite_ratio_by_link": sdf_finite_ratio_by_link,
         }
     if topk <= 0:
         raise ValueError(f"selection_topk must be positive, got {topk}")
@@ -219,17 +245,30 @@ def _score_safety_sdf_candidate(
 
     worst_k = min(int(topk), int(valid_sdf_values.size))
     worst_distances = np.partition(valid_sdf_values, worst_k - 1)[:worst_k]
-    num_pen = float(np.sum(valid_sdf_values < 0.0))
+    valid_mask = np.isfinite(sdf_values)
+    pen_mask = (sdf_values < 0.0) & valid_mask
+    has_pen = float(np.any(pen_mask))
+    pen_step_count = float(np.any(pen_mask, axis=1).sum()) if pen_mask.ndim >= 2 else float(np.any(pen_mask))
+    pen_point_count = float(pen_mask.sum())
     min_sdf = float(np.min(valid_sdf_values))
     worstk_mean = float(np.mean(worst_distances))
     margin_violation = float(np.mean(np.maximum(0.0, float(d_select) - worst_distances)))
+    if pen_point_count > 0.0 and min_sdf >= 0.0:
+        print(
+            "[PyBullet validation] WARNING: inconsistent sdf stats: "
+            f"pen_point_count={pen_point_count}, min_sdf={min_sdf:.6f}"
+        )
     return {
-        "num_pen": num_pen,
+        "has_pen": has_pen,
+        "pen_step_count": pen_step_count,
+        "pen_point_count": pen_point_count,
+        "num_pen": pen_point_count,
         "neg_min_sdf": -min_sdf,
         "neg_worstk_mean": -worstk_mean,
         "margin_violation": margin_violation,
         "min_sdf_distance_m": min_sdf,
-        "valid_sdf_ratio": valid_ratio,
+        "sdf_finite_ratio": valid_ratio,
+        "sdf_finite_ratio_by_link": sdf_finite_ratio_by_link,
     }
 
 
@@ -786,9 +825,22 @@ class PyBulletCollisionValidator:
         workpiece_id: int,
         joint_trajectory: np.ndarray,
     ) -> np.ndarray:
+        return self.collect_joint_trajectory_sdf_with_link_details(
+            workpiece_id=workpiece_id,
+            joint_trajectory=joint_trajectory,
+        )["all_sdf_values"]
+
+    def collect_joint_trajectory_sdf_with_link_details(
+        self,
+        workpiece_id: int,
+        joint_trajectory: np.ndarray,
+    ) -> dict[str, object]:
         sdf_grid = self._load_workpiece_sdf(workpiece_id)
         if sdf_grid is None:
-            return np.empty((0, 0), dtype=np.float32)
+            return {
+                "all_sdf_values": np.empty((0, 0), dtype=np.float32),
+                "sdf_values_by_link": {},
+            }
         joint_trajectory = np.asarray(joint_trajectory, dtype=np.float32)
         expected_shape = (int(self.cfg.target_steps), len(self.revolute_joint_indices))
         if joint_trajectory.shape != expected_shape:
@@ -798,34 +850,60 @@ class PyBulletCollisionValidator:
             )
 
         trajectory_sdf_values = []
+        trajectory_sdf_values_by_link: dict[str, list[np.ndarray]] = {
+            self.link_index_to_name.get(int(link_index), str(link_index)): []
+            for link_index in self.robot_surface_points_by_link.keys()
+        }
         for joint_state in joint_trajectory:
             self._set_robot_joints(joint_state)
-            robot_points = self._robot_surface_points_world()
-            if robot_points.size == 0:
-                return np.empty((0, 0), dtype=np.float32)
-            trajectory_sdf_values.append(
-                sdf_grid.query(robot_points).astype(np.float32)
-            )
-        return np.stack(
-            trajectory_sdf_values,
-            axis=0,
-        ).astype(np.float32)
+            timestep_values = []
+            for link_index, local_points in self.robot_surface_points_by_link.items():
+                position, orientation = self._get_link_pose(link_index)
+                rotation = np.asarray(
+                    self.pb.getMatrixFromQuaternion(orientation),
+                    dtype=np.float32,
+                ).reshape(3, 3)
+                world_points = local_points @ rotation.T + position.reshape(1, 3)
+                link_sdf_values = sdf_grid.query(world_points).astype(np.float32)
+                link_name = self.link_index_to_name.get(int(link_index), str(link_index))
+                trajectory_sdf_values_by_link[link_name].append(link_sdf_values)
+                timestep_values.append(link_sdf_values)
+            if not timestep_values:
+                return {
+                    "all_sdf_values": np.empty((0, 0), dtype=np.float32),
+                    "sdf_values_by_link": {},
+                }
+            trajectory_sdf_values.append(np.concatenate(timestep_values, axis=0).astype(np.float32))
+        return {
+            "all_sdf_values": np.stack(
+                trajectory_sdf_values,
+                axis=0,
+            ).astype(np.float32),
+            "sdf_values_by_link": {
+                link_name: np.stack(link_values, axis=0).astype(np.float32)
+                for link_name, link_values in trajectory_sdf_values_by_link.items()
+            },
+        }
 
     def score_candidate(
         self,
         workpiece_id: int,
         normalized_control_points: np.ndarray,
         joint_trajectory: np.ndarray,
-    ) -> dict[str, float]:
-        sdf_values = self.collect_joint_trajectory_sdf(
+    ) -> dict[str, object]:
+        sdf_result = self.collect_joint_trajectory_sdf_with_link_details(
             workpiece_id=workpiece_id,
             joint_trajectory=joint_trajectory,
         )
         _ = normalized_control_points
         return _score_safety_sdf_candidate(
-            sdf_values=sdf_values,
+            sdf_values=np.asarray(sdf_result["all_sdf_values"], dtype=np.float32),
             topk=self.cfg.selection_topk,
             d_select=self.cfg.selection_d_safe,
+            sdf_values_by_link={
+                str(link_name): np.asarray(link_values, dtype=np.float32)
+                for link_name, link_values in dict(sdf_result["sdf_values_by_link"]).items()
+            },
         )
 
     def _set_robot_joints(self, joint_state: np.ndarray) -> None:
@@ -1318,7 +1396,7 @@ class PyBulletValidationRunner:
         n_obs_steps: int,
         device: torch.device,
         dataset=None,
-    ) -> dict[str, float]:
+    ) -> dict[str, object]:
         import torch
         try:
             import tqdm
@@ -1358,11 +1436,16 @@ class PyBulletValidationRunner:
         selected_candidate_indices = []
         selected_candidate_min_sdf = []
         selected_candidate_min_sdf_gains = []
+        selected_candidate_has_pen_scores = []
+        selected_candidate_pen_step_counts = []
+        selected_candidate_pen_point_counts = []
         selected_candidate_num_pen_scores = []
         selected_candidate_neg_min_sdf_scores = []
         selected_candidate_neg_worstk_mean_scores = []
         selected_candidate_margin_violation_scores = []
-        selected_candidate_valid_sdf_ratios = []
+        selected_candidate_sdf_finite_ratios = []
+        selected_candidate_sdf_finite_ratios_by_link: dict[str, list[float]] = {}
+        candidate_debug_printed = False
         policy.eval()
         episode_list = episode_indices.tolist()
         tasks: list[dict[str, object]] = []
@@ -1442,7 +1525,9 @@ class PyBulletValidationRunner:
                     candidate_score_keys_array = np.asarray(
                         [
                             [
-                                score_details["num_pen"],
+                                score_details["has_pen"],
+                                score_details["pen_step_count"],
+                                score_details["pen_point_count"],
                                 score_details["neg_min_sdf"],
                                 score_details["neg_worstk_mean"],
                                 score_details["margin_violation"],
@@ -1463,6 +1548,24 @@ class PyBulletValidationRunner:
                             "All SDF candidates are invalid for PyBullet validation "
                             f"episode_idx={episode_idx}, workpiece_id={workpiece_id}."
                         ) from exc
+                    if not candidate_debug_printed:
+                        print(
+                            "[PyBullet validation] candidate score table "
+                            f"episode_idx={episode_idx}, workpiece_id={workpiece_id}"
+                        )
+                        for candidate_idx, score_details in enumerate(candidate_score_details):
+                            print(
+                                "  "
+                                f"cand={candidate_idx:02d} "
+                                f"has_pen={float(score_details['has_pen']):.0f} "
+                                f"pen_steps={float(score_details['pen_step_count']):.0f} "
+                                f"pen_points={float(score_details['pen_point_count']):.0f} "
+                                f"min_sdf={float(score_details['min_sdf_distance_m']):.6f} "
+                                f"worstk_mean={-float(score_details['neg_worstk_mean']):.6f} "
+                                f"margin_violation={float(score_details['margin_violation']):.6f} "
+                                f"sdf_finite_ratio={float(score_details['sdf_finite_ratio']):.3f}"
+                            )
+                        candidate_debug_printed = True
                     selected_details = candidate_score_details[
                         selected_candidate_idx
                     ]
@@ -1474,6 +1577,15 @@ class PyBulletValidationRunner:
                         baseline_details["min_sdf_distance_m"]
                     )
                     selected_candidate_indices.append(selected_candidate_idx)
+                    selected_candidate_has_pen_scores.append(
+                        float(selected_details["has_pen"])
+                    )
+                    selected_candidate_pen_step_counts.append(
+                        float(selected_details["pen_step_count"])
+                    )
+                    selected_candidate_pen_point_counts.append(
+                        float(selected_details["pen_point_count"])
+                    )
                     selected_candidate_min_sdf.append(selected_min_sdf)
                     selected_candidate_num_pen_scores.append(
                         float(selected_details["num_pen"])
@@ -1487,9 +1599,13 @@ class PyBulletValidationRunner:
                     selected_candidate_margin_violation_scores.append(
                         float(selected_details["margin_violation"])
                     )
-                    selected_candidate_valid_sdf_ratios.append(
-                        float(selected_details["valid_sdf_ratio"])
+                    selected_candidate_sdf_finite_ratios.append(
+                        float(selected_details["sdf_finite_ratio"])
                     )
+                    for link_name, link_ratio in dict(selected_details["sdf_finite_ratio_by_link"]).items():
+                        selected_candidate_sdf_finite_ratios_by_link.setdefault(str(link_name), []).append(
+                            float(link_ratio)
+                        )
                     if np.isfinite(baseline_min_sdf):
                         selected_candidate_min_sdf_gains.append(
                             selected_min_sdf - baseline_min_sdf
@@ -1504,7 +1620,9 @@ class PyBulletValidationRunner:
                         "goal_position_normalized": raw_obs["goal_position"][0].astype(np.float32),
                         "selected_candidate_index": selected_candidate_idx,
                         "selected_candidate_score_key": [
-                            float(selected_details["num_pen"]),
+                            float(selected_details["has_pen"]),
+                            float(selected_details["pen_step_count"]),
+                            float(selected_details["pen_point_count"]),
                             float(selected_details["neg_min_sdf"]),
                             float(selected_details["neg_worstk_mean"]),
                             float(selected_details["margin_violation"]),
@@ -1649,6 +1767,7 @@ class PyBulletValidationRunner:
         )
         log_data = {
             "val_traj_collision_rate": collision_count / total,
+            "val_pybullet_collision_rate": collision_count / total,
             "val_segment_collision_rate": (
                 total_segment_collision_steps / total_segment_steps
                 if total_segment_steps > 0
@@ -1656,7 +1775,7 @@ class PyBulletValidationRunner:
             ),
             "val_mean_min_sdf_distance_m": mean_min_sdf_distance_m,
             "val_pybullet_eval_episodes": total,
-            "val_sdf_valid_rate": float(np.mean(valid_sdf_mask.astype(np.float32))),
+            "val_traj_has_valid_sdf_rate": float(np.mean(valid_sdf_mask.astype(np.float32))),
             "val_pybullet_num_candidates": float(self.cfg.num_candidates),
             "val_selected_candidate_mean_min_sdf_m": float(
                 np.mean(np.asarray(selected_candidate_min_sdf, dtype=np.float32))
@@ -1672,6 +1791,15 @@ class PyBulletValidationRunner:
                 )
                 if selected_candidate_min_sdf_gains
                 else float("nan")
+            ),
+            "val_selected_candidate_mean_has_pen": float(
+                np.mean(np.asarray(selected_candidate_has_pen_scores, dtype=np.float32))
+            ),
+            "val_selected_candidate_mean_pen_step_count": float(
+                np.mean(np.asarray(selected_candidate_pen_step_counts, dtype=np.float32))
+            ),
+            "val_selected_candidate_mean_pen_point_count": float(
+                np.mean(np.asarray(selected_candidate_pen_point_counts, dtype=np.float32))
             ),
             "val_selected_candidate_mean_num_pen": float(
                 np.mean(
@@ -1705,10 +1833,10 @@ class PyBulletValidationRunner:
                     )
                 )
             ),
-            "val_selected_candidate_mean_valid_sdf_ratio": float(
+            "val_selected_candidate_mean_sdf_finite_ratio": float(
                 np.mean(
                     np.asarray(
-                        selected_candidate_valid_sdf_ratios,
+                        selected_candidate_sdf_finite_ratios,
                         dtype=np.float32,
                     )
                 )
@@ -1721,6 +1849,9 @@ class PyBulletValidationRunner:
                 np.mean(np.asarray(selected_candidate_indices, dtype=np.float32))
             ),
         }
+        for link_name, link_ratios in selected_candidate_sdf_finite_ratios_by_link.items():
+            metric_key = "val_selected_candidate_mean_sdf_finite_ratio_" + _sanitize_metric_suffix(link_name)
+            log_data[metric_key] = float(np.mean(np.asarray(link_ratios, dtype=np.float32)))
         if self.cfg.diffusion_sampling_seed is not None:
             log_data["val_pybullet_diffusion_sampling_seed"] = float(
                 self.cfg.diffusion_sampling_seed
