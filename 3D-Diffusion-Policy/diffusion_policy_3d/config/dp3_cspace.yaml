@@ -79,10 +79,10 @@ policy:
       pen_link: 80
     link_collision_weights:
       wrist_3_link: 0.5
-      pen_link: 8.0
+      pen_link: 10.0
     topk: 64
     softmin_beta: 75.0
-    d_safe: 0.02
+    d_safe: 0.03
     sdf_collision_weight: 0.2
     trajectory_collision_weight: 0.2
     oob_weight: 0.05
