@@ -1446,6 +1446,8 @@ class PyBulletValidationRunner:
         selected_candidate_sdf_finite_ratios = []
         selected_candidate_sdf_finite_ratios_by_link: dict[str, list[float]] = {}
         candidate_debug_printed = False
+        raw_identical_candidate_episode_count = 0
+        reconstructed_identical_candidate_episode_count = 0
         policy.eval()
         episode_list = episode_indices.tolist()
         tasks: list[dict[str, object]] = []
@@ -1475,13 +1477,16 @@ class PyBulletValidationRunner:
                     policy=policy,
                 )
                 candidate_action_batches = []
+                candidate_seeds = []
                 for candidate_idx in range(int(self.cfg.num_candidates)):
-                    generator = torch.Generator(device=device)
-                    generator.manual_seed(
+                    candidate_seed = (
                         int(self.cfg.diffusion_sampling_seed)
                         + candidate_idx * 1_000_003
                         + int(batch_start)
                     )
+                    generator = torch.Generator(device=device)
+                    generator.manual_seed(candidate_seed)
+                    candidate_seeds.append(int(candidate_seed))
                     result = policy.predict_action(
                         obs_dict,
                         generator=generator,
@@ -1521,6 +1526,51 @@ class PyBulletValidationRunner:
                                     "joint_trajectory"
                                 ],
                             )
+                        )
+                    raw_candidate_actions = np.asarray(
+                        candidate_action_batch[local_idx],
+                        dtype=np.float32,
+                    )
+                    raw_candidate_diffs = np.max(
+                        np.abs(raw_candidate_actions - raw_candidate_actions[:1]),
+                        axis=(1, 2),
+                    )
+                    raw_candidates_identical = bool(
+                        raw_candidate_diffs.shape[0] <= 1
+                        or np.all(raw_candidate_diffs[1:] <= 1e-7)
+                    )
+                    if raw_candidates_identical:
+                        raw_identical_candidate_episode_count += 1
+                        print(
+                            "[PyBullet validation] WARNING: all raw candidate actions are identical "
+                            f"for episode_idx={episode_idx}, workpiece_id={workpiece_id}, "
+                            f"seeds={candidate_seeds}"
+                        )
+                    reconstructed_candidate_trajectories = np.stack(
+                        [
+                            np.asarray(candidate_result["joint_trajectory"], dtype=np.float32)
+                            for candidate_result in candidate_results
+                        ],
+                        axis=0,
+                    )
+                    reconstructed_candidate_diffs = np.max(
+                        np.abs(
+                            reconstructed_candidate_trajectories
+                            - reconstructed_candidate_trajectories[:1]
+                        ),
+                        axis=(1, 2),
+                    )
+                    reconstructed_candidates_identical = bool(
+                        reconstructed_candidate_diffs.shape[0] <= 1
+                        or np.all(reconstructed_candidate_diffs[1:] <= 1e-7)
+                    )
+                    if reconstructed_candidates_identical:
+                        reconstructed_identical_candidate_episode_count += 1
+                        print(
+                            "[PyBullet validation] WARNING: all reconstructed candidate trajectories are identical "
+                            f"for episode_idx={episode_idx}, workpiece_id={workpiece_id}, "
+                            f"seeds={candidate_seeds}, "
+                            f"raw_identical={raw_candidates_identical}"
                         )
                     candidate_score_keys_array = np.asarray(
                         [
@@ -1777,6 +1827,12 @@ class PyBulletValidationRunner:
             "val_pybullet_eval_episodes": total,
             "val_traj_has_valid_sdf_rate": float(np.mean(valid_sdf_mask.astype(np.float32))),
             "val_pybullet_num_candidates": float(self.cfg.num_candidates),
+            "val_raw_identical_candidate_episode_rate": (
+                raw_identical_candidate_episode_count / total
+            ),
+            "val_reconstructed_identical_candidate_episode_rate": (
+                reconstructed_identical_candidate_episode_count / total
+            ),
             "val_selected_candidate_mean_min_sdf_m": float(
                 np.mean(np.asarray(selected_candidate_min_sdf, dtype=np.float32))
             ),

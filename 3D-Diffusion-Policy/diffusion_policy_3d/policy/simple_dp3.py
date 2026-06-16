@@ -191,7 +191,8 @@ class SimpleDP3(BasePolicy):
         trajectory = torch.randn(
             size=condition_data.shape, 
             dtype=condition_data.dtype,
-            device=condition_data.device)
+            device=condition_data.device,
+            generator=generator)
 
         # set step values
         scheduler.set_timesteps(self.num_inference_steps)
@@ -207,8 +208,12 @@ class SimpleDP3(BasePolicy):
                                 local_cond=local_cond, global_cond=global_cond)
             
             # 3. compute previous image: x_t -> x_t-1
-            trajectory = scheduler.step(
-                model_output, t, trajectory, ).prev_sample
+            try:
+                trajectory = scheduler.step(
+                    model_output, t, trajectory, generator=generator).prev_sample
+            except TypeError:
+                trajectory = scheduler.step(
+                    model_output, t, trajectory, ).prev_sample
             
                 
         # finally make sure conditioning is enforced
