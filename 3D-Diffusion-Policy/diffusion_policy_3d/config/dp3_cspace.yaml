@@ -184,7 +184,14 @@ training:
     diffusion_sampling_seed: ${training.seed}
     inference_num_steps: ${policy.num_inference_steps}
     num_candidates: 16
-    candidate_selection: max_min_sdf
+    candidate_selection: weighted_sdf
+    selection_topk: 128
+    selection_d_safe: 0.005
+    selection_d_pen: 0.005
+    selection_margin_weight: 1.0
+    selection_penetration_weight: 2.0
+    selection_smooth_weight: 0.01
+    selection_length_weight: 0.005
     sdf_filename: workpiece_sdf.npz
     sdf_required: true
     robot_surface_points_per_link: 256
