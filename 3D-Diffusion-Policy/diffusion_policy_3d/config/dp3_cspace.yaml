@@ -186,7 +186,7 @@ training:
     random_seed: ${training.seed}
     diffusion_sampling_seed: ${training.seed}
     inference_num_steps: ${policy.num_inference_steps}
-    num_candidates: 32
+    num_candidates: 64
     candidate_scheduler_eta: 1.0
     candidate_action_noise_std: 0.02
     candidate_action_noise_clip: 0.06
