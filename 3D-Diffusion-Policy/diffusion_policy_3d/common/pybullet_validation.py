@@ -201,6 +201,22 @@ def _select_lowest_candidate_score_index(score_keys: np.ndarray) -> int:
     return int(np.lexsort(sort_keys)[0])
 
 
+def _add_count(counts: dict[str, float], key: str, value: float = 1.0) -> None:
+    counts[str(key)] = counts.get(str(key), 0.0) + float(value)
+
+
+def _finite_mean(values: list[float]) -> float:
+    array = np.asarray(values, dtype=np.float32)
+    array = array[np.isfinite(array)]
+    return float(np.mean(array)) if array.size > 0 else float("nan")
+
+
+def _finite_percentile(values: list[float], percentile: float) -> float:
+    array = np.asarray(values, dtype=np.float32)
+    array = array[np.isfinite(array)]
+    return float(np.percentile(array, percentile)) if array.size > 0 else float("nan")
+
+
 def _score_safety_sdf_candidate(
     sdf_values: np.ndarray,
     topk: int,
@@ -216,6 +232,8 @@ def _score_safety_sdf_candidate(
         else 0.0
     )
     sdf_finite_ratio_by_link: dict[str, float] = {}
+    pen_point_count_by_link: dict[str, float] = {}
+    penetrating_link_names: list[str] = []
     if sdf_values_by_link is not None:
         for link_name, link_sdf_values in sdf_values_by_link.items():
             link_sdf_values = np.asarray(link_sdf_values, dtype=np.float32).reshape(-1)
@@ -225,6 +243,11 @@ def _score_safety_sdf_candidate(
                 sdf_finite_ratio_by_link[str(link_name)] = float(
                     np.isfinite(link_sdf_values).sum() / link_sdf_values.size
                 )
+            link_pen_mask = (link_sdf_values < 0.0) & np.isfinite(link_sdf_values)
+            link_pen_count = float(link_pen_mask.sum())
+            pen_point_count_by_link[str(link_name)] = link_pen_count
+            if link_pen_count > 0.0:
+                penetrating_link_names.append(str(link_name))
     if valid_sdf_values.size == 0:
         return {
             "has_pen": float("inf"),
@@ -237,6 +260,8 @@ def _score_safety_sdf_candidate(
             "min_sdf_distance_m": float("nan"),
             "sdf_finite_ratio": valid_ratio,
             "sdf_finite_ratio_by_link": sdf_finite_ratio_by_link,
+            "pen_point_count_by_link": pen_point_count_by_link,
+            "penetrating_link_names": penetrating_link_names,
         }
     if topk <= 0:
         raise ValueError(f"selection_topk must be positive, got {topk}")
@@ -269,6 +294,8 @@ def _score_safety_sdf_candidate(
         "min_sdf_distance_m": min_sdf,
         "sdf_finite_ratio": valid_ratio,
         "sdf_finite_ratio_by_link": sdf_finite_ratio_by_link,
+        "pen_point_count_by_link": pen_point_count_by_link,
+        "penetrating_link_names": penetrating_link_names,
     }
 
 
@@ -1092,6 +1119,7 @@ class PyBulletCollisionValidator:
         min_sdf_distance_m = float("nan")
         final_tcp_position = None
         collision_events = []
+        collision_link_names = set()
         for timestep, joint_state in enumerate(joint_trajectory):
             self._set_robot_joints(joint_state)
             self.pb.performCollisionDetection(physicsClientId=self.client_id)
@@ -1107,13 +1135,15 @@ class PyBulletCollisionValidator:
                 segment_collision_steps += 1
                 collision_link_indices = sorted({int(contact[3]) for contact in contacts})
                 for collision_link_index in collision_link_indices:
+                    collision_link_name = self.link_index_to_name.get(
+                        collision_link_index,
+                        str(collision_link_index),
+                    )
+                    collision_link_names.add(collision_link_name)
                     collision_events.append({
                         "episode_idx": None if episode_idx is None else int(episode_idx),
                         "workpiece_id": int(workpiece_id),
-                        "collision_link_name": self.link_index_to_name.get(
-                            collision_link_index,
-                            str(collision_link_index),
-                        ),
+                        "collision_link_name": collision_link_name,
                         "collision_object_name": collision_object_name,
                         "collision_timestep": int(timestep),
                         "timestep_min_sdf_distance_m": float(sdf_detail["min_sdf_distance_m"]),
@@ -1160,6 +1190,7 @@ class PyBulletCollisionValidator:
             "goal_error_m": goal_error,
             "goal_reached": bool(goal_reached),
             "success": success,
+            "collision_link_names": sorted(collision_link_names),
             "collision_events": collision_events,
         }
 
@@ -1459,6 +1490,14 @@ class PyBulletValidationRunner:
         selected_candidate_margin_violation_scores = []
         selected_candidate_sdf_finite_ratios = []
         selected_candidate_sdf_finite_ratios_by_link: dict[str, list[float]] = {}
+        candidate_any_zero_pen_count = 0
+        candidate_all_has_pen_count = 0
+        selected_has_pen_when_zero_pen_exists_count = 0
+        zero_pen_exists_count = 0
+        candidate_zero_pen_counts = []
+        candidate_best_min_sdf_values = []
+        candidate_sdf_pen_link_episode_counts: dict[str, float] = {}
+        selected_sdf_pen_link_counts: dict[str, float] = {}
         candidate_debug_printed = False
         candidate_diversity_debug_printed = False
         raw_identical_candidate_episode_count = 0
@@ -1647,6 +1686,49 @@ class PyBulletValidationRunner:
                     invalid_candidate_count += int(
                         np.count_nonzero(~np.all(np.isfinite(candidate_score_keys_array), axis=1))
                     )
+                    finite_candidate_mask = np.all(
+                        np.isfinite(candidate_score_keys_array),
+                        axis=1,
+                    )
+                    candidate_has_pen_array = np.asarray(
+                        [
+                            float(score_details["has_pen"])
+                            for score_details in candidate_score_details
+                        ],
+                        dtype=np.float32,
+                    )
+                    candidate_min_sdf_array = np.asarray(
+                        [
+                            float(score_details["min_sdf_distance_m"])
+                            for score_details in candidate_score_details
+                        ],
+                        dtype=np.float32,
+                    )
+                    finite_has_pen = candidate_has_pen_array[finite_candidate_mask]
+                    zero_pen_candidate_count = int(np.count_nonzero(finite_has_pen == 0.0))
+                    zero_pen_exists = zero_pen_candidate_count > 0
+                    all_valid_candidates_have_pen = bool(
+                        finite_has_pen.size > 0 and np.all(finite_has_pen > 0.0)
+                    )
+                    if zero_pen_exists:
+                        candidate_any_zero_pen_count += 1
+                        zero_pen_exists_count += 1
+                    if all_valid_candidates_have_pen:
+                        candidate_all_has_pen_count += 1
+                    candidate_zero_pen_counts.append(float(zero_pen_candidate_count))
+                    finite_candidate_min_sdf = candidate_min_sdf_array[
+                        finite_candidate_mask & np.isfinite(candidate_min_sdf_array)
+                    ]
+                    if finite_candidate_min_sdf.size > 0:
+                        candidate_best_min_sdf_values.append(
+                            float(np.max(finite_candidate_min_sdf))
+                        )
+                    episode_pen_link_names = set()
+                    for score_details in candidate_score_details:
+                        for link_name in score_details.get("penetrating_link_names", []):
+                            episode_pen_link_names.add(str(link_name))
+                    for link_name in episode_pen_link_names:
+                        _add_count(candidate_sdf_pen_link_episode_counts, link_name)
                     try:
                         selected_candidate_idx = _select_lowest_candidate_score_index(
                             candidate_score_keys_array
@@ -1714,6 +1796,10 @@ class PyBulletValidationRunner:
                         selected_candidate_sdf_finite_ratios_by_link.setdefault(str(link_name), []).append(
                             float(link_ratio)
                         )
+                    if zero_pen_exists and float(selected_details["has_pen"]) > 0.0:
+                        selected_has_pen_when_zero_pen_exists_count += 1
+                    for link_name in selected_details.get("penetrating_link_names", []):
+                        _add_count(selected_sdf_pen_link_counts, str(link_name))
                     if np.isfinite(baseline_min_sdf):
                         selected_candidate_min_sdf_gains.append(
                             selected_min_sdf - baseline_min_sdf
@@ -1866,6 +1952,10 @@ class PyBulletValidationRunner:
             [float(item["min_sdf_distance_m"]) for item in sample_metrics],
             dtype=np.float32,
         )
+        pybullet_collision_link_episode_counts: dict[str, float] = {}
+        for item in sample_metrics:
+            for link_name in item.get("collision_link_names", []):
+                _add_count(pybullet_collision_link_episode_counts, str(link_name))
         valid_sdf_mask = ~np.isnan(min_sdf_distances)
         mean_min_sdf_distance_m = (
             float(np.mean(min_sdf_distances[valid_sdf_mask]))
@@ -1884,6 +1974,19 @@ class PyBulletValidationRunner:
             "val_pybullet_eval_episodes": total,
             "val_traj_has_valid_sdf_rate": float(np.mean(valid_sdf_mask.astype(np.float32))),
             "val_pybullet_num_candidates": float(self.cfg.num_candidates),
+            "val_candidate_any_zero_pen_rate": candidate_any_zero_pen_count / total,
+            "val_candidate_all_has_pen_rate": candidate_all_has_pen_count / total,
+            "val_candidate_zero_pen_count_mean": _finite_mean(candidate_zero_pen_counts),
+            "val_candidate_best_min_sdf_mean": _finite_mean(candidate_best_min_sdf_values),
+            "val_candidate_best_min_sdf_p10": _finite_percentile(
+                candidate_best_min_sdf_values,
+                10.0,
+            ),
+            "val_selected_has_pen_when_zero_pen_exists_rate": (
+                selected_has_pen_when_zero_pen_exists_count / float(zero_pen_exists_count)
+                if zero_pen_exists_count > 0
+                else 0.0
+            ),
             "val_raw_identical_candidate_episode_rate": (
                 raw_identical_candidate_episode_count / total
             ),
@@ -1965,6 +2068,15 @@ class PyBulletValidationRunner:
         for link_name, link_ratios in selected_candidate_sdf_finite_ratios_by_link.items():
             metric_key = "val_selected_candidate_mean_sdf_finite_ratio_" + _sanitize_metric_suffix(link_name)
             log_data[metric_key] = float(np.mean(np.asarray(link_ratios, dtype=np.float32)))
+        for link_name, count in candidate_sdf_pen_link_episode_counts.items():
+            metric_key = "val_candidate_sdf_pen_link_episode_rate_" + _sanitize_metric_suffix(link_name)
+            log_data[metric_key] = float(count) / total
+        for link_name, count in selected_sdf_pen_link_counts.items():
+            metric_key = "val_selected_sdf_pen_link_rate_" + _sanitize_metric_suffix(link_name)
+            log_data[metric_key] = float(count) / total
+        for link_name, count in pybullet_collision_link_episode_counts.items():
+            metric_key = "val_pybullet_collision_link_episode_rate_" + _sanitize_metric_suffix(link_name)
+            log_data[metric_key] = float(count) / total
         if self.cfg.diffusion_sampling_seed is not None:
             log_data["val_pybullet_diffusion_sampling_seed"] = float(
                 self.cfg.diffusion_sampling_seed

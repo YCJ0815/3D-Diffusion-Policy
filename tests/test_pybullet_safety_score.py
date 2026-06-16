@@ -113,3 +113,19 @@ def test_safety_score_prefers_fewer_penetrating_steps_before_point_count():
 
     assert selected == 1
     assert fewer_pen_steps["pen_step_count"] < more_pen_steps["pen_step_count"]
+
+
+def test_safety_score_tracks_penetrating_links():
+    score = _score_safety_sdf_candidate(
+        np.asarray([[0.010, -0.001, 0.020, 0.030]], dtype=np.float32),
+        topk=2,
+        d_select=0.005,
+        sdf_values_by_link={
+            "tool0": np.asarray([[0.010, -0.001]], dtype=np.float32),
+            "wrist": np.asarray([[0.020, 0.030]], dtype=np.float32),
+        },
+    )
+
+    assert score["penetrating_link_names"] == ["tool0"]
+    assert score["pen_point_count_by_link"]["tool0"] == 1.0
+    assert score["pen_point_count_by_link"]["wrist"] == 0.0
