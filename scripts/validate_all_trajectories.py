@@ -237,6 +237,11 @@ def _build_pybullet_config(
         spline_degree=int(pyb_cfg_raw.get("spline_degree", 5)),
         target_steps=int(pyb_cfg_raw.get("target_steps", 64)),
         max_episodes=None,  # we control this ourselves via --max-episodes
+        candidate_scheduler_eta=(
+            None
+            if pyb_cfg_raw.get("candidate_scheduler_eta", 1.0) is None
+            else float(pyb_cfg_raw.get("candidate_scheduler_eta", 1.0))
+        ),
         sdf_filename=str(pyb_cfg_raw.get("sdf_filename", "workpiece_sdf.npz")),
         sdf_required=bool(pyb_cfg_raw.get("sdf_required", True)),
         robot_surface_points_per_link=int(pyb_cfg_raw.get("robot_surface_points_per_link", 256)),

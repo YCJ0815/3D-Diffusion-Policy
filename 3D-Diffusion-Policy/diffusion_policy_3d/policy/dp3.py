@@ -210,12 +210,22 @@ class DP3(BasePolicy):
                                 local_cond=local_cond, global_cond=global_cond)
             
             # 3. compute previous image: x_t -> x_t-1
+            step_kwargs = dict(kwargs)
+            if generator is not None:
+                step_kwargs.setdefault("generator", generator)
             try:
                 trajectory = scheduler.step(
-                    model_output, t, trajectory, generator=generator).prev_sample
+                    model_output, t, trajectory, **step_kwargs).prev_sample
             except TypeError:
-                trajectory = scheduler.step(
-                    model_output, t, trajectory, ).prev_sample
+                try:
+                    fallback_kwargs = {}
+                    if generator is not None:
+                        fallback_kwargs["generator"] = generator
+                    trajectory = scheduler.step(
+                        model_output, t, trajectory, **fallback_kwargs).prev_sample
+                except TypeError:
+                    trajectory = scheduler.step(
+                        model_output, t, trajectory, ).prev_sample
             
                 
         # finally make sure conditioning is enforced
@@ -230,6 +240,7 @@ class DP3(BasePolicy):
         obs_dict: Dict[str, torch.Tensor],
         generator=None,
         num_inference_steps=None,
+        scheduler_step_kwargs=None,
     ) -> Dict[str, torch.Tensor]:
         """
         obs_dict: must include "obs" key
@@ -281,6 +292,8 @@ class DP3(BasePolicy):
             cond_data[:,:To,Da:] = nobs_features
             cond_mask[:,:To,Da:] = True
 
+        scheduler_kwargs = dict(self.kwargs)
+        scheduler_kwargs.update(scheduler_step_kwargs or {})
         # run sampling
         nsample = self.conditional_sample(
             cond_data, 
@@ -289,7 +302,7 @@ class DP3(BasePolicy):
             global_cond=global_cond,
             generator=generator,
             num_inference_steps=num_inference_steps,
-            **self.kwargs)
+            **scheduler_kwargs)
         
         # unnormalize prediction
         naction_pred = nsample[...,:Da]

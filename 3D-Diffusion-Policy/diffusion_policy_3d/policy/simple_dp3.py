@@ -181,11 +181,14 @@ class SimpleDP3(BasePolicy):
             condition_data_pc=None, condition_mask_pc=None,
             local_cond=None, global_cond=None,
             generator=None,
+            num_inference_steps=None,
             # keyword arguments to scheduler.step
             **kwargs
             ):
         model = self.model
         scheduler = self.noise_scheduler
+        if num_inference_steps is None:
+            num_inference_steps = self.num_inference_steps
 
 
         trajectory = torch.randn(
@@ -195,7 +198,7 @@ class SimpleDP3(BasePolicy):
             generator=generator)
 
         # set step values
-        scheduler.set_timesteps(self.num_inference_steps)
+        scheduler.set_timesteps(num_inference_steps)
 
 
         for t in scheduler.timesteps:
@@ -208,12 +211,22 @@ class SimpleDP3(BasePolicy):
                                 local_cond=local_cond, global_cond=global_cond)
             
             # 3. compute previous image: x_t -> x_t-1
+            step_kwargs = dict(kwargs)
+            if generator is not None:
+                step_kwargs.setdefault("generator", generator)
             try:
                 trajectory = scheduler.step(
-                    model_output, t, trajectory, generator=generator).prev_sample
+                    model_output, t, trajectory, **step_kwargs).prev_sample
             except TypeError:
-                trajectory = scheduler.step(
-                    model_output, t, trajectory, ).prev_sample
+                try:
+                    fallback_kwargs = {}
+                    if generator is not None:
+                        fallback_kwargs["generator"] = generator
+                    trajectory = scheduler.step(
+                        model_output, t, trajectory, **fallback_kwargs).prev_sample
+                except TypeError:
+                    trajectory = scheduler.step(
+                        model_output, t, trajectory, ).prev_sample
             
                 
         # finally make sure conditioning is enforced
@@ -223,7 +236,12 @@ class SimpleDP3(BasePolicy):
         return trajectory
 
 
-    def predict_action(self, obs_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    def predict_action(
+            self,
+            obs_dict: Dict[str, torch.Tensor],
+            generator=None,
+            num_inference_steps=None,
+            scheduler_step_kwargs=None) -> Dict[str, torch.Tensor]:
         """
         obs_dict: must include "obs" key
         result: must include "action" key
@@ -274,13 +292,17 @@ class SimpleDP3(BasePolicy):
             cond_data[:,:To,Da:] = nobs_features
             cond_mask[:,:To,Da:] = True
 
+        scheduler_kwargs = dict(self.kwargs)
+        scheduler_kwargs.update(scheduler_step_kwargs or {})
         # run sampling
         nsample = self.conditional_sample(
             cond_data, 
             cond_mask,
             local_cond=local_cond,
             global_cond=global_cond,
-            **self.kwargs)
+            generator=generator,
+            num_inference_steps=num_inference_steps,
+            **scheduler_kwargs)
         
         # unnormalize prediction
         naction_pred = nsample[...,:Da]

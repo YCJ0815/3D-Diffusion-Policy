@@ -267,6 +267,7 @@ class DP3CSpace(DP3):
         obs_dict: Dict[str, torch.Tensor],
         generator=None,
         num_inference_steps=None,
+        scheduler_step_kwargs=None,
     ) -> Dict[str, torch.Tensor]:
         normalized_obs, cspace_feature = self._split_observations(obs_dict)
         first_value = next(iter(normalized_obs.values()))
@@ -281,6 +282,8 @@ class DP3CSpace(DP3):
             dtype=self.dtype,
         )
         condition_mask = torch.zeros_like(condition_data, dtype=torch.bool)
+        scheduler_kwargs = dict(self.kwargs)
+        scheduler_kwargs.update(scheduler_step_kwargs or {})
         normalized_sample = self.conditional_sample(
             condition_data,
             condition_mask,
@@ -288,7 +291,7 @@ class DP3CSpace(DP3):
             global_cond=global_cond,
             generator=generator,
             num_inference_steps=num_inference_steps,
-            **self.kwargs,
+            **scheduler_kwargs,
         )
 
         normalized_action = normalized_sample[..., :self.action_dim]
@@ -545,6 +548,7 @@ class SimpleDP3CSpace(SimpleDP3):
         obs_dict: Dict[str, torch.Tensor],
         generator=None,
         num_inference_steps=None,
+        scheduler_step_kwargs=None,
     ) -> Dict[str, torch.Tensor]:
         normalized_obs, cspace_feature = self._split_observations(obs_dict)
         first_value = next(iter(normalized_obs.values()))
@@ -559,6 +563,8 @@ class SimpleDP3CSpace(SimpleDP3):
             dtype=self.dtype,
         )
         condition_mask = torch.zeros_like(condition_data, dtype=torch.bool)
+        scheduler_kwargs = dict(self.kwargs)
+        scheduler_kwargs.update(scheduler_step_kwargs or {})
         normalized_sample = self.conditional_sample(
             condition_data,
             condition_mask,
@@ -566,7 +572,7 @@ class SimpleDP3CSpace(SimpleDP3):
             global_cond=global_cond,
             generator=generator,
             num_inference_steps=num_inference_steps,
-            **self.kwargs,
+            **scheduler_kwargs,
         )
 
         normalized_action = normalized_sample[..., :self.action_dim]

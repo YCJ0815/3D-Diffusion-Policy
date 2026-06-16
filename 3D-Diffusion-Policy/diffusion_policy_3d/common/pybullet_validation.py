@@ -381,6 +381,7 @@ class PyBulletValidationConfig:
     diffusion_sampling_seed: int | None = None
     inference_num_steps: int | None = None
     num_candidates: int = 16
+    candidate_scheduler_eta: float | None = 1.0
     candidate_selection: str = "weighted_sdf"
     selection_topk: int = 128
     selection_d_safe: float = 0.005
@@ -442,6 +443,11 @@ class PyBulletValidationConfig:
                 else int(cfg.get("inference_num_steps"))
             ),
             num_candidates=int(cfg.get("num_candidates", 16)),
+            candidate_scheduler_eta=(
+                None
+                if cfg.get("candidate_scheduler_eta", 1.0) is None
+                else float(cfg.get("candidate_scheduler_eta", 1.0))
+            ),
             candidate_selection=str(cfg.get("candidate_selection", "weighted_sdf")),
             selection_topk=int(cfg.get("selection_topk", 128)),
             selection_d_safe=float(cfg.get("selection_d_safe", 0.005)),
@@ -1483,6 +1489,9 @@ class PyBulletValidationRunner:
                 )
                 candidate_action_batches = []
                 candidate_seeds = []
+                scheduler_step_kwargs = {}
+                if self.cfg.candidate_scheduler_eta is not None:
+                    scheduler_step_kwargs["eta"] = float(self.cfg.candidate_scheduler_eta)
                 for candidate_idx in range(int(self.cfg.num_candidates)):
                     candidate_seed = (
                         int(self.cfg.diffusion_sampling_seed)
@@ -1496,6 +1505,7 @@ class PyBulletValidationRunner:
                         obs_dict,
                         generator=generator,
                         num_inference_steps=self.cfg.inference_num_steps,
+                        scheduler_step_kwargs=scheduler_step_kwargs,
                     )
                     candidate_action_batches.append(
                         result["action_pred"].detach().cpu().numpy().astype(np.float32)
@@ -1929,6 +1939,10 @@ class PyBulletValidationRunner:
         if self.cfg.inference_num_steps is not None:
             log_data["val_pybullet_inference_num_steps"] = float(
                 self.cfg.inference_num_steps
+            )
+        if self.cfg.candidate_scheduler_eta is not None:
+            log_data["val_pybullet_candidate_scheduler_eta"] = float(
+                self.cfg.candidate_scheduler_eta
             )
         if self.cfg.log_legacy_pybullet_metrics:
             log_data.update({
