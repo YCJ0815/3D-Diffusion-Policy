@@ -75,8 +75,11 @@ policy:
     num_control_points: 16
     trajectory_steps: 16
     link_surface_point_counts:
-      wrist_3_link: 32
-      pen_link: 64
+      wrist_3_link: 16
+      pen_link: 80
+    link_collision_weights:
+      wrist_3_link: 0.5
+      pen_link: 4.0
     topk: 64
     softmin_beta: 75.0
     d_safe: 0.02
@@ -183,7 +186,7 @@ training:
     random_seed: ${training.seed}
     diffusion_sampling_seed: ${training.seed}
     inference_num_steps: ${policy.num_inference_steps}
-    num_candidates: 16
+    num_candidates: 32
     candidate_scheduler_eta: 1.0
     candidate_action_noise_std: 0.02
     candidate_action_noise_clip: 0.06

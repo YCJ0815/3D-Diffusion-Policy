@@ -23,8 +23,14 @@ from diffusion_policy_3d.common.pybullet_validation import (
 
 
 DEFAULT_LINK_SURFACE_POINT_COUNTS = {
-    "wrist_3_link": 32,
-    "pen_link": 64,
+    "wrist_3_link": 16,
+    "pen_link": 80,
+}
+
+
+DEFAULT_LINK_COLLISION_WEIGHTS = {
+    "wrist_3_link": 0.5,
+    "pen_link": 4.0,
 }
 
 
@@ -228,12 +234,15 @@ class DifferentiableTrajectoryLoss(nn.Module):
             str(name): int(count)
             for name, count in dict(link_point_counts_cfg).items()
         }
-        if self.link_surface_point_counts != DEFAULT_LINK_SURFACE_POINT_COUNTS:
-            expected = DEFAULT_LINK_SURFACE_POINT_COUNTS
-            raise ValueError(
-                "trajectory_loss.link_surface_point_counts must match the configured "
-                f"terminal-priority schedule {expected}, got {self.link_surface_point_counts}"
-            )
+        link_collision_weights_cfg = _config_get(
+            config,
+            "link_collision_weights",
+            DEFAULT_LINK_COLLISION_WEIGHTS,
+        )
+        self.link_collision_weights = {
+            str(name): float(weight)
+            for name, weight in dict(link_collision_weights_cfg).items()
+        }
 
         self._build_robot_geometry()
         self._cpu_sdf_cache: OrderedDict[int, dict[str, np.ndarray]] = OrderedDict()
@@ -423,6 +432,21 @@ class DifferentiableTrajectoryLoss(nn.Module):
             raise ValueError(
                 f"Terminal-priority point schedule must total 96, got {self.total_surface_points}"
             )
+        surface_point_collision_weights = []
+        for link_name, point_count in self.link_surface_point_counts.items():
+            link_weight = self.link_collision_weights.get(str(link_name), 1.0)
+            if link_weight < 0.0:
+                raise ValueError(
+                    f"trajectory_loss.link_collision_weights[{link_name!r}] must be non-negative, "
+                    f"got {link_weight}"
+                )
+            surface_point_collision_weights.append(
+                torch.full((point_count,), float(link_weight), dtype=torch.float32)
+            )
+        self.register_buffer(
+            "surface_point_collision_weights",
+            torch.cat(surface_point_collision_weights, dim=0),
+        )
 
     @staticmethod
     def _axis_angle_transform(
@@ -892,10 +916,18 @@ class DifferentiableTrajectoryLoss(nn.Module):
             self._maybe_sync_cuda(distances)
             timing_after_query = time.perf_counter()
         violations = F.relu((self.d_safe - distances) / self.d_safe)
-        flattened_violations = violations.reshape(violations.shape[0], -1)
-        topk = min(self.topk, flattened_violations.shape[1])
+        collision_weights = self.surface_point_collision_weights.to(
+            device=violations.device,
+            dtype=violations.dtype,
+        ).reshape(1, 1, -1)
+        weighted_violations = violations * collision_weights
+        flattened_weighted_violations = weighted_violations.reshape(
+            weighted_violations.shape[0],
+            -1,
+        )
+        topk = min(self.topk, flattened_weighted_violations.shape[1])
         sdf_collision_loss = (
-            torch.topk(flattened_violations, k=topk, dim=1)
+            torch.topk(flattened_weighted_violations, k=topk, dim=1)
             .values.pow(2)
             .mean()
         )
