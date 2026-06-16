@@ -186,8 +186,8 @@ training:
     num_candidates: 16
     candidate_selection: weighted_sdf
     selection_topk: 128
-    selection_d_safe: 0.005
-    selection_d_pen: 0.005
+    selection_d_safe: 0.01
+    selection_d_pen: 0.01
     selection_margin_weight: 1.0
     selection_penetration_weight: 2.0
     selection_smooth_weight: 0.01
