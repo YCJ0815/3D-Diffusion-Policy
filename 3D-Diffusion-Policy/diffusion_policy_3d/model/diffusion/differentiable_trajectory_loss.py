@@ -425,7 +425,11 @@ class DifferentiableTrajectoryLoss(nn.Module):
                     f"Expected {point_count} sampled points for {link_name}, got {selected.shape}"
                 )
             buffer_name = f"surface_points_{link_name}"
-            self.register_buffer(buffer_name, torch.from_numpy(selected))
+            self.register_buffer(
+                buffer_name,
+                torch.from_numpy(selected),
+                persistent=False,
+            )
             self.link_point_buffer_names[link_name] = buffer_name
         self.total_surface_points = sum(self.link_surface_point_counts.values())
         if self.total_surface_points != 96:
@@ -446,6 +450,7 @@ class DifferentiableTrajectoryLoss(nn.Module):
         self.register_buffer(
             "surface_point_collision_weights",
             torch.cat(surface_point_collision_weights, dim=0),
+            persistent=False,
         )
 
     @staticmethod
