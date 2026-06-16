@@ -1446,11 +1446,16 @@ class PyBulletValidationRunner:
         selected_candidate_sdf_finite_ratios = []
         selected_candidate_sdf_finite_ratios_by_link: dict[str, list[float]] = {}
         candidate_debug_printed = False
+        candidate_diversity_debug_printed = False
         raw_identical_candidate_episode_count = 0
         reconstructed_identical_candidate_episode_count = 0
         policy.eval()
         episode_list = episode_indices.tolist()
         tasks: list[dict[str, object]] = []
+        print(
+            "[PyBullet validation] policy class="
+            f"{policy.__class__.__module__}.{policy.__class__.__name__}"
+        )
         if tqdm is not None:
             inference_progress = tqdm.tqdm(
                 total=len(episode_list),
@@ -1564,6 +1569,15 @@ class PyBulletValidationRunner:
                         reconstructed_candidate_diffs.shape[0] <= 1
                         or np.all(reconstructed_candidate_diffs[1:] <= 1e-7)
                     )
+                    if not candidate_diversity_debug_printed:
+                        print(
+                            "[PyBullet validation] candidate diversity "
+                            f"episode_idx={episode_idx}, workpiece_id={workpiece_id}, "
+                            f"raw_max_diff={float(np.max(raw_candidate_diffs[1:]) if raw_candidate_diffs.shape[0] > 1 else 0.0):.8f}, "
+                            f"reconstructed_max_diff={float(np.max(reconstructed_candidate_diffs[1:]) if reconstructed_candidate_diffs.shape[0] > 1 else 0.0):.8f}, "
+                            f"seeds={candidate_seeds}"
+                        )
+                        candidate_diversity_debug_printed = True
                     if reconstructed_candidates_identical:
                         reconstructed_identical_candidate_episode_count += 1
                         print(
