@@ -95,6 +95,8 @@ class InferBsplineTrajectoriesBatchTests(unittest.TestCase):
                 "32",
                 "--candidate-seed",
                 "7",
+                "--cspace-feature-dir",
+                "/tmp/cspace",
             ]
         )
 
@@ -104,6 +106,104 @@ class InferBsplineTrajectoriesBatchTests(unittest.TestCase):
         self.assertEqual(args.sampling_mode, "compare")
         self.assertEqual(args.num_candidates, 32)
         self.assertEqual(args.candidate_seed, 7)
+        self.assertEqual(args.cspace_feature_dir, "/tmp/cspace")
+
+    def test_policy_requires_cspace_feature_detects_cspace_checkpoint(self):
+        module = self.module
+
+        plain_policy = types.SimpleNamespace()
+        cspace_policy = types.SimpleNamespace(cspace_feature_key="cspace_feature")
+
+        self.assertFalse(module.policy_requires_cspace_feature(plain_policy))
+        self.assertTrue(module.policy_requires_cspace_feature(cspace_policy))
+
+    def test_prepare_obs_inputs_injects_cspace_feature_for_cspace_policy(self):
+        module = self.module
+        captured = {}
+
+        def fake_build_obs_dict(**kwargs):
+            captured["build_obs_dict_kwargs"] = kwargs
+            return ({"point_cloud": "pc"}, {"point_cloud": "pc"})
+
+        def fake_inject(*, obs_dict, raw_obs, cspace_feature, n_obs_steps, device):
+            captured["inject"] = {
+                "cspace_feature": cspace_feature,
+                "n_obs_steps": n_obs_steps,
+                "device": device,
+            }
+            obs_dict["cspace_feature"] = cspace_feature
+            raw_obs["cspace_feature"] = cspace_feature
+
+        class FakeProvider:
+            def get_feature(self, workpiece_id: int):
+                captured["workpiece_id"] = workpiece_id
+                return [[1.0, 2.0], [3.0, 4.0]]
+
+        original_build_obs_dict = module.build_obs_dict
+        original_inject = getattr(module, "inject_cspace_feature", None)
+        try:
+            module.build_obs_dict = fake_build_obs_dict
+            module.inject_cspace_feature = fake_inject
+            obs_dict, raw_obs, resolved_workpiece_id = module.prepare_obs_inputs(
+                npz_path=pathlib.Path("/tmp/results/job_008/transition_0001_0002.npz"),
+                stl_path=pathlib.Path("/tmp/jobs/job_008/workpiece.stl"),
+                input_dirs=[pathlib.Path("/tmp/results")],
+                policy=types.SimpleNamespace(cspace_feature_key="cspace_feature"),
+                workspace=types.SimpleNamespace(cfg=types.SimpleNamespace(n_obs_steps=1)),
+                device="cuda:0",
+                args=types.SimpleNamespace(
+                    norm_m=0.1,
+                    radius_m=0.1,
+                    height_m=0.1,
+                    num_output_points=512,
+                    num_mesh_sample_points=100000,
+                    stl_x_offset_mm=500.0,
+                    urdf_path=None,
+                    use_poisson_disk=False,
+                    simple_workpiece_id_offset=1000,
+                ),
+                cspace_feature_provider=FakeProvider(),
+            )
+        finally:
+            module.build_obs_dict = original_build_obs_dict
+            if original_inject is not None:
+                module.inject_cspace_feature = original_inject
+
+        self.assertEqual(resolved_workpiece_id, 8)
+        self.assertEqual(captured["workpiece_id"], 8)
+        self.assertEqual(captured["inject"]["cspace_feature"], [[1.0, 2.0], [3.0, 4.0]])
+        self.assertEqual(obs_dict["cspace_feature"], [[1.0, 2.0], [3.0, 4.0]])
+        self.assertEqual(raw_obs["cspace_feature"], [[1.0, 2.0], [3.0, 4.0]])
+
+    def test_prepare_obs_inputs_rejects_cspace_policy_without_feature_provider(self):
+        module = self.module
+
+        original_build_obs_dict = module.build_obs_dict
+        try:
+            module.build_obs_dict = lambda **kwargs: ({"point_cloud": "pc"}, {"point_cloud": "pc"})
+            with self.assertRaisesRegex(ValueError, "cspace-feature-dir"):
+                module.prepare_obs_inputs(
+                    npz_path=pathlib.Path("/tmp/results/job_008/transition_0001_0002.npz"),
+                    stl_path=pathlib.Path("/tmp/jobs/job_008/workpiece.stl"),
+                    input_dirs=[pathlib.Path("/tmp/results")],
+                    policy=types.SimpleNamespace(cspace_feature_key="cspace_feature"),
+                    workspace=types.SimpleNamespace(cfg=types.SimpleNamespace(n_obs_steps=1)),
+                    device="cuda:0",
+                    args=types.SimpleNamespace(
+                        norm_m=0.1,
+                        radius_m=0.1,
+                        height_m=0.1,
+                        num_output_points=512,
+                        num_mesh_sample_points=100000,
+                        stl_x_offset_mm=500.0,
+                        urdf_path=None,
+                        use_poisson_disk=False,
+                        simple_workpiece_id_offset=1000,
+                    ),
+                    cspace_feature_provider=None,
+                )
+        finally:
+            module.build_obs_dict = original_build_obs_dict
 
     def test_filter_npz_files_by_source_keeps_only_regular_jobs(self):
         module = self.module

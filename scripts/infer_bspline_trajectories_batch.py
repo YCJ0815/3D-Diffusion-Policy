@@ -157,6 +157,24 @@ def build_parser() -> argparse.ArgumentParser:
         default=1000,
         help="Offset applied when mapping simple job IDs into workpiece IDs for candidate scoring.",
     )
+    parser.add_argument(
+        "--cspace-feature-dir",
+        type=str,
+        default=None,
+        help="Directory containing C-space inference features for C-space checkpoints.",
+    )
+    parser.add_argument(
+        "--cspace-feature-filename",
+        type=str,
+        default="workpiece_key_config_features.npy",
+        help="Filename of the C-space feature array inside --cspace-feature-dir.",
+    )
+    parser.add_argument(
+        "--cspace-workpiece-ids-filename",
+        type=str,
+        default="workpiece_ids.npy",
+        help="Filename of the workpiece ID array aligned with the C-space features.",
+    )
     parser.add_argument("--skip-existing", action="store_true", help="Skip samples whose summary.json already exists.")
     return parser
 
@@ -224,6 +242,149 @@ def resolve_workpiece_id_from_npz(
     if infer_source_kind(npz_path=npz_path, input_dirs=input_dirs) == "simple":
         return int(simple_workpiece_id_offset) + workpiece_id
     return workpiece_id
+
+
+def policy_requires_cspace_feature(policy) -> bool:
+    cspace_feature_key = getattr(policy, "cspace_feature_key", None)
+    return isinstance(cspace_feature_key, str) and len(cspace_feature_key) > 0
+
+
+class CSpaceFeatureProvider:
+    def __init__(
+        self,
+        feature_dir: pathlib.Path,
+        features: np.ndarray,
+        workpiece_ids: np.ndarray,
+    ):
+        features = np.asarray(features, dtype=np.float32)
+        workpiece_ids = np.asarray(workpiece_ids, dtype=np.int64)
+        if features.ndim != 3:
+            raise ValueError(f"C-space features must be rank-3 [N, 128, C], got shape {features.shape}")
+        if workpiece_ids.ndim != 1:
+            raise ValueError(f"C-space workpiece IDs must be rank-1, got shape {workpiece_ids.shape}")
+        if workpiece_ids.shape[0] != features.shape[0]:
+            raise ValueError(
+                "C-space workpiece IDs must align with features, got "
+                f"{workpiece_ids.shape[0]} IDs for {features.shape[0]} feature rows."
+            )
+        unique_ids, counts = np.unique(workpiece_ids, return_counts=True)
+        duplicate_ids = unique_ids[counts > 1]
+        if duplicate_ids.size > 0:
+            raise ValueError(
+                "C-space workpiece IDs must be unique; duplicates: "
+                f"{duplicate_ids.tolist()}"
+            )
+        self.feature_dir = pathlib.Path(feature_dir)
+        self.features = np.ascontiguousarray(features)
+        self.workpiece_ids = np.ascontiguousarray(workpiece_ids)
+        self.row_by_workpiece_id = {
+            int(workpiece_id): int(row_index)
+            for row_index, workpiece_id in enumerate(self.workpiece_ids.tolist())
+        }
+
+    @classmethod
+    def from_files(
+        cls,
+        feature_dir: str,
+        feature_filename: str,
+        workpiece_ids_filename: str,
+    ) -> "CSpaceFeatureProvider":
+        resolved_feature_dir = pathlib.Path(feature_dir).expanduser().resolve()
+        feature_path = resolved_feature_dir / feature_filename
+        workpiece_ids_path = resolved_feature_dir / workpiece_ids_filename
+        missing_paths = [str(path) for path in (feature_path, workpiece_ids_path) if not path.is_file()]
+        if missing_paths:
+            raise FileNotFoundError(f"Missing C-space feature artifacts: {missing_paths}")
+        return cls(
+            feature_dir=resolved_feature_dir,
+            features=np.load(feature_path),
+            workpiece_ids=np.load(workpiece_ids_path),
+        )
+
+    def get_feature(self, workpiece_id: int) -> np.ndarray:
+        workpiece_id = int(workpiece_id)
+        if workpiece_id not in self.row_by_workpiece_id:
+            raise KeyError(
+                f"C-space feature is missing for workpiece_id={workpiece_id} in {self.feature_dir}."
+            )
+        feature_row = self.row_by_workpiece_id[workpiece_id]
+        return np.asarray(self.features[feature_row], dtype=np.float32)
+
+
+def build_cspace_feature_provider(args, policy) -> CSpaceFeatureProvider | None:
+    if not policy_requires_cspace_feature(policy):
+        return None
+    if args.cspace_feature_dir is None:
+        raise ValueError(
+            "This checkpoint requires C-space features. Please provide --cspace-feature-dir "
+            "(and optionally --cspace-feature-filename / --cspace-workpiece-ids-filename)."
+        )
+    return CSpaceFeatureProvider.from_files(
+        feature_dir=args.cspace_feature_dir,
+        feature_filename=args.cspace_feature_filename,
+        workpiece_ids_filename=args.cspace_workpiece_ids_filename,
+    )
+
+
+def inject_cspace_feature(
+    *,
+    obs_dict: dict,
+    raw_obs: dict,
+    cspace_feature: np.ndarray,
+    n_obs_steps: int,
+    device: torch.device,
+) -> None:
+    cspace_feature = np.asarray(cspace_feature, dtype=np.float32)
+    raw_obs["cspace_feature"] = cspace_feature.copy()
+    obs_value = np.expand_dims(cspace_feature, axis=0)
+    obs_value = np.expand_dims(obs_value, axis=0)
+    obs_value = np.repeat(obs_value, n_obs_steps, axis=1)
+    obs_dict["cspace_feature"] = torch.from_numpy(obs_value).to(device)
+
+
+def prepare_obs_inputs(
+    *,
+    npz_path: pathlib.Path,
+    stl_path: pathlib.Path,
+    input_dirs: list[pathlib.Path],
+    policy,
+    workspace: TrainDP3Workspace,
+    device: torch.device,
+    args,
+    cspace_feature_provider: CSpaceFeatureProvider | None,
+) -> tuple[dict, dict, int | None]:
+    obs_dict, raw_obs = build_obs_dict(
+        stl_path=str(stl_path),
+        npz_path=str(npz_path),
+        norm_m=args.norm_m,
+        radius_m=args.radius_m,
+        height_m=args.height_m,
+        num_output_points=args.num_output_points,
+        num_mesh_sample_points=args.num_mesh_sample_points,
+        stl_x_offset_mm=args.stl_x_offset_mm,
+        urdf_path=args.urdf_path,
+        use_poisson_disk=args.use_poisson_disk,
+        n_obs_steps=workspace.cfg.n_obs_steps,
+        device=device,
+    )
+
+    workpiece_id = None
+    if policy_requires_cspace_feature(policy):
+        if cspace_feature_provider is None:
+            raise ValueError("C-space checkpoint requires --cspace-feature-dir so cspace_feature can be injected.")
+        workpiece_id = resolve_workpiece_id_from_npz(
+            npz_path=npz_path,
+            input_dirs=input_dirs,
+            simple_workpiece_id_offset=args.simple_workpiece_id_offset,
+        )
+        inject_cspace_feature(
+            obs_dict=obs_dict,
+            raw_obs=raw_obs,
+            cspace_feature=cspace_feature_provider.get_feature(workpiece_id),
+            n_obs_steps=workspace.cfg.n_obs_steps,
+            device=device,
+        )
+    return obs_dict, raw_obs, workpiece_id
 
 
 def infer_jobs_dir_from_results_dir(results_dir: pathlib.Path) -> pathlib.Path:
@@ -520,6 +681,8 @@ def save_prediction_artifacts(
     np.save(output_dir / "pred_joint_horizon_normalized.npy", artifact["pred_joint_horizon_normalized"])
     np.save(output_dir / "pred_joint_horizon.npy", artifact["pred_joint_horizon"])
     np.save(output_dir / "point_cloud.npy", raw_obs["point_cloud"])
+    if "cspace_feature" in raw_obs:
+        np.save(output_dir / "cspace_feature.npy", raw_obs["cspace_feature"])
 
     gt_fit_result = artifact["gt_fit_result"]
     planning_result = artifact["planning_result"]
@@ -551,6 +714,7 @@ def save_prediction_artifacts(
         "pred_joint_horizon_shape": list(artifact["pred_joint_horizon"].shape),
         "trajectory_key": planning_result.trajectory_key,
         "has_ground_truth_trajectory": bool(gt_joint_traj is not None),
+        "has_cspace_feature": bool("cspace_feature" in raw_obs),
     }
     if candidate_scores is not None:
         with open(output_dir / "candidate_scores.json", "w", encoding="utf-8") as f:
@@ -665,23 +829,20 @@ def run_mode_inference(
     sample_index: int,
     compare_mode: bool,
     candidate_validator: CandidateValidatorWrapper | None,
+    cspace_feature_provider: CSpaceFeatureProvider | None,
 ) -> dict:
-    obs_dict, raw_obs = build_obs_dict(
-        stl_path=str(stl_path),
-        npz_path=str(npz_path),
-        norm_m=args.norm_m,
-        radius_m=args.radius_m,
-        height_m=args.height_m,
-        num_output_points=args.num_output_points,
-        num_mesh_sample_points=args.num_mesh_sample_points,
-        stl_x_offset_mm=args.stl_x_offset_mm,
-        urdf_path=args.urdf_path,
-        use_poisson_disk=args.use_poisson_disk,
-        n_obs_steps=workspace.cfg.n_obs_steps,
+    obs_dict, raw_obs, prepared_workpiece_id = prepare_obs_inputs(
+        npz_path=npz_path,
+        stl_path=stl_path,
+        input_dirs=input_dirs,
+        policy=policy,
+        workspace=workspace,
         device=device,
+        args=args,
+        cspace_feature_provider=cspace_feature_provider,
     )
     output_dir = build_summary_output_dir(base_output_dir=base_output_dir, mode=mode, compare_mode=compare_mode)
-    workpiece_id = None
+    workpiece_id = prepared_workpiece_id
     candidate_scores: list[dict] | None = None
     selected_score: dict | None = None
 
@@ -751,6 +912,8 @@ def run_mode_inference(
         "sample_seed": int(args.sample_seed),
         "sample_source_kind": infer_source_kind(npz_path=npz_path, input_dirs=input_dirs),
         "workpiece_id": workpiece_id,
+        "cspace_feature_dir": args.cspace_feature_dir,
+        "uses_cspace_feature": bool("cspace_feature" in raw_obs),
         "n_obs_steps": int(workspace.cfg.n_obs_steps),
         "n_action_steps": int(workspace.cfg.n_action_steps),
         "policy_horizon": int(workspace.cfg.horizon),
@@ -812,11 +975,13 @@ def main() -> None:
     stats_path = pathlib.Path(args.stats_path).expanduser().resolve()
     output_root = ensure_dir(pathlib.Path(args.output_root).expanduser().resolve())
     input_dirs = [pathlib.Path(path).expanduser().resolve() for path in args.input_dirs]
+    cspace_feature_dir = None if args.cspace_feature_dir is None else pathlib.Path(args.cspace_feature_dir).expanduser().resolve()
 
     args.checkpoint_path = str(checkpoint_path)
     args.stats_path = str(stats_path)
     args.output_root = str(output_root)
     args.input_dirs = [str(path) for path in input_dirs]
+    args.cspace_feature_dir = None if cspace_feature_dir is None else str(cspace_feature_dir)
 
     if not checkpoint_path.is_file():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
@@ -857,6 +1022,7 @@ def main() -> None:
     stats_mean, stats_std = load_delta_w_stats(str(stats_path))
     effective_mode = resolve_sampling_mode(args)
     compare_mode = effective_mode == "compare"
+    cspace_feature_provider = build_cspace_feature_provider(args, policy)
     candidate_validator = build_candidate_validator(args)
 
     manifest = {
@@ -871,6 +1037,8 @@ def main() -> None:
         "candidate_selection": str(args.candidate_selection),
         "num_candidates": int(args.num_candidates if effective_mode in {"candidate", "compare"} else 1),
         "candidate_seed": int(args.candidate_seed),
+        "cspace_feature_dir": args.cspace_feature_dir,
+        "uses_cspace_feature": bool(cspace_feature_provider is not None),
         "processed": [],
         "failed": [],
     }
@@ -923,6 +1091,7 @@ def main() -> None:
                         sample_index=idx - 1,
                         compare_mode=True,
                         candidate_validator=candidate_validator,
+                        cspace_feature_provider=cspace_feature_provider,
                     )
                     candidate_summary = run_mode_inference(
                         mode="candidate",
@@ -939,6 +1108,7 @@ def main() -> None:
                         sample_index=idx - 1,
                         compare_mode=True,
                         candidate_validator=candidate_validator,
+                        cspace_feature_provider=cspace_feature_provider,
                     )
                     compare_summary = build_compare_summary(
                         npz_path=npz_path,
@@ -972,6 +1142,7 @@ def main() -> None:
                         sample_index=idx - 1,
                         compare_mode=False,
                         candidate_validator=candidate_validator,
+                        cspace_feature_provider=cspace_feature_provider,
                     )
                     manifest["processed"].append(summary)
                 print(f"[{idx}/{len(sampled_npz_files)}] done: {npz_path}")
