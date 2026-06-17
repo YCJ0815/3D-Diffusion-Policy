@@ -1204,10 +1204,12 @@ class PyBulletValidationRunner:
                 f"got {self.cfg.target_steps}"
             )
         if self.cfg.interpolate_for_collision:
-            raise ValueError(
-                "PyBullet multi-candidate validation requires "
-                "interpolate_for_collision=false."
+            import warnings
+            warnings.warn(
+                "PyBullet multi-candidate validation forces interpolate_for_collision=false. "
+                f"Current config has interpolate_for_collision=true — overriding to false."
             )
+            self.cfg.interpolate_for_collision = False
         if self.cfg.num_candidates <= 0:
             raise ValueError(
                 "training.pybullet_eval.num_candidates must be positive, "
