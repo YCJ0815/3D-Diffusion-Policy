@@ -95,6 +95,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Number of B-spline control points for reconstruction.",
     )
     parser.add_argument(
+        "--target-steps",
+        type=int,
+        default=None,
+        help="Number of output trajectory steps for B-spline reconstruction. "
+             "Auto-detected from checkpoint config when omitted.",
+    )
+    parser.add_argument(
         "--val-ratio",
         type=float,
         default=0.1,
@@ -264,6 +271,7 @@ def _build_pybullet_config(
     collision_log_path: Optional[str] = None,
     jobs_root: Optional[str] = None,
     simple_jobs_root: Optional[str] = None,
+    target_steps: Optional[int] = None,
 ) -> PyBulletValidationConfig:
     """Build PyBulletValidationConfig, seeding from the checkpoint and overriding with CLI."""
     from omegaconf import OmegaConf
@@ -310,7 +318,11 @@ def _build_pybullet_config(
         goal_tolerance_m=float(pyb_cfg_raw.get("goal_tolerance_m", 0.01)),
         num_control_points=num_control_points,
         spline_degree=int(pyb_cfg_raw.get("spline_degree", 5)),
-        target_steps=int(pyb_cfg_raw.get("target_steps", 64)),
+        target_steps=(
+            target_steps
+            if target_steps is not None
+            else int(pyb_cfg_raw.get("target_steps", 64))
+        ),
         max_episodes=None,
         random_sample_episodes=bool(pyb_cfg_raw.get("random_sample_episodes", False)),
         random_seed=int(pyb_cfg_raw.get("random_seed", 42)),
@@ -724,6 +736,10 @@ def main() -> None:
     workpiece_ids = np.asarray(replay_buffer.meta["workpiece_ids"][:], dtype=np.int64)
 
     print("Initialising PyBullet validator …")
+    resolved_target_steps = args.target_steps
+    if resolved_target_steps is None:
+        pyb_cfg_raw = OmegaConf.select(workspace.cfg, "training.pybullet_eval", default={}) or {}
+        resolved_target_steps = int(pyb_cfg_raw.get("target_steps", 64))
     pyb_cfg = _build_pybullet_config(
         workspace=workspace,
         stats_path=str(stats_path),
@@ -731,6 +747,7 @@ def main() -> None:
         collision_log_path=str(output_dir / "pybullet_collision_events.jsonl"),
         jobs_root=args.jobs_root,
         simple_jobs_root=args.simple_jobs_root,
+        target_steps=resolved_target_steps,
     )
     candidate_pool_enabled = _candidate_pool_enabled(args.candidate_pool)
     effective_num_candidates = _effective_num_candidates(
