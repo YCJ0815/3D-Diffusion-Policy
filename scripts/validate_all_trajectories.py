@@ -155,6 +155,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--candidate-pool",
+        choices=("on", "off"),
+        default="on",
+        help=(
+            "Toggle the multi-path candidate pool during inference. "
+            "`on` = sample multiple candidates then select the safest one; "
+            "`off` = run a single-path inference without candidate-pool selection."
+        ),
+    )
+    parser.add_argument(
         "--single-episode-index",
         type=int,
         default=None,
@@ -169,6 +179,14 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Measure elapsed time from candidate inference start to final selected output. "
             "Useful with --single-episode-index."
+        ),
+    )
+    parser.add_argument(
+        "--regular-jobs-only",
+        action="store_true",
+        help=(
+            "Restrict validation to regular jobs only. Episodes whose workpiece_id is "
+            "below simple_workpiece_id_offset are kept; simple jobs are excluded."
         ),
     )
     return parser
@@ -409,7 +427,10 @@ def _build_obs_batch(
 def _effective_num_candidates(
     pyb_cfg: PyBulletValidationConfig,
     cli_num_candidates: Optional[int],
+    candidate_pool_enabled: bool,
 ) -> int:
+    if not candidate_pool_enabled:
+        return 1
     if cli_num_candidates is not None:
         if int(cli_num_candidates) <= 0:
             raise ValueError(
@@ -417,6 +438,28 @@ def _effective_num_candidates(
             )
         return int(cli_num_candidates)
     return int(pyb_cfg.num_candidates)
+
+
+def _candidate_pool_enabled(candidate_pool_arg: str) -> bool:
+    return str(candidate_pool_arg).lower() == "on"
+
+
+def _filter_episode_indices_by_job_type(
+    episode_indices: np.ndarray,
+    workpiece_ids: np.ndarray,
+    *,
+    simple_workpiece_id_offset: int,
+    regular_jobs_only: bool,
+) -> np.ndarray:
+    if not regular_jobs_only:
+        return np.asarray(episode_indices, dtype=np.int64)
+
+    filtered_episode_indices = [
+        int(episode_idx)
+        for episode_idx in np.asarray(episode_indices, dtype=np.int64).tolist()
+        if int(workpiece_ids[int(episode_idx)]) < int(simple_workpiece_id_offset)
+    ]
+    return np.asarray(filtered_episode_indices, dtype=np.int64)
 
 
 def _predict_select_candidate(
@@ -430,10 +473,15 @@ def _predict_select_candidate(
     device: torch.device,
     batch_start: int = 0,
     num_candidates_override: Optional[int] = None,
+    candidate_pool_enabled: bool = True,
     measure_inference_time: bool = False,
 ) -> dict[str, object]:
-    num_candidates = _effective_num_candidates(pyb_cfg, num_candidates_override)
-    if pyb_cfg.diffusion_sampling_seed is None:
+    num_candidates = _effective_num_candidates(
+        pyb_cfg,
+        num_candidates_override,
+        candidate_pool_enabled=candidate_pool_enabled,
+    )
+    if candidate_pool_enabled and pyb_cfg.diffusion_sampling_seed is None:
         raise ValueError(
             "PyBullet validation requires diffusion_sampling_seed to be set when using candidate selection."
         )
@@ -446,6 +494,52 @@ def _predict_select_candidate(
     end_joint_normalized = raw_obs["last_joint_angles_normalized"][0].astype(np.float32)
 
     start_time = time.perf_counter() if measure_inference_time else None
+
+    if not candidate_pool_enabled:
+        single_candidate_seed = int((pyb_cfg.diffusion_sampling_seed or 0) + int(batch_start))
+        generator = torch.Generator(device=device)
+        generator.manual_seed(single_candidate_seed)
+        result = policy.predict_action(
+            obs_dict,
+            generator=generator,
+            num_inference_steps=pyb_cfg.inference_num_steps,
+            scheduler_step_kwargs=scheduler_step_kwargs,
+        )
+        selected_action_horizon = (
+            result["action_pred"][0].detach().cpu().numpy().astype(np.float32)
+        )
+        selected_result = validator.reconstruct_candidate(
+            pred_action_horizon=selected_action_horizon,
+            start_joint_normalized=start_joint_normalized,
+            end_joint_normalized=end_joint_normalized,
+        )
+        selected_score_details = validator.score_candidate(
+            workpiece_id=workpiece_id,
+            normalized_control_points=selected_result["normalized_control_points"],
+            joint_trajectory=selected_result["joint_trajectory"],
+        )
+        end_time = time.perf_counter() if measure_inference_time else None
+        inference_elapsed_sec = (
+            float(end_time - start_time)
+            if measure_inference_time and start_time is not None and end_time is not None
+            else None
+        )
+        return {
+            "candidate_pool_enabled": False,
+            "selected_candidate_idx": 0,
+            "selected_candidate_seed": int(single_candidate_seed),
+            "selected_action_horizon": np.asarray(
+                selected_action_horizon, dtype=np.float32
+            ),
+            "selected_joint_trajectory": np.asarray(
+                selected_result["joint_trajectory"], dtype=np.float32
+            ),
+            "selected_score_details": selected_score_details,
+            "candidate_score_details": [selected_score_details],
+            "candidate_seeds": [int(single_candidate_seed)],
+            "num_candidates": 1,
+            "inference_elapsed_sec": inference_elapsed_sec,
+        }
 
     candidate_results: list[dict[str, object]] = []
     candidate_score_details: list[dict[str, object]] = []
@@ -528,6 +622,7 @@ def _predict_select_candidate(
     )
 
     return {
+        "candidate_pool_enabled": True,
         "selected_candidate_idx": int(selected_candidate_idx),
         "selected_candidate_seed": int(candidate_seeds[selected_candidate_idx]),
         "selected_action_horizon": np.asarray(
@@ -618,27 +713,6 @@ def main() -> None:
     total_val = len(val_episode_indices)
     print(f"Validation episodes: {total_val}")
 
-    if args.max_episodes is not None and args.max_episodes < total_val:
-        val_episode_indices = val_episode_indices[: args.max_episodes]
-        print(f"  (limited to {args.max_episodes} by --max-episodes)")
-
-    if args.single_episode_index is not None:
-        if args.single_episode_index < 0 or args.single_episode_index >= len(
-            val_episode_indices
-        ):
-            raise IndexError(
-                f"--single-episode-index {args.single_episode_index} is out of range "
-                f"for {len(val_episode_indices)} validation episodes."
-            )
-        val_episode_indices = np.asarray(
-            [int(val_episode_indices[int(args.single_episode_index)])],
-            dtype=np.int64,
-        )
-        print(
-            "  (single-episode mode: validation subset index "
-            f"{args.single_episode_index})"
-        )
-
     replay_buffer = val_dataset.replay_buffer
     obs_keys = val_dataset.obs_keys
 
@@ -658,7 +732,12 @@ def main() -> None:
         jobs_root=args.jobs_root,
         simple_jobs_root=args.simple_jobs_root,
     )
-    effective_num_candidates = _effective_num_candidates(pyb_cfg, args.num_candidates)
+    candidate_pool_enabled = _candidate_pool_enabled(args.candidate_pool)
+    effective_num_candidates = _effective_num_candidates(
+        pyb_cfg,
+        args.num_candidates,
+        candidate_pool_enabled=candidate_pool_enabled,
+    )
     print(f"  num_control_points={pyb_cfg.num_control_points}")
     print(f"  stats_mode={pyb_cfg.stats_mode}")
     print(f"  jobs_root={pyb_cfg.jobs_root}")
@@ -668,8 +747,42 @@ def main() -> None:
     print(f"  inference_num_steps={pyb_cfg.inference_num_steps}")
     print(f"  candidate_action_noise_std={pyb_cfg.candidate_action_noise_std}")
     print(f"  candidate_action_noise_clip={pyb_cfg.candidate_action_noise_clip}")
+    print(f"  candidate_pool={args.candidate_pool}")
     runner = PyBulletValidationRunner(pyb_cfg)
     validator = runner.validator
+
+    val_episode_indices = _filter_episode_indices_by_job_type(
+        val_episode_indices,
+        workpiece_ids,
+        simple_workpiece_id_offset=int(pyb_cfg.simple_workpiece_id_offset),
+        regular_jobs_only=bool(args.regular_jobs_only),
+    )
+    if args.regular_jobs_only:
+        print(
+            "  regular_jobs_only=true -> filtered validation episodes: "
+            f"{len(val_episode_indices)}"
+        )
+
+    if args.max_episodes is not None and args.max_episodes < len(val_episode_indices):
+        val_episode_indices = val_episode_indices[: args.max_episodes]
+        print(f"  (limited to {args.max_episodes} by --max-episodes)")
+
+    if args.single_episode_index is not None:
+        if args.single_episode_index < 0 or args.single_episode_index >= len(
+            val_episode_indices
+        ):
+            raise IndexError(
+                f"--single-episode-index {args.single_episode_index} is out of range "
+                f"for {len(val_episode_indices)} validation episodes."
+            )
+        val_episode_indices = np.asarray(
+            [int(val_episode_indices[int(args.single_episode_index)])],
+            dtype=np.int64,
+        )
+        print(
+            "  (single-episode mode: validation subset index "
+            f"{args.single_episode_index})"
+        )
 
     per_traj_metrics: list[dict] = []
     collision_count = 0
@@ -704,6 +817,7 @@ def main() -> None:
                 device=device,
                 batch_start=idx,
                 num_candidates_override=args.num_candidates,
+                candidate_pool_enabled=candidate_pool_enabled,
                 measure_inference_time=bool(args.measure_inference_time),
             )
             joint_trajectory = np.asarray(
@@ -758,6 +872,7 @@ def main() -> None:
                 "success": bool(metric["success"]),
                 "selected_candidate_idx": int(selection["selected_candidate_idx"]),
                 "selected_candidate_seed": int(selection["selected_candidate_seed"]),
+                "candidate_pool_enabled": bool(selection["candidate_pool_enabled"]),
                 "num_candidates": int(selection["num_candidates"]),
                 "selected_score": selection["selected_score_details"],
                 "inference_elapsed_sec": selection["inference_elapsed_sec"],
@@ -816,10 +931,13 @@ def main() -> None:
             "val_ratio": args.val_ratio,
             "horizon": horizon,
             "n_obs_steps": n_obs_steps,
+            "candidate_pool": str(args.candidate_pool),
             "effective_num_candidates": int(effective_num_candidates),
             "candidate_selection": str(pyb_cfg.candidate_selection),
             "inference_num_steps": pyb_cfg.inference_num_steps,
             "measure_inference_time": bool(args.measure_inference_time),
+            "regular_jobs_only": bool(args.regular_jobs_only),
+            "simple_workpiece_id_offset": int(pyb_cfg.simple_workpiece_id_offset),
             "single_episode_mode": args.single_episode_index is not None,
             "single_episode_validation_offset": args.single_episode_index,
         },
