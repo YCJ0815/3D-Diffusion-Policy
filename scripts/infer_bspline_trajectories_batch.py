@@ -90,11 +90,51 @@ def build_parser() -> argparse.ArgumentParser:
         default=10,
         help="Number of trajectories to randomly sample for inference.",
     )
-    parser.add_argument(
-        "--sample-seed",
+    parser.add_argument("--sample-seed",
         type=int,
         default=42,
         help="Seed for deterministic random trajectory sampling.",
+    )
+    parser.add_argument(
+        "--val-split",
+        action="store_true",
+        help="Filter NPZ files to only those belonging to validation workpiece IDs "
+             "(uses the same split logic as training). Requires --zarr-path.",
+    )
+    parser.add_argument(
+        "--zarr-path",
+        type=str,
+        default=None,
+        help="Path to zarr dataset for resolving validation workpiece IDs (required with --val-split).",
+    )
+    parser.add_argument(
+        "--val-ratio",
+        type=float,
+        default=0.1,
+        help="Validation ratio for workpiece split when --val-split is enabled (default: 0.1, matching training config).",
+    )
+    parser.add_argument(
+        "--val-split-seed",
+        type=int,
+        default=42,
+        help="Seed for deterministic validation split (default: 42).",
+    )
+    parser.add_argument(
+        "--no-split-by-workpiece",
+        action="store_true",
+        help="Disable split-by-workpiece when --val-split is enabled (default: split by workpiece).",
+    )
+    parser.add_argument(
+        "--no-stratify-workpiece-split",
+        action="store_true",
+        help="Disable stratified split across regular/simple workpiece IDs (default: stratified, matching training config).",
+    )
+    parser.add_argument(
+        "--workpiece-split-strategy",
+        type=str,
+        choices=["random", "tail"],
+        default="tail",
+        help="Strategy for selecting validation workpiece IDs: random or tail (default: tail, matching training config).",
     )
     parser.add_argument(
         "--sampling-mode",
@@ -483,6 +523,63 @@ def sample_npz_files(
     rng = np.random.default_rng(sample_seed)
     sampled_indices = np.sort(rng.choice(len(npz_files), size=sample_count, replace=False))
     return [npz_files[int(index)] for index in sampled_indices]
+
+
+def resolve_val_workpiece_ids_from_zarr(
+    *,
+    zarr_path: str,
+    val_ratio: float,
+    val_split_seed: int,
+    split_by_workpiece: bool,
+    stratify_workpiece_split: bool,
+    workpiece_split_strategy: str,
+) -> set[int]:
+    """Extract validation workpiece IDs from a zarr dataset using the same split logic as training."""
+    from diffusion_policy_3d.dataset.transition_dataset import TransitionTrajectoryDataset
+    from diffusion_policy_3d.common.replay_buffer import ReplayBuffer
+
+    replay_buffer = ReplayBuffer.copy_from_path(zarr_path, keys=None)
+    _, val_mask = TransitionTrajectoryDataset._resolve_ratio_split_masks(
+        replay_buffer=replay_buffer,
+        val_ratio=val_ratio,
+        seed=val_split_seed,
+        split_by_workpiece=split_by_workpiece,
+        stratify_workpiece_split=stratify_workpiece_split,
+        simple_workpiece_id_offset=1000,
+        workpiece_split_strategy=workpiece_split_strategy,
+    )
+    episode_workpiece_ids = np.asarray(replay_buffer.meta["workpiece_ids"][:], dtype=np.int64)
+    val_workpiece_ids = set(int(wid) for wid in np.unique(episode_workpiece_ids[val_mask]))
+    print(
+        f"[Val Split] zarr={zarr_path}, val_ratio={val_ratio}, seed={val_split_seed}, "
+        f"split_by_workpiece={split_by_workpiece} -> {len(val_workpiece_ids)} validation workpiece IDs"
+    )
+    return val_workpiece_ids
+
+
+def filter_npz_files_by_workpiece_ids(
+    npz_files: list[pathlib.Path],
+    input_dirs: list[pathlib.Path],
+    val_workpiece_ids: set[int],
+    simple_workpiece_id_offset: int = 1000,
+) -> list[pathlib.Path]:
+    """Keep only NPZ files whose associated workpiece ID is in val_workpiece_ids."""
+    filtered = []
+    for npz_path in npz_files:
+        try:
+            wid = resolve_workpiece_id_from_npz(
+                npz_path=npz_path,
+                input_dirs=input_dirs,
+                simple_workpiece_id_offset=simple_workpiece_id_offset,
+            )
+            if wid in val_workpiece_ids:
+                filtered.append(npz_path)
+        except (ValueError, KeyError):
+            continue
+    print(
+        f"[Val Split] Filtered {len(npz_files)} NPZ files -> {len(filtered)} matching validation workpiece IDs"
+    )
+    return filtered
 
 
 def build_output_dir(output_root: pathlib.Path, npz_path: pathlib.Path, input_dirs: list[pathlib.Path]) -> pathlib.Path:
@@ -995,19 +1092,51 @@ def main() -> None:
         input_dirs=input_dirs,
         sample_source=args.sample_source,
     )
-    sampled_npz_files = sample_npz_files(
-        npz_files=eligible_npz_files,
-        sample_count=args.sample_count,
-        sample_seed=args.sample_seed,
-    )
+
+    val_split_enabled = bool(args.val_split)
+    if val_split_enabled:
+        if args.zarr_path is None:
+            raise ValueError("--zarr-path is required when --val-split is set")
+        zarr_path = pathlib.Path(args.zarr_path).expanduser().resolve()
+        if not zarr_path.is_dir():
+            raise FileNotFoundError(f"Zarr dataset not found: {zarr_path}")
+        val_workpiece_ids = resolve_val_workpiece_ids_from_zarr(
+            zarr_path=str(zarr_path),
+            val_ratio=args.val_ratio,
+            val_split_seed=args.val_split_seed,
+            split_by_workpiece=not args.no_split_by_workpiece,
+            stratify_workpiece_split=not args.no_stratify_workpiece_split,
+            workpiece_split_strategy=args.workpiece_split_strategy,
+        )
+        eligible_npz_files = filter_npz_files_by_workpiece_ids(
+            npz_files=eligible_npz_files,
+            input_dirs=input_dirs,
+            val_workpiece_ids=val_workpiece_ids,
+            simple_workpiece_id_offset=args.simple_workpiece_id_offset,
+        )
+        sampled_npz_files = sample_npz_files(
+            npz_files=eligible_npz_files,
+            sample_count=args.sample_count,
+            sample_seed=args.sample_seed,
+        )
+    else:
+        sampled_npz_files = sample_npz_files(
+            npz_files=eligible_npz_files,
+            sample_count=args.sample_count,
+            sample_seed=args.sample_seed,
+        )
+
     sampled_manifest = {
         "input_dirs": [str(path) for path in input_dirs],
         "sample_source": str(args.sample_source),
-        "sample_count": int(args.sample_count),
+        "sample_count": int(len(sampled_npz_files)),
         "sample_seed": int(args.sample_seed),
         "raw_discovered_count": len(discovered_npz_files),
         "eligible_count": len(eligible_npz_files),
         "sampled_npz_paths": [str(path) for path in sampled_npz_files],
+        "val_split_enabled": val_split_enabled,
+        "val_ratio": float(args.val_ratio) if val_split_enabled else None,
+        "val_split_seed": int(args.val_split_seed) if val_split_enabled else None,
     }
     with open(output_root / "sampled_npz_manifest.json", "w", encoding="utf-8") as f:
         json.dump(sampled_manifest, f, indent=2)
@@ -1028,9 +1157,12 @@ def main() -> None:
         "stats_path": str(stats_path),
         "output_root": str(output_root),
         "sample_source": str(args.sample_source),
-        "sample_count": int(args.sample_count),
+        "sample_count": int(len(sampled_npz_files)),
         "sample_seed": int(args.sample_seed),
         "sampling_mode": effective_mode,
+        "val_split_enabled": val_split_enabled,
+        "val_ratio": float(args.val_ratio) if val_split_enabled else None,
+        "val_split_seed": int(args.val_split_seed) if val_split_enabled else None,
         "candidate_pool_enabled": bool(effective_mode in {"candidate", "compare"}),
         "candidate_selection": str(args.candidate_selection),
         "num_candidates": int(args.num_candidates if effective_mode in {"candidate", "compare"} else 1),
