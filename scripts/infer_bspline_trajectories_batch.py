@@ -337,8 +337,6 @@ def inject_cspace_feature(
     cspace_feature = np.asarray(cspace_feature, dtype=np.float32)
     raw_obs["cspace_feature"] = cspace_feature.copy()
     obs_value = np.expand_dims(cspace_feature, axis=0)
-    obs_value = np.expand_dims(obs_value, axis=0)
-    obs_value = np.repeat(obs_value, n_obs_steps, axis=1)
     obs_dict["cspace_feature"] = torch.from_numpy(obs_value).to(device)
 
 
