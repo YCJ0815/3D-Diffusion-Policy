@@ -1198,9 +1198,9 @@ class PyBulletCollisionValidator:
 class PyBulletValidationRunner:
     def __init__(self, cfg: PyBulletValidationConfig):
         self.cfg = cfg
-        if self.cfg.target_steps != 32:
+        if self.cfg.target_steps not in (32, 64):
             raise ValueError(
-                "PyBullet multi-candidate validation requires target_steps=32, "
+                "PyBullet multi-candidate validation requires target_steps=32 or 64, "
                 f"got {self.cfg.target_steps}"
             )
         if self.cfg.interpolate_for_collision:
