@@ -308,7 +308,7 @@ def _build_pybullet_config(
             pyb_cfg_raw.get("collision_distance_threshold", 0.0)
         ),
         interpolate_for_collision=bool(
-            pyb_cfg_raw.get("interpolate_for_collision", True)
+            pyb_cfg_raw.get("interpolate_for_collision", False)
         ),
         max_joint_step_rad=float(pyb_cfg_raw.get("max_joint_step_rad", 0.01)),
         min_interpolated_steps_per_segment=int(
