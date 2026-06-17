@@ -1,0 +1,156 @@
+import importlib.util
+import pathlib
+import random
+import sys
+import tempfile
+import types
+import unittest
+
+
+def _install_import_stubs() -> None:
+    class _FakeRNG:
+        def __init__(self, seed: int):
+            self._rng = random.Random(seed)
+
+        def choice(self, population_size: int, size: int, replace: bool = False):
+            if replace:
+                return [self._rng.randrange(population_size) for _ in range(size)]
+            return self._rng.sample(range(population_size), size)
+
+    numpy_stub = types.ModuleType("numpy")
+    numpy_stub.random = types.SimpleNamespace(default_rng=lambda seed: _FakeRNG(seed))
+    numpy_stub.float32 = float
+    numpy_stub.ndarray = object
+    numpy_stub.asarray = lambda value, dtype=None: value
+    numpy_stub.sort = sorted
+    numpy_stub.load = lambda *args, **kwargs: None
+    numpy_stub.save = lambda *args, **kwargs: None
+    sys.modules.setdefault("numpy", numpy_stub)
+
+    torch_stub = types.ModuleType("torch")
+    torch_stub.device = lambda name: name
+    torch_stub.no_grad = lambda: types.SimpleNamespace(__enter__=lambda self: None, __exit__=lambda self, exc_type, exc, tb: False)
+    torch_stub.Generator = object
+    sys.modules.setdefault("torch", torch_stub)
+
+    train_stub = types.ModuleType("train")
+    train_stub.TrainDP3Workspace = object
+    sys.modules.setdefault("train", train_stub)
+
+    bspline_stub = types.ModuleType("diffusion_policy_3d.common.bspline")
+    bspline_stub._resolve_free_control_point_slice = lambda num_control_points: slice(1, num_control_points - 1)
+    bspline_stub.fit_quintic_bspline_to_npz_trajectory = lambda **kwargs: None
+    bspline_stub.load_delta_w_stats = lambda path: (None, None)
+    bspline_stub.reconstruct_trajectory_from_normalized_free_residual = lambda **kwargs: None
+    bspline_stub.unnormalize_joint_trajectory_with_urdf_limits = lambda **kwargs: None
+    sys.modules.setdefault("diffusion_policy_3d.common.bspline", bspline_stub)
+
+    input_data_stub = types.ModuleType("diffusion_policy_3d.common.input_data")
+    input_data_stub.load_bspline_planning_input_data = lambda **kwargs: None
+    sys.modules.setdefault("diffusion_policy_3d.common.input_data", input_data_stub)
+
+    single_infer_stub = types.ModuleType("infer_bspline_trajectory")
+    single_infer_stub.build_obs_dict = lambda **kwargs: ({}, {})
+    single_infer_stub.ensure_dir = lambda path: path
+    single_infer_stub.save_joint_plot = lambda **kwargs: None
+    sys.modules.setdefault("infer_bspline_trajectory", single_infer_stub)
+
+
+def _load_module():
+    _install_import_stubs()
+    module_path = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "infer_bspline_trajectories_batch.py"
+    spec = importlib.util.spec_from_file_location("infer_bspline_trajectories_batch", module_path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+class InferBsplineTrajectoriesBatchTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.module = _load_module()
+
+    def test_parser_supports_random_regular_sampling_and_candidate_compare_flags(self):
+        parser = self.module.build_parser()
+        args = parser.parse_args(
+            [
+                "--input-dirs",
+                "/tmp/results",
+                "--checkpoint-path",
+                "/tmp/model.ckpt",
+                "--stats-path",
+                "/tmp/stats.npz",
+                "--output-root",
+                "/tmp/out",
+                "--sample-source",
+                "regular",
+                "--sample-count",
+                "10",
+                "--sample-seed",
+                "42",
+                "--sampling-mode",
+                "compare",
+                "--num-candidates",
+                "32",
+                "--candidate-seed",
+                "7",
+            ]
+        )
+
+        self.assertEqual(args.sample_source, "regular")
+        self.assertEqual(args.sample_count, 10)
+        self.assertEqual(args.sample_seed, 42)
+        self.assertEqual(args.sampling_mode, "compare")
+        self.assertEqual(args.num_candidates, 32)
+        self.assertEqual(args.candidate_seed, 7)
+
+    def test_filter_npz_files_by_source_keeps_only_regular_jobs(self):
+        module = self.module
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            regular_dir = root / "results"
+            simple_dir = root / "simple_results"
+            regular_dir.mkdir()
+            simple_dir.mkdir()
+            regular_npz = regular_dir / "job_001" / "transition_a.npz"
+            simple_npz = simple_dir / "job_1001" / "transition_b.npz"
+            regular_npz.parent.mkdir()
+            simple_npz.parent.mkdir()
+            regular_npz.touch()
+            simple_npz.touch()
+
+            filtered = module.filter_npz_files_by_source(
+                [regular_npz.resolve(), simple_npz.resolve()],
+                [regular_dir.resolve(), simple_dir.resolve()],
+                "regular",
+            )
+
+        self.assertEqual(filtered, [regular_npz.resolve()])
+
+    def test_sample_npz_files_returns_deterministic_non_adjacent_subset(self):
+        module = self.module
+        paths = [pathlib.Path(f"/tmp/job_{idx:03d}/transition_{idx:03d}.npz") for idx in range(20)]
+
+        sampled_once = module.sample_npz_files(paths, sample_count=10, sample_seed=42)
+        sampled_twice = module.sample_npz_files(paths, sample_count=10, sample_seed=42)
+
+        self.assertEqual(sampled_once, sampled_twice)
+        self.assertEqual(len(sampled_once), 10)
+        self.assertEqual(len(set(sampled_once)), 10)
+        self.assertNotEqual(sampled_once, paths[:10])
+
+    def test_resolve_sampling_mode_promotes_candidate_flag_and_compare(self):
+        module = self.module
+
+        baseline_args = types.SimpleNamespace(sampling_mode="baseline", enable_candidate_pool=False)
+        candidate_args = types.SimpleNamespace(sampling_mode="baseline", enable_candidate_pool=True)
+        compare_args = types.SimpleNamespace(sampling_mode="compare", enable_candidate_pool=False)
+
+        self.assertEqual(module.resolve_sampling_mode(baseline_args), "baseline")
+        self.assertEqual(module.resolve_sampling_mode(candidate_args), "candidate")
+        self.assertEqual(module.resolve_sampling_mode(compare_args), "compare")
+
+
+if __name__ == "__main__":
+    unittest.main()
