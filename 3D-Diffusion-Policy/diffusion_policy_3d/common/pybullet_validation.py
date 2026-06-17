@@ -1231,10 +1231,12 @@ class PyBulletValidationRunner:
                 f"got {self.cfg.selection_d_safe}"
             )
         if self.cfg.num_candidates > 1 and self.cfg.diffusion_sampling_seed is None:
-            raise ValueError(
-                "training.pybullet_eval.diffusion_sampling_seed is required "
-                "for deterministic multi-candidate validation."
+            import warnings
+            warnings.warn(
+                "training.pybullet_eval.diffusion_sampling_seed is not set — "
+                "defaulting to 42 for deterministic multi-candidate validation."
             )
+            self.cfg.diffusion_sampling_seed = 42
         self.validator = PyBulletCollisionValidator(cfg)
         if self.validator.stats_mode != "bspline":
             raise ValueError(
