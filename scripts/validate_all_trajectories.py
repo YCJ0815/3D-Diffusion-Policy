@@ -32,6 +32,7 @@ if str(_PACKAGE_ROOT) not in sys.path:
 from train import TrainDP3Workspace  # noqa: E402
 from train_cspace import TrainDP3CSpaceWorkspace  # noqa: E402
 from diffusion_policy_3d.common.pybullet_validation import (  # noqa: E402
+    PyBulletCollisionValidator,
     PyBulletValidationConfig,
     PyBulletValidationRunner,
     _episode_bounds,
@@ -765,8 +766,12 @@ def main() -> None:
     print(f"  candidate_action_noise_std={pyb_cfg.candidate_action_noise_std}")
     print(f"  candidate_action_noise_clip={pyb_cfg.candidate_action_noise_clip}")
     print(f"  candidate_pool={args.candidate_pool}")
-    runner = PyBulletValidationRunner(pyb_cfg)
-    validator = runner.validator
+    if candidate_pool_enabled:
+        runner = PyBulletValidationRunner(pyb_cfg)
+        validator = runner.validator
+    else:
+        runner = None
+        validator = PyBulletCollisionValidator(pyb_cfg)
 
     val_episode_indices = _filter_episode_indices_by_job_type(
         val_episode_indices,
@@ -923,7 +928,10 @@ def main() -> None:
                     f"step_collision_rate_so_far={step_collision_rate_so_far:.3f}"
                 )
 
-    runner.close()
+    if runner is not None:
+        runner.close()
+    else:
+        validator.close()
 
     total = float(len(per_traj_metrics))
     traj_collision_rate = collision_count / total if total > 0 else 0.0
