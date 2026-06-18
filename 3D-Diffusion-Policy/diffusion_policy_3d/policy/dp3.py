@@ -20,6 +20,7 @@ from diffusion_policy_3d.model.diffusion.differentiable_trajectory_loss import (
 )
 from diffusion_policy_3d.common.pytorch_util import dict_apply
 from diffusion_policy_3d.common.model_util import print_params
+from diffusion_policy_3d.common.surface_cbf_qp_guidance import SamplingContext, guided_policy_sample
 from diffusion_policy_3d.model.vision.pointnet_extractor import DP3Encoder
 
 class DP3(BasePolicy):
@@ -233,6 +234,105 @@ class DP3(BasePolicy):
 
 
         return trajectory
+
+    def _build_inference_sampling_context(self, obs_dict: Dict[str, torch.Tensor]) -> tuple[SamplingContext, dict]:
+        nobs = self.normalizer.normalize(obs_dict)
+        if not self.use_pc_color:
+            nobs['point_cloud'] = nobs['point_cloud'][..., :3]
+
+        value = next(iter(nobs.values()))
+        batch_size = value.shape[0]
+        obs_steps = self.n_obs_steps
+        horizon = self.horizon
+        action_dim = self.action_dim
+        obs_feature_dim = self.obs_feature_dim
+        device = self.device
+        dtype = self.dtype
+
+        local_cond = None
+        global_cond = None
+        if self.obs_as_global_cond:
+            this_nobs = dict_apply(nobs, lambda x: x[:, :obs_steps, ...].reshape(-1, *x.shape[2:]))
+            nobs_features = self.obs_encoder(this_nobs)
+            if "cross_attention" in self.condition_type:
+                global_cond = nobs_features.reshape(batch_size, self.n_obs_steps, -1)
+            else:
+                global_cond = nobs_features.reshape(batch_size, -1)
+            cond_data = torch.zeros(size=(batch_size, horizon, action_dim), device=device, dtype=dtype)
+            cond_mask = torch.zeros_like(cond_data, dtype=torch.bool)
+        else:
+            this_nobs = dict_apply(nobs, lambda x: x[:, :obs_steps, ...].reshape(-1, *x.shape[2:]))
+            nobs_features = self.obs_encoder(this_nobs)
+            nobs_features = nobs_features.reshape(batch_size, obs_steps, -1)
+            cond_data = torch.zeros(size=(batch_size, horizon, action_dim + obs_feature_dim), device=device, dtype=dtype)
+            cond_mask = torch.zeros_like(cond_data, dtype=torch.bool)
+            cond_data[:, :obs_steps, action_dim:] = nobs_features
+            cond_mask[:, :obs_steps, action_dim:] = True
+
+        return SamplingContext(
+            condition_data=cond_data,
+            condition_mask=cond_mask,
+            local_cond=local_cond,
+            global_cond=global_cond,
+        ), {
+            "batch_size": int(batch_size),
+            "obs_steps": int(obs_steps),
+            "action_dim": int(action_dim),
+        }
+
+    def sample_with_surface_cbf_qp_guidance(
+        self,
+        obs_dict: Dict[str, torch.Tensor],
+        *,
+        q_start_normalized,
+        q_goal_normalized,
+        delta_w_mean,
+        delta_w_std,
+        num_control_points: int,
+        spline_degree: int,
+        guidance_runner,
+        generator=None,
+        num_inference_steps=None,
+        scheduler_step_kwargs=None,
+    ) -> Dict[str, torch.Tensor]:
+        sampling_context, meta = self._build_inference_sampling_context(obs_dict)
+        if int(meta["batch_size"]) != 1:
+            raise ValueError(
+                "surface CBF-QP guided sampling currently expects batch_size=1, "
+                f"got {meta['batch_size']}"
+            )
+        scheduler_kwargs = dict(self.kwargs)
+        scheduler_kwargs.update(scheduler_step_kwargs or {})
+        guidance_result = guided_policy_sample(
+            policy=self,
+            context=sampling_context,
+            q_start_normalized=q_start_normalized,
+            q_goal_normalized=q_goal_normalized,
+            delta_w_mean=delta_w_mean,
+            delta_w_std=delta_w_std,
+            num_control_points=int(num_control_points),
+            spline_degree=int(spline_degree),
+            guidance_runner=guidance_runner,
+            generator=generator,
+            num_inference_steps=num_inference_steps,
+            scheduler_step_kwargs=scheduler_kwargs,
+        )
+        naction_pred = torch.from_numpy(guidance_result.best_normalized_free_residual).to(
+            device=self.device,
+            dtype=self.dtype,
+        ).unsqueeze(0)
+        action_pred = self.normalizer['action'].unnormalize(naction_pred)
+        start = int(meta["obs_steps"]) - 1
+        end = start + self.n_action_steps
+        action = action_pred[:, start:end]
+        return {
+            'action': action,
+            'action_pred': action_pred,
+            'guidance_log': guidance_result.log.to_dict(),
+            'guidance_candidates': guidance_result.candidate_infos,
+            'guided_control_points_normalized': guidance_result.best_control_points_normalized,
+            'guided_joint_trajectory': guidance_result.best_joint_trajectory,
+        }
 
 
     def predict_action(

@@ -215,6 +215,60 @@ def build_parser() -> argparse.ArgumentParser:
         default="workpiece_ids.npy",
         help="Filename of the workpiece ID array aligned with the C-space features.",
     )
+    parser.add_argument(
+        "--enable-surface-cbf-qp-guidance",
+        action="store_true",
+        help="Enable the independent late-stage surface-sample CBF-QP guided denoising path.",
+    )
+    parser.add_argument(
+        "--guidance-steps",
+        type=int,
+        default=5,
+        help="Number of final denoising steps that run surface-sample CBF-QP guidance.",
+    )
+    parser.add_argument(
+        "--guidance-qp-candidates",
+        type=int,
+        default=4,
+        help="How many near-collision candidates to project with QP per guidance step.",
+    )
+    parser.add_argument(
+        "--guidance-active-constraints",
+        type=int,
+        default=16,
+        help="Maximum number of active surface constraints kept in each guidance QP.",
+    )
+    parser.add_argument(
+        "--guidance-check-steps",
+        type=int,
+        default=64,
+        help="Dense B-spline evaluation steps used during per-step guidance collision checks.",
+    )
+    parser.add_argument(
+        "--guidance-cert-steps",
+        type=int,
+        default=256,
+        help="Dense B-spline evaluation steps used for the final certificate check.",
+    )
+    parser.add_argument(
+        "--guidance-cert-swept-intermediate",
+        type=int,
+        default=3,
+        help="Number of swept interpolation points inserted between adjacent certificate waypoints.",
+    )
+    parser.add_argument("--guidance-d-safe", type=float, default=0.03)
+    parser.add_argument("--guidance-d-trigger", type=float, default=0.06)
+    parser.add_argument("--guidance-d-cert", type=float, default=0.01)
+    parser.add_argument("--guidance-eps-deep", type=float, default=0.03)
+    parser.add_argument("--guidance-delta-max", type=float, default=0.05)
+    parser.add_argument("--guidance-lambda-s", type=float, default=0.25)
+    parser.add_argument("--guidance-rho", type=float, default=1.0e5)
+    parser.add_argument(
+        "--guidance-ddim-eta",
+        type=float,
+        default=0.0,
+        help="Deterministic DDIM eta used during the guided denoising tail.",
+    )
     parser.add_argument("--skip-existing", action="store_true", help="Skip samples whose summary.json already exists.")
     return parser
 
@@ -252,6 +306,17 @@ def validate_args(args) -> None:
     if args.candidate_action_noise_clip is not None and args.candidate_action_noise_clip <= 0.0:
         raise ValueError(
             f"candidate-action-noise-clip must be positive when provided, got {args.candidate_action_noise_clip}"
+        )
+    if args.guidance_steps <= 0:
+        raise ValueError(f"guidance-steps must be positive, got {args.guidance_steps}")
+    if args.guidance_qp_candidates <= 0:
+        raise ValueError(
+            f"guidance-qp-candidates must be positive, got {args.guidance_qp_candidates}"
+        )
+    if args.guidance_active_constraints <= 0:
+        raise ValueError(
+            "guidance-active-constraints must be positive, "
+            f"got {args.guidance_active_constraints}"
         )
     if resolve_sampling_mode(args) in {"candidate", "compare"} and args.candidate_selection == "weighted_sdf":
         if args.jobs_root is None:
@@ -665,9 +730,12 @@ class CandidateValidatorWrapper:
 
 
 def build_candidate_validator(args) -> CandidateValidatorWrapper | None:
-    if resolve_sampling_mode(args) not in {"candidate", "compare"}:
-        return None
-    if args.candidate_selection == "first":
+    needs_guidance_validator = bool(args.enable_surface_cbf_qp_guidance)
+    needs_candidate_validator = (
+        resolve_sampling_mode(args) in {"candidate", "compare"}
+        and args.candidate_selection != "first"
+    )
+    if not (needs_guidance_validator or needs_candidate_validator):
         return None
     return CandidateValidatorWrapper(args)
 
@@ -690,6 +758,84 @@ def predict_action_outputs(
     return {
         "pred_action_window": result["action"][0].detach().cpu().numpy().astype(np.float32),
         "pred_action_horizon": result["action_pred"][0].detach().cpu().numpy().astype(np.float32),
+    }
+
+
+def predict_surface_cbf_qp_guided_outputs(
+    *,
+    npz_path: pathlib.Path,
+    obs_dict: dict,
+    policy,
+    args,
+    stats_mean: np.ndarray,
+    stats_std: np.ndarray,
+    candidate_validator: CandidateValidatorWrapper,
+    workpiece_id: int,
+    generator=None,
+) -> tuple[dict[str, np.ndarray], dict]:
+    from diffusion_policy_3d.common.input_data import load_bspline_planning_input_data
+    from diffusion_policy_3d.common.surface_cbf_qp_guidance import (
+        PyBulletSurfaceEnvironmentAdapter,
+        SurfaceCBFQPGuidanceConfig,
+        SurfaceCBFQPGuidanceRunner,
+    )
+
+    planning_result = load_bspline_planning_input_data(
+        npz_path=str(npz_path),
+        norm=args.norm_m,
+        urdf_path=args.urdf_path,
+    )
+    environment = PyBulletSurfaceEnvironmentAdapter(
+        validator=candidate_validator.validator,
+        workpiece_id=workpiece_id,
+        joint_lower_limits=planning_result.joint_lower_limits,
+        joint_upper_limits=planning_result.joint_upper_limits,
+    )
+    guidance_config = SurfaceCBFQPGuidanceConfig(
+        enabled=True,
+        num_candidates=int(args.num_candidates),
+        guidance_steps=int(args.guidance_steps),
+        qp_candidates=int(args.guidance_qp_candidates),
+        active_constraints=int(args.guidance_active_constraints),
+        check_steps=int(args.guidance_check_steps),
+        cert_steps=int(args.guidance_cert_steps),
+        cert_swept_intermediate=int(args.guidance_cert_swept_intermediate),
+        d_safe=float(args.guidance_d_safe),
+        d_trigger=float(args.guidance_d_trigger),
+        d_cert=float(args.guidance_d_cert),
+        eps_deep=float(args.guidance_eps_deep),
+        delta_max=float(args.guidance_delta_max),
+        lambda_s=float(args.guidance_lambda_s),
+        rho=float(args.guidance_rho),
+        ddim_eta=float(args.guidance_ddim_eta),
+    )
+    guidance_runner = SurfaceCBFQPGuidanceRunner(
+        config=guidance_config,
+        environment=environment,
+    )
+    with torch.no_grad():
+        result = policy.sample_with_surface_cbf_qp_guidance(
+            obs_dict,
+            q_start_normalized=planning_result.first_joint_angles_normalized,
+            q_goal_normalized=planning_result.last_joint_angles_normalized,
+            delta_w_mean=stats_mean,
+            delta_w_std=stats_std,
+            num_control_points=int(args.num_control_points),
+            spline_degree=int(args.spline_degree),
+            guidance_runner=guidance_runner,
+            generator=generator,
+            num_inference_steps=args.candidate_inference_steps,
+            scheduler_step_kwargs={"eta": float(args.guidance_ddim_eta)},
+        )
+    return {
+        "pred_action_window": result["action"][0].detach().cpu().numpy().astype(np.float32),
+        "pred_action_horizon": result["action_pred"][0].detach().cpu().numpy().astype(np.float32),
+    }, {
+        "planning_result": planning_result,
+        "guidance_log": result.get("guidance_log", {}),
+        "guided_joint_trajectory": result.get("guided_joint_trajectory"),
+        "guided_control_points_normalized": result.get("guided_control_points_normalized"),
+        "guidance_candidates": result.get("guidance_candidates", []),
     }
 
 
@@ -940,25 +1086,62 @@ def run_mode_inference(
     workpiece_id = prepared_workpiece_id
     candidate_scores: list[dict] | None = None
     selected_score: dict | None = None
+    guidance_payload: dict | None = None
 
     if mode == "baseline":
-        predicted = predict_action_outputs(policy=policy, obs_dict=obs_dict)
-        artifact = reconstruct_prediction_artifacts(
-            npz_path=npz_path,
-            pred_action_window=predicted["pred_action_window"],
-            pred_action_horizon=predicted["pred_action_horizon"],
-            args=args,
-            stats_mean=stats_mean,
-            stats_std=stats_std,
-        )
-        artifact["candidate_index"] = 0
-        artifact["candidate_seed"] = None
-        workpiece_id = resolve_workpiece_id_from_npz(
-            npz_path=npz_path,
-            input_dirs=input_dirs,
-            simple_workpiece_id_offset=args.simple_workpiece_id_offset,
-        ) if candidate_validator is not None else None
-        selected_score = score_artifact_if_possible(candidate_validator=candidate_validator, workpiece_id=workpiece_id, artifact=artifact)
+        if args.enable_surface_cbf_qp_guidance and not compare_mode:
+            if candidate_validator is None:
+                raise ValueError(
+                    "surface CBF-QP guidance requires a PyBullet candidate validator / geometry backend"
+                )
+            workpiece_id = resolve_workpiece_id_from_npz(
+                npz_path=npz_path,
+                input_dirs=input_dirs,
+                simple_workpiece_id_offset=args.simple_workpiece_id_offset,
+            )
+            guided_outputs, guidance_payload = predict_surface_cbf_qp_guided_outputs(
+                npz_path=npz_path,
+                obs_dict=obs_dict,
+                policy=policy,
+                args=args,
+                stats_mean=stats_mean,
+                stats_std=stats_std,
+                candidate_validator=candidate_validator,
+                workpiece_id=workpiece_id,
+            )
+            artifact = reconstruct_prediction_artifacts(
+                npz_path=npz_path,
+                pred_action_window=guided_outputs["pred_action_window"],
+                pred_action_horizon=guided_outputs["pred_action_horizon"],
+                args=args,
+                stats_mean=stats_mean,
+                stats_std=stats_std,
+            )
+            artifact["candidate_index"] = int(guidance_payload.get("guidance_log", {}).get("best_candidate_index", 0) or 0)
+            artifact["candidate_seed"] = None
+            selected_score = score_artifact_if_possible(
+                candidate_validator=candidate_validator,
+                workpiece_id=workpiece_id,
+                artifact=artifact,
+            )
+        else:
+            predicted = predict_action_outputs(policy=policy, obs_dict=obs_dict)
+            artifact = reconstruct_prediction_artifacts(
+                npz_path=npz_path,
+                pred_action_window=predicted["pred_action_window"],
+                pred_action_horizon=predicted["pred_action_horizon"],
+                args=args,
+                stats_mean=stats_mean,
+                stats_std=stats_std,
+            )
+            artifact["candidate_index"] = 0
+            artifact["candidate_seed"] = None
+            workpiece_id = resolve_workpiece_id_from_npz(
+                npz_path=npz_path,
+                input_dirs=input_dirs,
+                simple_workpiece_id_offset=args.simple_workpiece_id_offset,
+            ) if candidate_validator is not None else None
+            selected_score = score_artifact_if_possible(candidate_validator=candidate_validator, workpiece_id=workpiece_id, artifact=artifact)
     else:
         workpiece_id = resolve_workpiece_id_from_npz(
             npz_path=npz_path,
@@ -1002,6 +1185,7 @@ def run_mode_inference(
         "mode": mode,
         "sampling_mode": resolve_sampling_mode(args),
         "candidate_pool_enabled": bool(mode == "candidate"),
+        "surface_cbf_qp_guidance_enabled": bool(mode == "baseline" and args.enable_surface_cbf_qp_guidance and not compare_mode),
         "sample_index": int(sample_index),
         "sample_source": str(args.sample_source),
         "sample_seed": int(args.sample_seed),
@@ -1016,10 +1200,13 @@ def run_mode_inference(
         "num_control_points": int(args.num_control_points),
         "spline_degree": int(args.spline_degree),
         "candidate_selection": str(args.candidate_selection if mode == "candidate" else "baseline_single"),
-        "num_candidates": int(args.num_candidates if mode == "candidate" else 1),
+        "num_candidates": int(args.num_candidates if (mode == "candidate" or args.enable_surface_cbf_qp_guidance) else 1),
         "selected_candidate_index": int(artifact.get("candidate_index", 0)),
         "selected_candidate_seed": artifact.get("candidate_seed"),
     }
+    if guidance_payload is not None:
+        metadata["surface_cbf_qp_guidance"] = guidance_payload.get("guidance_log", {})
+        metadata["guidance_candidate_count"] = len(guidance_payload.get("guidance_candidates", []))
     if selected_score is not None:
         metadata["selected_candidate_score_key"] = [
             float(selected_score["has_pen"]),

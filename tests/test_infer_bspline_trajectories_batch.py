@@ -97,6 +97,13 @@ class InferBsplineTrajectoriesBatchTests(unittest.TestCase):
                 "7",
                 "--cspace-feature-dir",
                 "/tmp/cspace",
+                "--enable-surface-cbf-qp-guidance",
+                "--guidance-steps",
+                "5",
+                "--guidance-qp-candidates",
+                "4",
+                "--guidance-active-constraints",
+                "16",
             ]
         )
 
@@ -107,6 +114,10 @@ class InferBsplineTrajectoriesBatchTests(unittest.TestCase):
         self.assertEqual(args.num_candidates, 32)
         self.assertEqual(args.candidate_seed, 7)
         self.assertEqual(args.cspace_feature_dir, "/tmp/cspace")
+        self.assertTrue(args.enable_surface_cbf_qp_guidance)
+        self.assertEqual(args.guidance_steps, 5)
+        self.assertEqual(args.guidance_qp_candidates, 4)
+        self.assertEqual(args.guidance_active_constraints, 16)
 
     def test_policy_requires_cspace_feature_detects_cspace_checkpoint(self):
         module = self.module

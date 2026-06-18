@@ -12,6 +12,7 @@ from diffusion_policy_3d.model.diffusion.simple_conditional_unet1d import Condit
 from diffusion_policy_3d.model.diffusion.differentiable_trajectory_loss import (
     combine_diffusion_and_trajectory_losses,
 )
+from diffusion_policy_3d.common.surface_cbf_qp_guidance import SamplingContext
 from diffusion_policy_3d.policy.dp3 import DP3
 from diffusion_policy_3d.policy.simple_dp3 import SimpleDP3
 
@@ -261,6 +262,28 @@ class DP3CSpace(DP3):
 
     def debug_compare_global_condition(self, obs_dict: Dict[str, torch.Tensor]) -> None:
         _debug_compare_global_cond(self, obs_dict)
+
+    def _build_inference_sampling_context(self, obs_dict: Dict[str, torch.Tensor]) -> tuple[SamplingContext, dict]:
+        normalized_obs, cspace_feature = self._split_observations(obs_dict)
+        first_value = next(iter(normalized_obs.values()))
+        batch_size = int(first_value.shape[0])
+        global_cond = self._encode_global_condition(normalized_obs, cspace_feature)
+        condition_data = torch.zeros(
+            size=(batch_size, self.horizon, self.action_dim),
+            device=self.device,
+            dtype=self.dtype,
+        )
+        condition_mask = torch.zeros_like(condition_data, dtype=torch.bool)
+        return SamplingContext(
+            condition_data=condition_data,
+            condition_mask=condition_mask,
+            local_cond=None,
+            global_cond=global_cond,
+        ), {
+            "batch_size": batch_size,
+            "obs_steps": int(self.n_obs_steps),
+            "action_dim": int(self.action_dim),
+        }
 
     def predict_action(
         self,
@@ -542,6 +565,28 @@ class SimpleDP3CSpace(SimpleDP3):
 
     def debug_compare_global_condition(self, obs_dict: Dict[str, torch.Tensor]) -> None:
         _debug_compare_global_cond(self, obs_dict)
+
+    def _build_inference_sampling_context(self, obs_dict: Dict[str, torch.Tensor]) -> tuple[SamplingContext, dict]:
+        normalized_obs, cspace_feature = self._split_observations(obs_dict)
+        first_value = next(iter(normalized_obs.values()))
+        batch_size = int(first_value.shape[0])
+        global_cond = self._encode_global_condition(normalized_obs, cspace_feature)
+        condition_data = torch.zeros(
+            size=(batch_size, self.horizon, self.action_dim),
+            device=self.device,
+            dtype=self.dtype,
+        )
+        condition_mask = torch.zeros_like(condition_data, dtype=torch.bool)
+        return SamplingContext(
+            condition_data=condition_data,
+            condition_mask=condition_mask,
+            local_cond=None,
+            global_cond=global_cond,
+        ), {
+            "batch_size": batch_size,
+            "obs_steps": int(self.n_obs_steps),
+            "action_dim": int(self.action_dim),
+        }
 
     def predict_action(
         self,
