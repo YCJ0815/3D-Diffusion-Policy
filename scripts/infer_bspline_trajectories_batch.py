@@ -3,6 +3,7 @@ import argparse
 import json
 import pathlib
 import sys
+import time
 
 import numpy as np
 import torch
@@ -1250,6 +1251,7 @@ def build_compare_summary(npz_path: pathlib.Path, baseline_summary: dict, candid
 
 
 def main() -> None:
+    inference_start_time = time.perf_counter()
     args = build_parser().parse_args()
     validate_args(args)
 
@@ -1494,6 +1496,9 @@ def main() -> None:
         with open(output_root / "compare_summary.json", "w", encoding="utf-8") as f:
             json.dump(compare_summary_payload, f, indent=2)
 
+    total_inference_time_sec = time.perf_counter() - inference_start_time
+    manifest["total_inference_time_sec"] = float(total_inference_time_sec)
+
     manifest_path = output_root / "batch_inference_manifest.json"
     with open(manifest_path, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
@@ -1503,6 +1508,7 @@ def main() -> None:
     print(f"manifest: {manifest_path}")
     print(f"processed: {len(manifest['processed'])}")
     print(f"failed: {len(manifest['failed'])}")
+    print(f"total inference time (sec): {total_inference_time_sec:.3f}")
 
 
 if __name__ == "__main__":
