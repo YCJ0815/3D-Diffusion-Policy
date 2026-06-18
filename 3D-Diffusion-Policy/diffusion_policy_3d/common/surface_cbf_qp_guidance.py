@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from typing import Any, Sequence
+import inspect
 import math
 import time
 
@@ -17,6 +18,17 @@ from diffusion_policy_3d.common.bspline import (
 
 
 DEFAULT_GUIDANCE_TARGETS = (-0.02, -0.01, -0.005, 0.0, 0.0)
+
+
+def _filter_scheduler_step_kwargs(scheduler, step_kwargs: dict[str, Any]) -> dict[str, Any]:
+    if not step_kwargs:
+        return {}
+    valid_param_names = set(inspect.signature(scheduler.step).parameters.keys())
+    return {
+        key: value
+        for key, value in step_kwargs.items()
+        if key in valid_param_names
+    }
 
 
 @dataclass
@@ -707,12 +719,13 @@ def guided_policy_sample(
     scheduler_step_kwargs: dict[str, Any] | None = None,
 ) -> GuidanceResult:
     # Independent path: keep original predict_action untouched.
-    step_kwargs = dict(scheduler_step_kwargs or {})
-    if generator is not None:
-        step_kwargs.setdefault("generator", generator)
     if num_inference_steps is None:
         num_inference_steps = int(policy.num_inference_steps)
     scheduler = policy.noise_scheduler
+    step_kwargs = dict(scheduler_step_kwargs or {})
+    if generator is not None:
+        step_kwargs.setdefault("generator", generator)
+    step_kwargs = _filter_scheduler_step_kwargs(scheduler, step_kwargs)
     scheduler.set_timesteps(int(num_inference_steps))
     timesteps = list(scheduler.timesteps)
     batch_size = int(guidance_runner.config.num_candidates)

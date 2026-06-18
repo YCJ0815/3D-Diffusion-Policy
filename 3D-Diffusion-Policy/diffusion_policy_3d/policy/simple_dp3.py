@@ -1,4 +1,5 @@
 from typing import Dict
+import inspect
 import math
 import torch
 import torch.nn as nn
@@ -175,6 +176,17 @@ class SimpleDP3(BasePolicy):
         for action_index in self.action_loss_mask_indices:
             masked_loss[..., action_index] = False
         return masked_loss
+
+    @staticmethod
+    def _filter_scheduler_step_kwargs(scheduler, step_kwargs: dict) -> dict:
+        if not step_kwargs:
+            return {}
+        valid_param_names = set(inspect.signature(scheduler.step).parameters.keys())
+        return {
+            key: value
+            for key, value in step_kwargs.items()
+            if key in valid_param_names
+        }
         
     # ========= inference  ============
     def conditional_sample(self, 
@@ -215,6 +227,7 @@ class SimpleDP3(BasePolicy):
             step_kwargs = dict(kwargs)
             if generator is not None:
                 step_kwargs.setdefault("generator", generator)
+            step_kwargs = self._filter_scheduler_step_kwargs(scheduler, step_kwargs)
             try:
                 trajectory = scheduler.step(
                     model_output, t, trajectory, **step_kwargs).prev_sample
