@@ -224,7 +224,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--guidance-steps",
         type=int,
-        default=5,
+        default=2,
         help="Number of final denoising steps that run surface-sample CBF-QP guidance.",
     )
     parser.add_argument(

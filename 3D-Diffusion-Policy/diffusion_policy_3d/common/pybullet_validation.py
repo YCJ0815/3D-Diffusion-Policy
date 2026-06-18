@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import multiprocessing as mp
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import tempfile
 import xml.etree.ElementTree as ET
@@ -421,7 +421,7 @@ class PyBulletValidationConfig:
     selection_length_weight: float = 0.005
     sdf_filename: str = "workpiece_sdf.npz"
     sdf_required: bool = True
-    robot_surface_points_per_link: int = 256
+    robot_surface_points_per_link: int | dict[str, int] = field(default_factory=lambda: {"pen_link": 80, "wrist3": 16})
     sdf_out_of_bounds_value_m: float | None = None
     log_legacy_pybullet_metrics: bool = True
     collision_log_path: str | None = None
@@ -501,7 +501,9 @@ class PyBulletValidationConfig:
             ),
             sdf_filename=str(cfg.get("sdf_filename", "workpiece_sdf.npz")),
             sdf_required=bool(cfg.get("sdf_required", True)),
-            robot_surface_points_per_link=int(cfg.get("robot_surface_points_per_link", 256)),
+            robot_surface_points_per_link=(
+                cfg.get("robot_surface_points_per_link", {"pen_link": 80, "wrist3": 16})
+            ),
             sdf_out_of_bounds_value_m=(
                 None if sdf_out_of_bounds_value_m is None else float(sdf_out_of_bounds_value_m)
             ),
@@ -603,11 +605,24 @@ class PyBulletCollisionValidator:
             self.stats_mean, self.stats_std = load_delta_w_stats(self.cfg.stats_path)
         else:
             self.stats_mean, self.stats_std = load_increment_stats(self.cfg.stats_path)
-        if self.cfg.robot_surface_points_per_link <= 0:
-            raise ValueError(
-                "training.pybullet_eval.robot_surface_points_per_link must be positive, "
-                f"got {self.cfg.robot_surface_points_per_link}"
-            )
+        if isinstance(self.cfg.robot_surface_points_per_link, int):
+            if self.cfg.robot_surface_points_per_link <= 0:
+                raise ValueError(
+                    "training.pybullet_eval.robot_surface_points_per_link must be positive, "
+                    f"got {self.cfg.robot_surface_points_per_link}"
+                )
+        elif isinstance(self.cfg.robot_surface_points_per_link, dict):
+            if not self.cfg.robot_surface_points_per_link:
+                raise ValueError(
+                    "training.pybullet_eval.robot_surface_points_per_link dict is empty. "
+                    "Provide at least one link name with a positive count."
+                )
+            for link_name, count in self.cfg.robot_surface_points_per_link.items():
+                if int(count) <= 0:
+                    raise ValueError(
+                        f"training.pybullet_eval.robot_surface_points_per_link "
+                        f"count for link '{link_name}' must be positive, got {count}"
+                    )
         self.workpiece_cache: dict[int, int] = {}
         self.workpiece_stl_path_cache: dict[int, Path] = {}
         self.sdf_cache: dict[int, SDFGrid] = {}
@@ -716,7 +731,7 @@ class PyBulletCollisionValidator:
     def _build_robot_collision_surface_points(
         self,
         resolved_urdf_path: str,
-        points_per_link: int,
+        points_per_link: int | dict[str, int],
     ) -> dict[int, np.ndarray]:
         try:
             import trimesh
@@ -724,6 +739,11 @@ class PyBulletCollisionValidator:
             raise ModuleNotFoundError(
                 "SDF validation requires `trimesh` to sample robot collision geometry."
             ) from exc
+
+        def _resolve_points(link_name: str) -> int:
+            if isinstance(points_per_link, int):
+                return int(points_per_link)
+            return int(points_per_link.get(link_name, 0))
 
         package_roots = [Path(root).expanduser().resolve() for root in self.cfg.urdf_package_roots]
         package_roots.append(Path(resolved_urdf_path).expanduser().resolve().parent)
@@ -788,7 +808,7 @@ class PyBulletCollisionValidator:
 
             if link_candidates:
                 merged = np.concatenate(link_candidates, axis=0)
-                selected = _select_deterministic_surface_points(merged, points_per_link)
+                selected = _select_deterministic_surface_points(merged, _resolve_points(link_name))
                 points_by_link.setdefault(link_index, []).append(selected)
 
         return {

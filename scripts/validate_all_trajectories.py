@@ -197,6 +197,63 @@ def build_parser() -> argparse.ArgumentParser:
             "below simple_workpiece_id_offset are kept; simple jobs are excluded."
         ),
     )
+    parser.add_argument(
+        "--enable-surface-cbf-qp-guidance",
+        action="store_true",
+        help=(
+            "Use the late-stage surface-sample CBF-QP guided denoising path during "
+            "validation inference instead of the standard predict_action/candidate-pool path."
+        ),
+    )
+    parser.add_argument(
+        "--guidance-steps",
+        type=int,
+        default=2,
+        help="Number of final denoising steps that run surface-sample CBF-QP guidance.",
+    )
+    parser.add_argument(
+        "--guidance-qp-candidates",
+        type=int,
+        default=4,
+        help="How many near-collision candidates to project with QP per guidance step.",
+    )
+    parser.add_argument(
+        "--guidance-active-constraints",
+        type=int,
+        default=16,
+        help="Maximum number of active surface constraints kept in each guidance QP.",
+    )
+    parser.add_argument(
+        "--guidance-check-steps",
+        type=int,
+        default=64,
+        help="Dense B-spline evaluation steps used during per-step guidance collision checks.",
+    )
+    parser.add_argument(
+        "--guidance-cert-steps",
+        type=int,
+        default=256,
+        help="Dense B-spline evaluation steps used for the final certificate check.",
+    )
+    parser.add_argument(
+        "--guidance-cert-swept-intermediate",
+        type=int,
+        default=3,
+        help="Number of swept interpolation points inserted between adjacent certificate waypoints.",
+    )
+    parser.add_argument("--guidance-d-safe", type=float, default=0.03)
+    parser.add_argument("--guidance-d-trigger", type=float, default=0.06)
+    parser.add_argument("--guidance-d-cert", type=float, default=0.01)
+    parser.add_argument("--guidance-eps-deep", type=float, default=0.03)
+    parser.add_argument("--guidance-delta-max", type=float, default=0.05)
+    parser.add_argument("--guidance-lambda-s", type=float, default=0.25)
+    parser.add_argument("--guidance-rho", type=float, default=1.0e5)
+    parser.add_argument(
+        "--guidance-ddim-eta",
+        type=float,
+        default=0.0,
+        help="Deterministic DDIM eta used during the guided denoising tail.",
+    )
     return parser
 
 
@@ -367,8 +424,8 @@ def _build_pybullet_config(
         ),
         sdf_filename=str(pyb_cfg_raw.get("sdf_filename", "workpiece_sdf.npz")),
         sdf_required=bool(pyb_cfg_raw.get("sdf_required", True)),
-        robot_surface_points_per_link=int(
-            pyb_cfg_raw.get("robot_surface_points_per_link", 256)
+        robot_surface_points_per_link=(
+            pyb_cfg_raw.get("robot_surface_points_per_link", {"pen_link": 80, "wrist3": 16})
         ),
         sdf_out_of_bounds_value_m=pyb_cfg_raw.get("sdf_out_of_bounds_value_m"),
         log_legacy_pybullet_metrics=bool(
@@ -473,6 +530,128 @@ def _filter_episode_indices_by_job_type(
         if int(workpiece_ids[int(episode_idx)]) < int(simple_workpiece_id_offset)
     ]
     return np.asarray(filtered_episode_indices, dtype=np.int64)
+
+
+def _predict_surface_cbf_qp_guided(
+    *,
+    policy,
+    validator,
+    pyb_cfg: PyBulletValidationConfig,
+    obs_dict: dict[str, torch.Tensor],
+    raw_obs: dict[str, np.ndarray],
+    workpiece_id: int,
+    device: torch.device,
+    args,
+    batch_start: int = 0,
+    num_candidates_override: Optional[int] = None,
+    measure_inference_time: bool = False,
+) -> dict[str, object]:
+    from diffusion_policy_3d.common.surface_cbf_qp_guidance import (
+        PyBulletSurfaceEnvironmentAdapter,
+        SurfaceCBFQPGuidanceConfig,
+        SurfaceCBFQPGuidanceRunner,
+    )
+
+    if validator.stats_mode != "bspline":
+        raise ValueError(
+            "Surface CBF-QP guidance currently requires bspline stats mode, "
+            f"got {validator.stats_mode!r}."
+        )
+
+    num_candidates = (
+        int(num_candidates_override)
+        if num_candidates_override is not None
+        else int(pyb_cfg.num_candidates)
+    )
+    if num_candidates <= 0:
+        raise ValueError(f"num_candidates must be positive for guidance, got {num_candidates}")
+
+    base_seed = int((pyb_cfg.diffusion_sampling_seed or 0) + int(batch_start))
+    generator = torch.Generator(device=device)
+    generator.manual_seed(base_seed)
+
+    environment = PyBulletSurfaceEnvironmentAdapter(
+        validator=validator,
+        workpiece_id=int(workpiece_id),
+        joint_lower_limits=np.asarray(validator.joint_lower_limits, dtype=np.float32),
+        joint_upper_limits=np.asarray(validator.joint_upper_limits, dtype=np.float32),
+    )
+    guidance_config = SurfaceCBFQPGuidanceConfig(
+        enabled=True,
+        num_candidates=int(num_candidates),
+        guidance_steps=int(args.guidance_steps),
+        qp_candidates=int(args.guidance_qp_candidates),
+        active_constraints=int(args.guidance_active_constraints),
+        check_steps=int(args.guidance_check_steps),
+        cert_steps=int(args.guidance_cert_steps),
+        cert_swept_intermediate=int(args.guidance_cert_swept_intermediate),
+        d_safe=float(args.guidance_d_safe),
+        d_trigger=float(args.guidance_d_trigger),
+        d_cert=float(args.guidance_d_cert),
+        eps_deep=float(args.guidance_eps_deep),
+        delta_max=float(args.guidance_delta_max),
+        lambda_s=float(args.guidance_lambda_s),
+        rho=float(args.guidance_rho),
+        ddim_eta=float(args.guidance_ddim_eta),
+    )
+    guidance_runner = SurfaceCBFQPGuidanceRunner(
+        config=guidance_config,
+        environment=environment,
+    )
+
+    start_joint_normalized = raw_obs["first_joint_angles_normalized"][0].astype(np.float32)
+    end_joint_normalized = raw_obs["last_joint_angles_normalized"][0].astype(np.float32)
+    scheduler_step_kwargs = {"eta": float(args.guidance_ddim_eta)}
+
+    start_time = time.perf_counter() if measure_inference_time else None
+    result = policy.sample_with_surface_cbf_qp_guidance(
+        obs_dict,
+        q_start_normalized=start_joint_normalized,
+        q_goal_normalized=end_joint_normalized,
+        delta_w_mean=np.asarray(validator.stats_mean, dtype=np.float32),
+        delta_w_std=np.asarray(validator.stats_std, dtype=np.float32),
+        num_control_points=int(pyb_cfg.num_control_points),
+        spline_degree=int(pyb_cfg.spline_degree),
+        guidance_runner=guidance_runner,
+        generator=generator,
+        num_inference_steps=pyb_cfg.inference_num_steps,
+        scheduler_step_kwargs=scheduler_step_kwargs,
+    )
+    selected_action_horizon = (
+        result["action_pred"][0].detach().cpu().numpy().astype(np.float32)
+    )
+    selected_result = validator.reconstruct_candidate(
+        pred_action_horizon=selected_action_horizon,
+        start_joint_normalized=start_joint_normalized,
+        end_joint_normalized=end_joint_normalized,
+    )
+    selected_score_details = validator.score_candidate(
+        workpiece_id=workpiece_id,
+        normalized_control_points=selected_result["normalized_control_points"],
+        joint_trajectory=selected_result["joint_trajectory"],
+    )
+    end_time = time.perf_counter() if measure_inference_time else None
+    inference_elapsed_sec = (
+        float(end_time - start_time)
+        if measure_inference_time and start_time is not None and end_time is not None
+        else None
+    )
+    guidance_log = result.get("guidance_log", {})
+    return {
+        "candidate_pool_enabled": False,
+        "surface_cbf_qp_guidance_enabled": True,
+        "selected_candidate_idx": int(guidance_log.get("best_candidate_index", 0) or 0),
+        "selected_candidate_seed": int(base_seed),
+        "selected_action_horizon": np.asarray(selected_action_horizon, dtype=np.float32),
+        "selected_joint_trajectory": np.asarray(selected_result["joint_trajectory"], dtype=np.float32),
+        "selected_score_details": selected_score_details,
+        "candidate_score_details": [selected_score_details],
+        "candidate_seeds": [int(base_seed)],
+        "num_candidates": int(num_candidates),
+        "inference_elapsed_sec": inference_elapsed_sec,
+        "guidance_log": guidance_log,
+        "guidance_candidate_count": len(result.get("guidance_candidates", [])),
+    }
 
 
 def _predict_select_candidate(
@@ -751,11 +930,22 @@ def main() -> None:
         target_steps=resolved_target_steps,
     )
     candidate_pool_enabled = _candidate_pool_enabled(args.candidate_pool)
-    effective_num_candidates = _effective_num_candidates(
-        pyb_cfg,
-        args.num_candidates,
-        candidate_pool_enabled=candidate_pool_enabled,
+    guidance_enabled = bool(args.enable_surface_cbf_qp_guidance)
+    effective_num_candidates = (
+        int(args.num_candidates)
+        if args.num_candidates is not None
+        else (
+            int(pyb_cfg.num_candidates)
+            if guidance_enabled
+            else _effective_num_candidates(
+                pyb_cfg,
+                args.num_candidates,
+                candidate_pool_enabled=candidate_pool_enabled,
+            )
+        )
     )
+    if effective_num_candidates <= 0:
+        raise ValueError(f"effective_num_candidates must be positive, got {effective_num_candidates}")
     print(f"  num_control_points={pyb_cfg.num_control_points}")
     print(f"  stats_mode={pyb_cfg.stats_mode}")
     print(f"  jobs_root={pyb_cfg.jobs_root}")
@@ -766,6 +956,11 @@ def main() -> None:
     print(f"  candidate_action_noise_std={pyb_cfg.candidate_action_noise_std}")
     print(f"  candidate_action_noise_clip={pyb_cfg.candidate_action_noise_clip}")
     print(f"  candidate_pool={args.candidate_pool}")
+    print(f"  surface_cbf_qp_guidance={guidance_enabled}")
+    if guidance_enabled:
+        print(f"  guidance_steps={args.guidance_steps}")
+        print(f"  guidance_cert_steps={args.guidance_cert_steps}")
+        print(f"  guidance_ddim_eta={args.guidance_ddim_eta}")
     if candidate_pool_enabled:
         runner = PyBulletValidationRunner(pyb_cfg)
         validator = runner.validator
@@ -829,19 +1024,34 @@ def main() -> None:
                 policy=policy,
             )
 
-            selection = _predict_select_candidate(
-                policy=policy,
-                validator=validator,
-                pyb_cfg=pyb_cfg,
-                obs_dict=obs_dict,
-                raw_obs=raw_obs,
-                workpiece_id=wid,
-                device=device,
-                batch_start=idx,
-                num_candidates_override=args.num_candidates,
-                candidate_pool_enabled=candidate_pool_enabled,
-                measure_inference_time=bool(args.measure_inference_time),
-            )
+            if args.enable_surface_cbf_qp_guidance:
+                selection = _predict_surface_cbf_qp_guided(
+                    policy=policy,
+                    validator=validator,
+                    pyb_cfg=pyb_cfg,
+                    obs_dict=obs_dict,
+                    raw_obs=raw_obs,
+                    workpiece_id=wid,
+                    device=device,
+                    batch_start=idx,
+                    num_candidates_override=args.num_candidates,
+                    measure_inference_time=bool(args.measure_inference_time),
+                    args=args,
+                )
+            else:
+                selection = _predict_select_candidate(
+                    policy=policy,
+                    validator=validator,
+                    pyb_cfg=pyb_cfg,
+                    obs_dict=obs_dict,
+                    raw_obs=raw_obs,
+                    workpiece_id=wid,
+                    device=device,
+                    batch_start=idx,
+                    num_candidates_override=args.num_candidates,
+                    candidate_pool_enabled=candidate_pool_enabled,
+                    measure_inference_time=bool(args.measure_inference_time),
+                )
             joint_trajectory = np.asarray(
                 selection["selected_joint_trajectory"], dtype=np.float32
             )
@@ -895,9 +1105,12 @@ def main() -> None:
                 "selected_candidate_idx": int(selection["selected_candidate_idx"]),
                 "selected_candidate_seed": int(selection["selected_candidate_seed"]),
                 "candidate_pool_enabled": bool(selection["candidate_pool_enabled"]),
+                "surface_cbf_qp_guidance_enabled": bool(selection.get("surface_cbf_qp_guidance_enabled", False)),
                 "num_candidates": int(selection["num_candidates"]),
                 "selected_score": selection["selected_score_details"],
                 "inference_elapsed_sec": selection["inference_elapsed_sec"],
+                "guidance_log": selection.get("guidance_log"),
+                "guidance_candidate_count": selection.get("guidance_candidate_count"),
             }
             per_traj_metrics.append(traj_entry)
 
@@ -957,6 +1170,7 @@ def main() -> None:
             "horizon": horizon,
             "n_obs_steps": n_obs_steps,
             "candidate_pool": str(args.candidate_pool),
+            "surface_cbf_qp_guidance": bool(args.enable_surface_cbf_qp_guidance),
             "effective_num_candidates": int(effective_num_candidates),
             "candidate_selection": str(pyb_cfg.candidate_selection),
             "inference_num_steps": pyb_cfg.inference_num_steps,
@@ -965,6 +1179,20 @@ def main() -> None:
             "simple_workpiece_id_offset": int(pyb_cfg.simple_workpiece_id_offset),
             "single_episode_mode": args.single_episode_index is not None,
             "single_episode_validation_offset": args.single_episode_index,
+            "guidance_steps": int(args.guidance_steps),
+            "guidance_qp_candidates": int(args.guidance_qp_candidates),
+            "guidance_active_constraints": int(args.guidance_active_constraints),
+            "guidance_check_steps": int(args.guidance_check_steps),
+            "guidance_cert_steps": int(args.guidance_cert_steps),
+            "guidance_cert_swept_intermediate": int(args.guidance_cert_swept_intermediate),
+            "guidance_d_safe": float(args.guidance_d_safe),
+            "guidance_d_trigger": float(args.guidance_d_trigger),
+            "guidance_d_cert": float(args.guidance_d_cert),
+            "guidance_eps_deep": float(args.guidance_eps_deep),
+            "guidance_delta_max": float(args.guidance_delta_max),
+            "guidance_lambda_s": float(args.guidance_lambda_s),
+            "guidance_rho": float(args.guidance_rho),
+            "guidance_ddim_eta": float(args.guidance_ddim_eta),
         },
         "summary": {
             "total_validation_episodes": int(total),

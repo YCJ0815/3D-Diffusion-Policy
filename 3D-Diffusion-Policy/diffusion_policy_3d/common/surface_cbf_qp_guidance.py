@@ -17,7 +17,7 @@ from diffusion_policy_3d.common.bspline import (
 )
 
 
-DEFAULT_GUIDANCE_TARGETS = (-0.02, -0.01, -0.005, 0.0, 0.0)
+DEFAULT_GUIDANCE_TARGETS = (-0.02, 0.0)
 
 
 def _filter_scheduler_step_kwargs(scheduler, step_kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -35,7 +35,7 @@ def _filter_scheduler_step_kwargs(scheduler, step_kwargs: dict[str, Any]) -> dic
 class SurfaceCBFQPGuidanceConfig:
     enabled: bool = False
     num_candidates: int = 32
-    guidance_steps: int = 5
+    guidance_steps: int = 2
     qp_candidates: int = 4
     active_constraints: int = 16
     check_steps: int = 64
@@ -390,28 +390,35 @@ class SurfaceCBFQPGuidanceRunner:
             q_check_norm = check_basis @ control_points
             q_check_actual = self.environment.normalized_to_actual(q_check_norm)
             sdf_result = self.environment.collect_joint_trajectory_sdf_with_link_details(q_check_actual)
-            h_before, active_constraints = collect_active_constraints(
-                sdf_result=sdf_result,
-                d_safe=float(self.config.d_safe),
-                d_trigger=float(self.config.d_trigger),
-                max_active=int(self.config.active_constraints),
-                environment=self.environment,
-            )
+            h_before = flatten_margin_values(sdf_result, d_safe=float(self.config.d_safe))
             h_min_before = float(np.min(h_before)) if h_before.size > 0 else math.nan
             before_h_values.append(h_min_before)
             guided_control_points = control_points.copy()
             qp_success = False
             qp_result: dict[str, Any] | None = None
 
-            if active_constraints and np.isfinite(h_min_before):
+            worst_timesteps: list[int] = find_worst_trajectory_timesteps(
+                sdf_result=sdf_result,
+                d_safe=float(self.config.d_safe),
+                topk=3,
+            )
+            topk_constraints = build_topk_cbf_constraints(
+                worst_timesteps=worst_timesteps,
+                sdf_result=sdf_result,
+                check_basis=check_basis,
+                q_check_norm=q_check_norm,
+                environment=self.environment,
+            ) if worst_timesteps else []
+
+            if topk_constraints and np.isfinite(h_min_before):
                 log.num_qp_called += 1
-                log.num_active_constraints += len(active_constraints)
+                log.num_active_constraints += len(topk_constraints)
                 guidance_start = time.perf_counter()
                 qp_result = self._solve_guidance_qp(
                     control_points=control_points,
                     q_check_norm=q_check_norm,
                     q_check_actual=q_check_actual,
-                    active_constraints=active_constraints,
+                    active_constraints=topk_constraints,
                     target_margin=float(guidance_targets[-1]),
                     limit_basis=limit_basis,
                     free_slice=free_slice,
@@ -518,46 +525,64 @@ class SurfaceCBFQPGuidanceRunner:
         free_slice: slice,
     ) -> dict[str, Any] | None:
         solve_start = time.perf_counter()
-        free_indices = list(range(free_slice.start, free_slice.stop))
-        num_free = len(free_indices)
         dof = control_points.shape[1]
         num_slack = len(active_constraints)
-        if num_free <= 0 or num_slack <= 0:
+        if num_slack <= 0:
             return None
         base_control_points = np.asarray(control_points, dtype=np.float32)
+
+        # ---- identify which free control points influence the active constraints ----
+        all_free_indices = list(range(free_slice.start, free_slice.stop))
+        influencing = set()
+        for constraint in active_constraints:
+            basis_row = np.asarray(constraint["basis_row"], dtype=np.float32)
+            for cp_idx in all_free_indices:
+                if abs(float(basis_row[cp_idx])) > 1e-8:
+                    influencing.add(int(cp_idx))
+        selected_free_indices = sorted(influencing)
+        if not selected_free_indices:
+            return None
+        num_selected = len(selected_free_indices)
+        # Map selected (global) control-point indices → local QP indices 0..num_selected-1
+        selected_to_local = {cp: i for i, cp in enumerate(selected_free_indices)}
+
         d2_matrix = build_second_difference_matrix(num_control_points=base_control_points.shape[0])
-        lower_bounds = np.full(num_free * dof + num_slack, -np.inf, dtype=np.float64)
-        upper_bounds = np.full(num_free * dof + num_slack, np.inf, dtype=np.float64)
-        lower_bounds[: num_free * dof] = -float(self.config.delta_max)
-        upper_bounds[: num_free * dof] = float(self.config.delta_max)
-        lower_bounds[num_free * dof :] = 0.0
+        lower_bounds = np.full(num_selected * dof + num_slack, -np.inf, dtype=np.float64)
+        upper_bounds = np.full(num_selected * dof + num_slack, np.inf, dtype=np.float64)
+        lower_bounds[: num_selected * dof] = -float(self.config.delta_max)
+        upper_bounds[: num_selected * dof] = float(self.config.delta_max)
+        lower_bounds[num_selected * dof :] = 0.0
         joint_lower_norm = np.full(dof, -1.0, dtype=np.float32)
         joint_upper_norm = np.full(dof, 1.0, dtype=np.float32)
+        joint_scale = self.environment.joint_scale().reshape(-1)
+
         linear_rows = []
         linear_lb = []
         linear_ub = []
-        joint_scale = self.environment.joint_scale().reshape(-1)
+
+        # CBF constraints (only for the selected worst timesteps)
         for slack_index, constraint in enumerate(active_constraints):
-            row = np.zeros(num_free * dof + num_slack, dtype=np.float64)
+            row = np.zeros(num_selected * dof + num_slack, dtype=np.float64)
             g_actual = np.asarray(constraint["g_actual"], dtype=np.float32).reshape(-1)
             g_norm = g_actual * joint_scale
-            t_index = int(constraint["t_index"])
-            for local_free_index, control_index in enumerate(free_indices):
-                coeff = float(constraint["basis_row"][control_index])
-                row[local_free_index * dof : (local_free_index + 1) * dof] = coeff * g_norm.astype(np.float64)
-            row[num_free * dof + slack_index] = 1.0
+            basis_row = np.asarray(constraint["basis_row"], dtype=np.float32)
+            for cp_idx, local_idx in selected_to_local.items():
+                coeff = float(basis_row[cp_idx])
+                row[local_idx * dof : (local_idx + 1) * dof] = coeff * g_norm.astype(np.float64)
+            row[num_selected * dof + slack_index] = 1.0
             linear_rows.append(row)
             linear_lb.append(float(target_margin) - float(constraint["h_value"]))
             linear_ub.append(np.inf)
-            _ = t_index
+
+        # Joint-limit constraints (all joint-limit timesteps, but only selected control points)
         for basis_row in np.asarray(limit_basis, dtype=np.float32):
             for joint_index in range(dof):
-                upper_row = np.zeros(num_free * dof + num_slack, dtype=np.float64)
-                lower_row = np.zeros(num_free * dof + num_slack, dtype=np.float64)
-                for local_free_index, control_index in enumerate(free_indices):
-                    coeff = float(basis_row[control_index])
-                    upper_row[local_free_index * dof + joint_index] = coeff
-                    lower_row[local_free_index * dof + joint_index] = coeff
+                upper_row = np.zeros(num_selected * dof + num_slack, dtype=np.float64)
+                lower_row = np.zeros(num_selected * dof + num_slack, dtype=np.float64)
+                for cp_idx, local_idx in selected_to_local.items():
+                    coeff = float(basis_row[cp_idx])
+                    upper_row[local_idx * dof + joint_index] = coeff
+                    lower_row[local_idx * dof + joint_index] = coeff
                 current_value = float((basis_row @ base_control_points[:, joint_index]).item())
                 linear_rows.append(upper_row)
                 linear_lb.append(-np.inf)
@@ -565,6 +590,7 @@ class SurfaceCBFQPGuidanceRunner:
                 linear_rows.append(lower_row)
                 linear_lb.append(float(joint_lower_norm[joint_index] - current_value))
                 linear_ub.append(np.inf)
+
         constraints = []
         if linear_rows:
             constraints.append(
@@ -576,23 +602,24 @@ class SurfaceCBFQPGuidanceRunner:
             )
 
         def unpack(vector: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-            delta_free = np.asarray(vector[: num_free * dof], dtype=np.float64).reshape(num_free, dof)
-            slack = np.asarray(vector[num_free * dof :], dtype=np.float64)
-            return delta_free, slack
+            delta_selected = np.asarray(vector[: num_selected * dof], dtype=np.float64).reshape(num_selected, dof)
+            slack = np.asarray(vector[num_selected * dof :], dtype=np.float64)
+            return delta_selected, slack
 
         def objective(vector: np.ndarray) -> float:
-            delta_free, slack = unpack(vector)
+            delta_selected, slack = unpack(vector)
             delta_full = np.zeros_like(base_control_points, dtype=np.float64)
-            delta_full[free_slice] = delta_free
+            for cp_idx, local_idx in selected_to_local.items():
+                delta_full[cp_idx] = delta_selected[local_idx]
             control_new = base_control_points.astype(np.float64) + delta_full
             smooth_term = d2_matrix @ control_new
             return float(
-                np.sum(delta_free ** 2)
+                np.sum(delta_selected ** 2)
                 + float(self.config.lambda_s) * np.sum(smooth_term ** 2)
                 + float(self.config.rho) * np.sum(slack ** 2)
             )
 
-        x0 = np.zeros(num_free * dof + num_slack, dtype=np.float64)
+        x0 = np.zeros(num_selected * dof + num_slack, dtype=np.float64)
         try:
             result = minimize(
                 objective,
@@ -608,9 +635,10 @@ class SurfaceCBFQPGuidanceRunner:
                 "solve_time": time.perf_counter() - solve_start,
                 "error": str(exc),
             }
-        delta_free, slack = unpack(np.asarray(result.x, dtype=np.float64))
+        delta_selected, slack = unpack(np.asarray(result.x, dtype=np.float64))
         delta_full = np.zeros_like(base_control_points, dtype=np.float64)
-        delta_full[free_slice] = delta_free
+        for cp_idx, local_idx in selected_to_local.items():
+            delta_full[cp_idx] = delta_selected[local_idx]
         control_new = (base_control_points.astype(np.float64) + delta_full).astype(np.float32)
         control_new[:FIXED_CONTROL_POINTS_PER_SIDE] = base_control_points[:FIXED_CONTROL_POINTS_PER_SIDE]
         control_new[-FIXED_CONTROL_POINTS_PER_SIDE:] = base_control_points[-FIXED_CONTROL_POINTS_PER_SIDE:]
@@ -723,6 +751,87 @@ def collect_active_constraints(
                 )
     active.sort(key=lambda item: float(item["h_value"]))
     return np.asarray(all_h, dtype=np.float32), active[: int(max_active)]
+
+
+def find_worst_trajectory_timesteps(
+    *,
+    sdf_result: dict[str, Any],
+    d_safe: float,
+    topk: int = 3,
+) -> list[int]:
+    """Find the `topk` timesteps with smallest SDF along a trajectory."""
+    all_sdf = np.asarray(
+        sdf_result.get("all_sdf_values", np.empty((0, 0), dtype=np.float32)),
+        dtype=np.float32,
+    )
+    if all_sdf.size == 0:
+        return []
+    min_per_step = np.min(all_sdf, axis=1)
+    h_per_step = min_per_step - float(d_safe)
+    valid_mask = np.isfinite(h_per_step)
+    if not np.any(valid_mask):
+        return []
+    valid_indices = np.flatnonzero(valid_mask)
+    valid_h = h_per_step[valid_indices]
+    order = np.argsort(valid_h)
+    topk = min(int(topk), valid_indices.size)
+    return valid_indices[order[:topk]].tolist()
+
+
+def _flat_index_to_surface_sample(
+    surface_samples: list[dict[str, Any]],
+    flat_index: int,
+) -> dict[str, Any] | None:
+    for sample in surface_samples:
+        if int(sample.get("flat_index", -1)) == int(flat_index):
+            return sample
+    return None
+
+
+def build_topk_cbf_constraints(
+    *,
+    worst_timesteps: list[int],
+    sdf_result: dict[str, Any],
+    check_basis: np.ndarray,
+    q_check_norm: np.ndarray,
+    environment: PyBulletSurfaceEnvironmentAdapter,
+) -> list[dict[str, Any]]:
+    """Build CBF constraints for the top-k worst trajectory timesteps."""
+    all_sdf = np.asarray(sdf_result["all_sdf_values"], dtype=np.float32)
+    constraints: list[dict[str, Any]] = []
+    for t_idx in worst_timesteps:
+        if t_idx < 0 or t_idx >= all_sdf.shape[0]:
+            continue
+        step_sdf = np.asarray(all_sdf[t_idx], dtype=np.float32).reshape(-1)
+        worst_flat_idx = int(np.argmin(step_sdf))
+        sample_info = _flat_index_to_surface_sample(
+            environment.surface_samples, worst_flat_idx
+        )
+        if sample_info is None:
+            continue
+        q_norm = np.asarray(q_check_norm[t_idx], dtype=np.float32).reshape(-1)
+        q_actual = environment.normalized_to_actual(q_norm)
+        point_world = environment.surface_point_world(
+            link_index=int(sample_info["link_index"]),
+            local_point=np.asarray(sample_info["local_point"], dtype=np.float32),
+        )
+        grad_world = approximate_sdf_gradient(environment.load_sdf_grid(), point_world)
+        jacobian = environment.surface_point_jacobian(
+            link_index=int(sample_info["link_index"]),
+            local_point=np.asarray(sample_info["local_point"], dtype=np.float32),
+            q_actual=q_actual,
+        )
+        j_pos = np.asarray(jacobian[:3, :], dtype=np.float32)
+        g_actual = (j_pos.T @ grad_world.reshape(3)).astype(np.float32)
+        constraints.append({
+            "t_index": int(t_idx),
+            "h_value": float(step_sdf[worst_flat_idx]),
+            "basis_row": np.asarray(check_basis[t_idx], dtype=np.float32),
+            "g_actual": g_actual,
+            "link_index": int(sample_info["link_index"]),
+            "point_index": int(sample_info["point_index"]),
+        })
+    return constraints
 
 
 def approximate_sdf_gradient(sdf_grid, point_world: np.ndarray, eps: float = 1e-3) -> np.ndarray:
