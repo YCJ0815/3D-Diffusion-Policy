@@ -160,6 +160,54 @@ class PyBulletSurfaceEnvironmentAdapter:
             joint_trajectory=np.asarray(joint_trajectory_actual, dtype=np.float32),
         )
 
+    def collect_joint_trajectory_sdf_with_link_details_any_length(self, joint_trajectory_actual: np.ndarray) -> dict[str, Any]:
+        sdf_grid = self.load_sdf_grid()
+        joint_trajectory_actual = np.asarray(joint_trajectory_actual, dtype=np.float32)
+        if joint_trajectory_actual.ndim != 2:
+            raise ValueError(
+                "joint_trajectory_actual must be rank-2 [T, J], "
+                f"got shape {joint_trajectory_actual.shape}"
+            )
+        expected_dof = len(self.revolute_joint_indices)
+        if joint_trajectory_actual.shape[1] != expected_dof:
+            raise ValueError(
+                "joint_trajectory_actual joint dimension mismatch, "
+                f"expected {expected_dof}, got {joint_trajectory_actual.shape[1]}"
+            )
+
+        trajectory_sdf_values = []
+        trajectory_sdf_values_by_link: dict[str, list[np.ndarray]] = {
+            self.link_index_to_name.get(int(link_index), str(link_index)): []
+            for link_index in self.robot_surface_points_by_link.keys()
+        }
+        for joint_state in joint_trajectory_actual:
+            self.set_robot_joints(joint_state)
+            timestep_values = []
+            for link_index, local_points in self.robot_surface_points_by_link.items():
+                position, orientation = self.validator._get_link_pose(int(link_index))
+                rotation = np.asarray(
+                    self.pb.getMatrixFromQuaternion(orientation),
+                    dtype=np.float32,
+                ).reshape(3, 3)
+                world_points = local_points @ rotation.T + position.reshape(1, 3)
+                link_sdf_values = sdf_grid.query(world_points).astype(np.float32)
+                link_name = self.link_index_to_name.get(int(link_index), str(link_index))
+                trajectory_sdf_values_by_link[link_name].append(link_sdf_values)
+                timestep_values.append(link_sdf_values)
+            if not timestep_values:
+                return {
+                    "all_sdf_values": np.empty((0, 0), dtype=np.float32),
+                    "sdf_values_by_link": {},
+                }
+            trajectory_sdf_values.append(np.concatenate(timestep_values, axis=0).astype(np.float32))
+        return {
+            "all_sdf_values": np.stack(trajectory_sdf_values, axis=0).astype(np.float32),
+            "sdf_values_by_link": {
+                link_name: np.stack(link_values, axis=0).astype(np.float32)
+                for link_name, link_values in trajectory_sdf_values_by_link.items()
+            },
+        }
+
     def set_robot_joints(self, q_actual: np.ndarray) -> None:
         self.validator._set_robot_joints(q_actual)
 
@@ -449,7 +497,7 @@ class SurfaceCBFQPGuidanceRunner:
         q_cert_norm = cert_basis @ control_points
         q_cert_actual = self.environment.normalized_to_actual(q_cert_norm)
         q_cert_swept = interpolate_swept_segments(q_cert_actual, int(self.config.cert_swept_intermediate))
-        sdf_cert = self.environment.collect_joint_trajectory_sdf_with_link_details(q_cert_swept)
+        sdf_cert = self.environment.collect_joint_trajectory_sdf_with_link_details_any_length(q_cert_swept)
         h_cert = flatten_margin_values(sdf_cert, d_safe=float(self.config.d_safe))
         h_min_final = float(np.min(h_cert)) if h_cert.size > 0 else math.nan
         return {
