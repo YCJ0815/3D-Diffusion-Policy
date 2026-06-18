@@ -389,7 +389,7 @@ class SurfaceCBFQPGuidanceRunner:
             )
             q_check_norm = check_basis @ control_points
             q_check_actual = self.environment.normalized_to_actual(q_check_norm)
-            sdf_result = self.environment.collect_joint_trajectory_sdf_with_link_details(q_check_actual)
+            sdf_result = self.environment.collect_joint_trajectory_sdf_with_link_details_any_length(q_check_actual)
             h_before = flatten_margin_values(sdf_result, d_safe=float(self.config.d_safe))
             h_min_before = float(np.min(h_before)) if h_before.size > 0 else math.nan
             before_h_values.append(h_min_before)
@@ -431,7 +431,7 @@ class SurfaceCBFQPGuidanceRunner:
                     log.num_qp_success += 1
             q_after_norm = check_basis @ guided_control_points
             q_after_actual = self.environment.normalized_to_actual(q_after_norm)
-            sdf_after = self.environment.collect_joint_trajectory_sdf_with_link_details(q_after_actual)
+            sdf_after = self.environment.collect_joint_trajectory_sdf_with_link_details_any_length(q_after_actual)
             h_after = flatten_margin_values(sdf_after, d_safe=float(self.config.d_safe))
             h_min_after = float(np.min(h_after)) if h_after.size > 0 else math.nan
             after_h_values.append(h_min_after)
