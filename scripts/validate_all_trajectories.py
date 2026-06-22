@@ -202,8 +202,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--val-ratio",
         type=float,
-        default=0.1,
-        help="Validation split ratio.",
+        default=None,
+        help="Validation split ratio. When omitted, uses the checkpoint config value.",
     )
     parser.add_argument(
         "--horizon",
@@ -351,20 +351,21 @@ def _resolve_horizon(
 def _build_val_dataset(
     zarr_path: str,
     horizon: int,
-    val_ratio: float,
+    val_ratio: Optional[float],
     workspace: TrainDP3Workspace | TrainDP3CSpaceWorkspace,
 ) -> TransitionTrajectoryDataset:
     """Instantiate the full dataset and return its validation copy."""
     from omegaconf import OmegaConf
 
     ds_cfg = OmegaConf.select(workspace.cfg, "task.dataset", default={}) or {}
+    effective_val_ratio = val_ratio if val_ratio is not None else float(ds_cfg.get("val_ratio", 0.1))
     common_kwargs = dict(
         zarr_path=str(zarr_path),
         horizon=horizon,
         pad_before=int(ds_cfg.get("pad_before", 0)),
         pad_after=int(ds_cfg.get("pad_after", 0)),
         seed=int(ds_cfg.get("seed", 42)),
-        val_ratio=val_ratio,
+        val_ratio=effective_val_ratio,
         max_train_episodes=ds_cfg.get("max_train_episodes"),
         point_cloud_key=str(ds_cfg.get("point_cloud_key", "point_cloud")),
         obs_keys=tuple(
@@ -1330,7 +1331,11 @@ def main() -> None:
     print(f"Checkpoint config: horizon={horizon}, n_obs_steps={n_obs_steps}")
 
     print(f"Loading validation split from: {zarr_path}")
-    print(f"  val_ratio={args.val_ratio}")
+    from omegaconf import OmegaConf
+
+    ds_cfg = OmegaConf.select(workspace.cfg, "task.dataset", default={}) or {}
+    effective_val_ratio = args.val_ratio if args.val_ratio is not None else float(ds_cfg.get("val_ratio", 0.1))
+    print(f"  val_ratio={effective_val_ratio}" + (" (from checkpoint config)" if args.val_ratio is None else " (CLI override)"))
     val_dataset = _build_val_dataset(
         zarr_path=str(zarr_path),
         horizon=horizon,
@@ -1656,7 +1661,8 @@ def main() -> None:
             "zarr_path": str(zarr_path),
             "stats_path": str(stats_path),
             "num_control_points": args.num_control_points,
-            "val_ratio": args.val_ratio,
+            "val_ratio": effective_val_ratio,
+            "val_ratio_source": "checkpoint_config" if args.val_ratio is None else "cli_override",
             "horizon": horizon,
             "n_obs_steps": n_obs_steps,
             "candidate_pool": str(args.candidate_pool),
