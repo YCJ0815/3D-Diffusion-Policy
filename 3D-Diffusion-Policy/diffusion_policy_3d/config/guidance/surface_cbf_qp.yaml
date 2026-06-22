@@ -10,7 +10,7 @@ surface_cbf_qp_guidance:
 
   runner:
     guidance_steps: 3
-    qp_candidates: 2
+    qp_candidates: 8
     active_constraints: 16
     check_steps: 32
     cert_steps: 64
