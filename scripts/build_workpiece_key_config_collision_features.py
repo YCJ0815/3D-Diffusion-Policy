@@ -301,8 +301,9 @@ class WorkpieceKeyConfigEvaluator(PyBulletCollisionValidator):
                 "robot_surface_points_per_link must be positive, "
                 f"got {self.cfg.robot_surface_points_per_link}"
             )
-        self.workpiece_cache = {}
-        self.sdf_cache = {}
+        self.workpiece_cache: dict[int, int] = {}
+        self.workpiece_stl_path_cache: dict[int, pathlib.Path] = {}
+        self.sdf_cache: dict[int, SDFGrid] = {}
         self.robot_surface_points_by_link = self._build_robot_collision_surface_points(
             resolved_urdf_path=self.resolved_urdf_path,
             points_per_link=self.cfg.robot_surface_points_per_link,
