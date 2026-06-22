@@ -390,6 +390,16 @@ class SurfaceCBFQPGuidanceRunner:
             q_check_norm = check_basis @ control_points
             q_check_actual = self.environment.normalized_to_actual(q_check_norm)
             sdf_result = self.environment.collect_joint_trajectory_sdf_with_link_details_any_length(q_check_actual)
+            all_sdf_before = np.asarray(
+                sdf_result.get("all_sdf_values", np.empty((0, 0), dtype=np.float32)),
+                dtype=np.float32,
+            )
+            finite_sdf_mask = np.isfinite(all_sdf_before)
+            finite_sdf_count = int(np.count_nonzero(finite_sdf_mask))
+            total_sdf_count = int(all_sdf_before.size)
+            finite_timestep_count = int(
+                np.count_nonzero(np.any(finite_sdf_mask, axis=1))
+            ) if all_sdf_before.ndim == 2 else 0
             h_before = flatten_margin_values(sdf_result, d_safe=float(self.config.d_safe))
             h_min_before = float(np.min(h_before)) if h_before.size > 0 else math.nan
             before_h_values.append(h_min_before)
@@ -434,7 +444,12 @@ class SurfaceCBFQPGuidanceRunner:
                     log.num_qp_success += 1
             else:
                 if not worst_timesteps:
-                    qp_skip_reason = "no_worst_timesteps"
+                    if total_sdf_count == 0:
+                        qp_skip_reason = "no_sdf_surface_samples"
+                    elif finite_sdf_count == 0:
+                        qp_skip_reason = "all_surface_samples_outside_sdf"
+                    else:
+                        qp_skip_reason = "no_worst_timesteps"
                 elif not topk_constraints:
                     qp_skip_reason = "no_topk_constraints"
                 elif not np.isfinite(h_min_before):
@@ -467,6 +482,9 @@ class SurfaceCBFQPGuidanceRunner:
                 "qp_solver_message": None if qp_result is None else qp_result.get("message"),
                 "num_worst_timesteps": int(len(worst_timesteps)),
                 "num_topk_constraints": int(len(topk_constraints)),
+                "sdf_value_count": total_sdf_count,
+                "finite_sdf_value_count": finite_sdf_count,
+                "finite_sdf_timestep_count": finite_timestep_count,
                 "control_points_normalized": guided_control_points.astype(np.float32),
                 "joint_trajectory": np.asarray(cert_result["joint_trajectory"], dtype=np.float32),
                 "normalized_free_residual": control_points_to_normalized_free_residual(
@@ -730,7 +748,10 @@ def flatten_margin_values(sdf_result: dict[str, Any], d_safe: float) -> np.ndarr
     all_sdf = np.asarray(sdf_result["all_sdf_values"], dtype=np.float32)
     if all_sdf.size == 0:
         return np.empty((0,), dtype=np.float32)
-    return (all_sdf.reshape(-1) - float(d_safe)).astype(np.float32)
+    # Out-of-grid queries are represented by NaN. They are unknown samples, not
+    # evidence that every other surface sample at the timestep is invalid.
+    finite_sdf = all_sdf.reshape(-1)[np.isfinite(all_sdf.reshape(-1))]
+    return (finite_sdf - float(d_safe)).astype(np.float32)
 
 
 def collect_active_constraints(
@@ -783,7 +804,16 @@ def find_worst_trajectory_timesteps(
     )
     if all_sdf.size == 0:
         return []
-    min_per_step = np.min(all_sdf, axis=1)
+    if all_sdf.ndim != 2:
+        return []
+    finite_mask = np.isfinite(all_sdf)
+    has_finite_value = np.any(finite_mask, axis=1)
+    min_per_step = np.full(all_sdf.shape[0], np.nan, dtype=np.float32)
+    if np.any(has_finite_value):
+        min_per_step[has_finite_value] = np.min(
+            np.where(finite_mask[has_finite_value], all_sdf[has_finite_value], np.inf),
+            axis=1,
+        )
     h_per_step = min_per_step - float(d_safe)
     valid_mask = np.isfinite(h_per_step)
     if not np.any(valid_mask):
@@ -820,7 +850,12 @@ def build_topk_cbf_constraints(
         if t_idx < 0 or t_idx >= all_sdf.shape[0]:
             continue
         step_sdf = np.asarray(all_sdf[t_idx], dtype=np.float32).reshape(-1)
-        worst_flat_idx = int(np.argmin(step_sdf))
+        finite_indices = np.flatnonzero(np.isfinite(step_sdf))
+        if finite_indices.size == 0:
+            continue
+        worst_flat_idx = int(
+            finite_indices[np.argmin(step_sdf[finite_indices])]
+        )
         sample_info = _flat_index_to_surface_sample(
             environment.surface_samples, worst_flat_idx
         )

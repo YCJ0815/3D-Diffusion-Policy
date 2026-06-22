@@ -54,6 +54,8 @@ def _format_qp_skip_reason(reason: str | None) -> str:
     reason_map = {
         None: "unknown",
         "surface_cbf_qp_guidance_disabled": "surface CBF-QP guidance disabled",
+        "no_sdf_surface_samples": "no robot surface SDF samples were collected",
+        "all_surface_samples_outside_sdf": "all robot surface samples are outside the SDF grid",
         "no_worst_timesteps": "no worst trajectory timesteps found",
         "no_topk_constraints": "no valid top-k CBF constraints built",
         "non_finite_h_min_before": "pre-guidance minimum margin is non-finite",
@@ -98,6 +100,15 @@ def _summarize_qp_status_from_selection(selection: dict[str, object]) -> dict[st
             selected_candidate_info is not None and selected_candidate_info.get("qp_success", False)
         ),
         "selected_candidate_qp_skip_reason": None if selected_candidate_info is None else selected_candidate_info.get("qp_skip_reason"),
+        "selected_candidate_sdf_value_count": int(
+            0 if selected_candidate_info is None else selected_candidate_info.get("sdf_value_count", 0)
+        ),
+        "selected_candidate_finite_sdf_value_count": int(
+            0 if selected_candidate_info is None else selected_candidate_info.get("finite_sdf_value_count", 0)
+        ),
+        "selected_candidate_finite_sdf_timestep_count": int(
+            0 if selected_candidate_info is None else selected_candidate_info.get("finite_sdf_timestep_count", 0)
+        ),
         "guidance_num_qp_called": int(guidance_log.get("num_qp_called", 0) or 0),
         "guidance_num_qp_success": int(guidance_log.get("num_qp_success", 0) or 0),
     }
@@ -116,7 +127,12 @@ def _print_validation_progress(
     qp_part = (
         f"QP=yes attempted={qp_summary['qp_attempted_count']} success={qp_summary['qp_success_count']}"
         if qp_summary["qp_attempted"]
-        else f"QP=no reason={qp_summary['qp_skip_reason_text']}"
+        else (
+            f"QP=no reason={qp_summary['qp_skip_reason_text']} "
+            f"finite_sdf={qp_summary['selected_candidate_finite_sdf_value_count']}/"
+            f"{qp_summary['selected_candidate_sdf_value_count']} "
+            f"finite_timesteps={qp_summary['selected_candidate_finite_sdf_timestep_count']}"
+        )
     )
     print(
         f"[{index}/{total}] episode={episode_idx} workpiece_id={workpiece_id} "
