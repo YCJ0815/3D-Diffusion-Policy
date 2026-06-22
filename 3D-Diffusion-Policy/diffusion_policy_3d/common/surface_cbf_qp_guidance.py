@@ -5,6 +5,7 @@ from typing import Any, Sequence
 import inspect
 import math
 import time
+import warnings
 
 import numpy as np
 from scipy.optimize import Bounds, LinearConstraint, minimize
@@ -665,14 +666,20 @@ class SurfaceCBFQPGuidanceRunner:
 
         x0 = np.zeros(num_selected * dof + num_slack, dtype=np.float64)
         try:
-            result = minimize(
-                objective,
-                x0,
-                method="SLSQP",
-                bounds=Bounds(lower_bounds, upper_bounds),
-                constraints=constraints,
-                options={"maxiter": 200, "ftol": 1e-6, "disp": False},
-            )
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message="Values in x were outside bounds during a minimize step, clipping to bounds",
+                    category=RuntimeWarning,
+                )
+                result = minimize(
+                    objective,
+                    x0,
+                    method="SLSQP",
+                    bounds=Bounds(lower_bounds, upper_bounds),
+                    constraints=constraints,
+                    options={"maxiter": 200, "ftol": 1e-6, "disp": False},
+                )
         except Exception as exc:
             return {
                 "success": False,
