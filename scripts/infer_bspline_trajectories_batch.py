@@ -26,6 +26,11 @@ from diffusion_policy_3d.common.bspline import (
 )
 from diffusion_policy_3d.common.input_data import load_bspline_planning_input_data
 from infer_bspline_trajectory import build_obs_dict, ensure_dir, save_joint_plot
+from guidance_config import (
+    add_surface_cbf_qp_guidance_parser_args,
+    apply_surface_cbf_qp_guidance_config,
+    build_surface_cbf_qp_parameter_summary,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -150,22 +155,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Shortcut that promotes baseline mode to candidate mode.",
     )
     parser.add_argument(
-        "--num-candidates",
-        type=int,
-        default=32,
-        help="Candidate pool size when candidate sampling is enabled.",
-    )
-    parser.add_argument(
         "--candidate-seed",
         type=int,
         default=42,
         help="Base seed for deterministic candidate sampling.",
-    )
-    parser.add_argument(
-        "--candidate-inference-steps",
-        type=int,
-        default=None,
-        help="Optional override for diffusion inference steps during candidate sampling.",
     )
     parser.add_argument(
         "--candidate-scheduler-eta",
@@ -216,59 +209,10 @@ def build_parser() -> argparse.ArgumentParser:
         default="workpiece_ids.npy",
         help="Filename of the workpiece ID array aligned with the C-space features.",
     )
-    parser.add_argument(
-        "--enable-surface-cbf-qp-guidance",
-        action="store_true",
-        help="Enable the independent late-stage surface-sample CBF-QP guided denoising path.",
-    )
-    parser.add_argument(
-        "--guidance-steps",
-        type=int,
-        default=2,
-        help="Number of final denoising steps that run surface-sample CBF-QP guidance.",
-    )
-    parser.add_argument(
-        "--guidance-qp-candidates",
-        type=int,
-        default=4,
-        help="How many near-collision candidates to project with QP per guidance step.",
-    )
-    parser.add_argument(
-        "--guidance-active-constraints",
-        type=int,
-        default=16,
-        help="Maximum number of active surface constraints kept in each guidance QP.",
-    )
-    parser.add_argument(
-        "--guidance-check-steps",
-        type=int,
-        default=64,
-        help="Dense B-spline evaluation steps used during per-step guidance collision checks.",
-    )
-    parser.add_argument(
-        "--guidance-cert-steps",
-        type=int,
-        default=256,
-        help="Dense B-spline evaluation steps used for the final certificate check.",
-    )
-    parser.add_argument(
-        "--guidance-cert-swept-intermediate",
-        type=int,
-        default=3,
-        help="Number of swept interpolation points inserted between adjacent certificate waypoints.",
-    )
-    parser.add_argument("--guidance-d-safe", type=float, default=0.03)
-    parser.add_argument("--guidance-d-trigger", type=float, default=0.06)
-    parser.add_argument("--guidance-d-cert", type=float, default=0.01)
-    parser.add_argument("--guidance-eps-deep", type=float, default=0.03)
-    parser.add_argument("--guidance-delta-max", type=float, default=0.05)
-    parser.add_argument("--guidance-lambda-s", type=float, default=0.25)
-    parser.add_argument("--guidance-rho", type=float, default=1.0e5)
-    parser.add_argument(
-        "--guidance-ddim-eta",
-        type=float,
-        default=0.0,
-        help="Deterministic DDIM eta used during the guided denoising tail.",
+    add_surface_cbf_qp_guidance_parser_args(
+        parser,
+        include_num_candidates=True,
+        include_candidate_inference_steps=True,
     )
     parser.add_argument("--skip-existing", action="store_true", help="Skip samples whose summary.json already exists.")
     return parser
@@ -695,6 +639,7 @@ class CandidateValidatorWrapper:
             candidate_action_noise_std=float(args.candidate_action_noise_std),
             candidate_action_noise_clip=args.candidate_action_noise_clip,
             candidate_selection="weighted_sdf",
+            robot_surface_points_per_link=args.robot_surface_points_per_link,
         )
         self.validator = PyBulletCollisionValidator(cfg)
         self._select_lowest_candidate_score_index = _select_lowest_candidate_score_index
@@ -809,6 +754,9 @@ def predict_surface_cbf_qp_guided_outputs(
         lambda_s=float(args.guidance_lambda_s),
         rho=float(args.guidance_rho),
         ddim_eta=float(args.guidance_ddim_eta),
+        joint_limit_steps=int(args.guidance_joint_limit_steps),
+        guidance_targets=tuple(float(v) for v in args.guidance_targets),
+        fallback_to_terminal_cbf=bool(args.guidance_fallback_to_terminal_cbf),
     )
     guidance_runner = SurfaceCBFQPGuidanceRunner(
         config=guidance_config,
@@ -1205,6 +1153,11 @@ def run_mode_inference(
         "selected_candidate_index": int(artifact.get("candidate_index", 0)),
         "selected_candidate_seed": artifact.get("candidate_seed"),
     }
+    metadata["surface_cbf_qp_guidance_params"] = build_surface_cbf_qp_parameter_summary(
+        args,
+        include_num_candidates=True,
+        include_candidate_inference_steps=True,
+    )
     if guidance_payload is not None:
         metadata["surface_cbf_qp_guidance"] = guidance_payload.get("guidance_log", {})
         metadata["guidance_candidate_count"] = len(guidance_payload.get("guidance_candidates", []))
@@ -1253,6 +1206,11 @@ def build_compare_summary(npz_path: pathlib.Path, baseline_summary: dict, candid
 def main() -> None:
     inference_start_time = time.perf_counter()
     args = build_parser().parse_args()
+    apply_surface_cbf_qp_guidance_config(
+        args,
+        include_num_candidates=True,
+        include_candidate_inference_steps=True,
+    )
     validate_args(args)
 
     checkpoint_path = pathlib.Path(args.checkpoint_path).expanduser().resolve()

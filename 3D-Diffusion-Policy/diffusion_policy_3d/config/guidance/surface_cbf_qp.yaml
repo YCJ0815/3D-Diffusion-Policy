@@ -1,0 +1,30 @@
+surface_cbf_qp_guidance:
+  enabled: false
+  num_candidates: 32
+  candidate_inference_steps: null
+
+  pybullet:
+    robot_surface_points_per_link:
+      pen_link: 80
+      wrist3: 16
+
+  runner:
+    guidance_steps: 5
+    qp_candidates: 4
+    active_constraints: 16
+    check_steps: 32
+    cert_steps: 64
+    cert_swept_intermediate: 3
+    d_safe: 0.05
+    d_trigger: 0.06
+    d_cert: 0.01
+    eps_deep: 0.03
+    delta_max: 0.05
+    lambda_s: 0.25
+    rho: 1.0e5
+    ddim_eta: 0.0
+    joint_limit_steps: 32
+    guidance_targets:
+      - -0.02
+      - 0.0
+    fallback_to_terminal_cbf: true
