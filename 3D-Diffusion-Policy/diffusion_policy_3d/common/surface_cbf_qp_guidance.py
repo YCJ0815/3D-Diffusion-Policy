@@ -223,7 +223,7 @@ class PyBulletSurfaceEnvironmentAdapter:
         self.set_robot_joints(q_actual)
         zero_vec = [0.0] * self.dof
         local_position = np.asarray(local_point, dtype=np.float32).reshape(3).tolist()
-        jacobian_t, _, _ = self.pb.calculateJacobian(
+        jacobian_result = self.pb.calculateJacobian(
             self.robot_id,
             int(link_index),
             local_position,
@@ -232,6 +232,15 @@ class PyBulletSurfaceEnvironmentAdapter:
             zero_vec,
             physicsClientId=self.client_id,
         )
+        if isinstance(jacobian_result, (tuple, list)):
+            if len(jacobian_result) >= 1:
+                jacobian_t = jacobian_result[0]
+            else:
+                raise ValueError("pybullet.calculateJacobian returned an empty result")
+        else:
+            raise TypeError(
+                f"Unexpected pybullet.calculateJacobian return type: {type(jacobian_result)!r}"
+            )
         return np.asarray(jacobian_t, dtype=np.float32)
 
     def try_existing_terminal_cbf(self, joint_trajectory_actual: np.ndarray) -> dict[str, Any] | None:
