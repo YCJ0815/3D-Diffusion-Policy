@@ -864,9 +864,8 @@ def _resolve_trajopt_success_flags_from_results_json(
             raise KeyError(f"Missing `array_file` in planning metadata: {json_path}")
         npz_path = (json_path.parent / str(array_file)).resolve()
         if not npz_path.is_file():
-            raise FileNotFoundError(
-                f"Planning metadata {json_path} references missing NPZ file: {npz_path}"
-            )
+            print(f"  [trajopt-success-json] Warning: Planning metadata {json_path} references missing NPZ file: {npz_path}. Skipping.")
+            continue
         job_name = _resolve_job_name_from_path(npz_path)
         if job_name is None:
             raise ValueError(f"Unable to infer job name from planning NPZ path: {npz_path}")
