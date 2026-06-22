@@ -9,15 +9,15 @@ surface_cbf_qp_guidance:
       wrist3: 16
 
   runner:
-    guidance_steps: 5
+    guidance_steps: 3
     qp_candidates: 4
     active_constraints: 16
     check_steps: 32
     cert_steps: 64
     cert_swept_intermediate: 3
-    d_safe: 0.05
-    d_trigger: 0.06
-    d_cert: 0.01
+    d_safe: 0.005
+    d_trigger: 0.005
+    d_cert: 0.001
     eps_deep: 0.03
     delta_max: 0.05
     lambda_s: 0.25
