@@ -326,6 +326,11 @@ def build_parser() -> argparse.ArgumentParser:
             "via normalized start/goal joint vectors."
         ),
     )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress per-file/per-episode warnings from trajopt-success JSON matching.",
+    )
     return parser
 
 
@@ -840,6 +845,7 @@ def _resolve_trajopt_success_flags_from_results_json(
     urdf_path: str | None,
     results_dirs: list[str],
     match_tol: float,
+    quiet: bool = False,
 ) -> tuple[np.ndarray, str]:
     resolved_results_dirs = [
         pathlib.Path(path).expanduser().resolve() for path in results_dirs
@@ -865,7 +871,8 @@ def _resolve_trajopt_success_flags_from_results_json(
             raise KeyError(f"Missing `array_file` in planning metadata: {json_path}")
         npz_path = (json_path.parent / str(array_file)).resolve()
         if not npz_path.is_file():
-            print(f"  [trajopt-success-json] Warning: Planning metadata {json_path} references missing NPZ file: {npz_path}. Skipping.")
+            if not quiet:
+                print(f"  [trajopt-success-json] Warning: Planning metadata {json_path} references missing NPZ file: {npz_path}. Skipping.")
             continue
         job_name = _resolve_job_name_from_path(npz_path)
         if job_name is None:
@@ -926,7 +933,7 @@ def _resolve_trajopt_success_flags_from_results_json(
         success_flag = signature_to_success.get(signature_key)
         if success_flag is None:
             unmatched_episodes.append(int(episode_idx))
-            if len(unmatched_episodes) <= 5:
+            if len(unmatched_episodes) <= 5 and not quiet:
                 start_joint_angles = _denormalize_joint_angles(
                     first_joint_angles, lower_limits, upper_limits
                 )
@@ -1391,6 +1398,7 @@ def main() -> None:
             urdf_path=pyb_cfg.urdf_path,
             results_dirs=args.trajopt_success_results_dir,
             match_tol=float(args.trajopt_success_match_tol),
+            quiet=bool(args.quiet),
         )
         print(
             "  trajopt_success_only=true -> using success flag from "
