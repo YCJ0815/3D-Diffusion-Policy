@@ -50,6 +50,81 @@ from guidance_config import (  # noqa: E402
 )
 
 
+def _format_qp_skip_reason(reason: str | None) -> str:
+    reason_map = {
+        None: "unknown",
+        "surface_cbf_qp_guidance_disabled": "surface CBF-QP guidance disabled",
+        "no_worst_timesteps": "no worst trajectory timesteps found",
+        "no_topk_constraints": "no valid top-k CBF constraints built",
+        "non_finite_h_min_before": "pre-guidance minimum margin is non-finite",
+        "unknown_skip_condition": "unknown guidance skip condition",
+    }
+    return reason_map.get(reason, str(reason))
+
+
+def _summarize_qp_status_from_selection(selection: dict[str, object]) -> dict[str, object]:
+    guidance_candidates = list(selection.get("guidance_candidates", []) or [])
+    guidance_log = dict(selection.get("guidance_log", {}) or {})
+    guidance_enabled = bool(selection.get("surface_cbf_qp_guidance_enabled", False))
+    selected_candidate_idx = int(selection.get("selected_candidate_idx", 0))
+    selected_candidate_info = None
+    for candidate_info in guidance_candidates:
+        if int(candidate_info.get("candidate_index", -1)) == selected_candidate_idx:
+            selected_candidate_info = candidate_info
+            break
+
+    attempted_count = sum(bool(candidate_info.get("qp_attempted", False)) for candidate_info in guidance_candidates)
+    success_count = sum(bool(candidate_info.get("qp_success", False)) for candidate_info in guidance_candidates)
+    qp_attempted = attempted_count > 0
+    if not guidance_enabled:
+        qp_skip_reason = "surface_cbf_qp_guidance_disabled"
+    elif selected_candidate_info is not None and not bool(selected_candidate_info.get("qp_attempted", False)):
+        qp_skip_reason = selected_candidate_info.get("qp_skip_reason")
+    elif not qp_attempted:
+        qp_skip_reason = "no_topk_constraints"
+    else:
+        qp_skip_reason = None
+
+    return {
+        "qp_attempted": bool(qp_attempted),
+        "qp_attempted_count": int(attempted_count),
+        "qp_success_count": int(success_count),
+        "qp_skip_reason": qp_skip_reason,
+        "qp_skip_reason_text": _format_qp_skip_reason(qp_skip_reason),
+        "selected_candidate_qp_attempted": bool(
+            selected_candidate_info is not None and selected_candidate_info.get("qp_attempted", False)
+        ),
+        "selected_candidate_qp_success": bool(
+            selected_candidate_info is not None and selected_candidate_info.get("qp_success", False)
+        ),
+        "selected_candidate_qp_skip_reason": None if selected_candidate_info is None else selected_candidate_info.get("qp_skip_reason"),
+        "guidance_num_qp_called": int(guidance_log.get("num_qp_called", 0) or 0),
+        "guidance_num_qp_success": int(guidance_log.get("num_qp_success", 0) or 0),
+    }
+
+
+def _print_validation_progress(
+    *,
+    index: int,
+    total: int,
+    episode_idx: int,
+    workpiece_id: int,
+    selection: dict[str, object],
+    metric: dict[str, object],
+) -> None:
+    qp_summary = _summarize_qp_status_from_selection(selection)
+    qp_part = (
+        f"QP=yes attempted={qp_summary['qp_attempted_count']} success={qp_summary['qp_success_count']}"
+        if qp_summary["qp_attempted"]
+        else f"QP=no reason={qp_summary['qp_skip_reason_text']}"
+    )
+    print(
+        f"[{index}/{total}] episode={episode_idx} workpiece_id={workpiece_id} "
+        f"collision={bool(metric['has_collision'])} min_sdf={float(metric['min_sdf_distance_m']):.6f} "
+        f"goal_error={float(metric['goal_error_m']):.6f} {qp_part}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -593,6 +668,7 @@ def _predict_surface_cbf_qp_guided(
         "num_candidates": int(num_candidates),
         "inference_elapsed_sec": inference_elapsed_sec,
         "guidance_log": guidance_log,
+        "guidance_candidates": list(result.get("guidance_candidates", [])),
         "guidance_candidate_count": len(result.get("guidance_candidates", [])),
     }
 
@@ -661,6 +737,7 @@ def _predict_select_candidate(
         )
         return {
             "candidate_pool_enabled": False,
+            "surface_cbf_qp_guidance_enabled": False,
             "selected_candidate_idx": 0,
             "selected_candidate_seed": int(single_candidate_seed),
             "selected_action_horizon": np.asarray(
@@ -674,6 +751,9 @@ def _predict_select_candidate(
             "candidate_seeds": [int(single_candidate_seed)],
             "num_candidates": 1,
             "inference_elapsed_sec": inference_elapsed_sec,
+            "guidance_log": {},
+            "guidance_candidates": [],
+            "guidance_candidate_count": 0,
         }
 
     candidate_results: list[dict[str, object]] = []
@@ -758,6 +838,7 @@ def _predict_select_candidate(
 
     return {
         "candidate_pool_enabled": True,
+        "surface_cbf_qp_guidance_enabled": False,
         "selected_candidate_idx": int(selected_candidate_idx),
         "selected_candidate_seed": int(candidate_seeds[selected_candidate_idx]),
         "selected_action_horizon": np.asarray(
@@ -771,6 +852,9 @@ def _predict_select_candidate(
         "candidate_seeds": candidate_seeds,
         "num_candidates": int(num_candidates),
         "inference_elapsed_sec": inference_elapsed_sec,
+        "guidance_log": {},
+        "guidance_candidates": [],
+        "guidance_candidate_count": 0,
     }
 
 
@@ -1058,8 +1142,10 @@ def main() -> None:
                 "selected_score": selection["selected_score_details"],
                 "inference_elapsed_sec": selection["inference_elapsed_sec"],
                 "guidance_log": selection.get("guidance_log"),
+                "guidance_candidates": selection.get("guidance_candidates", []),
                 "guidance_candidate_count": selection.get("guidance_candidate_count"),
             }
+            traj_entry.update(_summarize_qp_status_from_selection(selection))
             per_traj_metrics.append(traj_entry)
 
             if has_collision:
@@ -1075,6 +1161,15 @@ def main() -> None:
                     "  Inference-to-selected-output time: "
                     f"{float(selection['inference_elapsed_sec']):.6f} s"
                 )
+
+            _print_validation_progress(
+                index=idx + 1,
+                total=len(val_episode_indices),
+                episode_idx=int(ep_idx),
+                workpiece_id=wid,
+                selection=selection,
+                metric=metric,
+            )
 
             if (idx + 1) % max(1, len(val_episode_indices) // 10) == 0 or idx == 0:
                 traj_collision_rate_so_far = collision_count / (idx + 1)

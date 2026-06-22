@@ -33,6 +33,93 @@ from guidance_config import (
 )
 
 
+def _format_qp_skip_reason(reason: str | None) -> str:
+    reason_map = {
+        None: "unknown",
+        "surface_cbf_qp_guidance_disabled": "surface CBF-QP guidance disabled",
+        "compare_mode_disables_surface_cbf_qp_guidance": "compare mode disables surface CBF-QP guidance",
+        "candidate_mode_does_not_use_surface_cbf_qp_guidance": "candidate mode does not use surface CBF-QP guidance",
+        "no_worst_timesteps": "no worst trajectory timesteps found",
+        "no_topk_constraints": "no valid top-k CBF constraints built",
+        "non_finite_h_min_before": "pre-guidance minimum margin is non-finite",
+        "unknown_skip_condition": "unknown guidance skip condition",
+    }
+    return reason_map.get(reason, str(reason))
+
+
+def summarize_qp_status(
+    *,
+    mode: str,
+    compare_mode: bool,
+    guidance_enabled: bool,
+    guidance_payload: dict | None,
+) -> dict[str, object]:
+    guidance_log = {} if guidance_payload is None else dict(guidance_payload.get("guidance_log", {}) or {})
+    guidance_candidates = [] if guidance_payload is None else list(guidance_payload.get("guidance_candidates", []) or [])
+    selected_candidate_idx = int(guidance_log.get("best_candidate_index", 0) or 0)
+    selected_candidate_info = None
+    for candidate_info in guidance_candidates:
+        if int(candidate_info.get("candidate_index", -1)) == selected_candidate_idx:
+            selected_candidate_info = candidate_info
+            break
+
+    attempted_count = sum(bool(candidate_info.get("qp_attempted", False)) for candidate_info in guidance_candidates)
+    success_count = sum(bool(candidate_info.get("qp_success", False)) for candidate_info in guidance_candidates)
+    qp_attempted = attempted_count > 0
+    if mode != "baseline":
+        qp_skip_reason = "candidate_mode_does_not_use_surface_cbf_qp_guidance"
+    elif compare_mode:
+        qp_skip_reason = "compare_mode_disables_surface_cbf_qp_guidance"
+    elif not guidance_enabled:
+        qp_skip_reason = "surface_cbf_qp_guidance_disabled"
+    elif selected_candidate_info is not None and not bool(selected_candidate_info.get("qp_attempted", False)):
+        qp_skip_reason = selected_candidate_info.get("qp_skip_reason")
+    elif not qp_attempted:
+        qp_skip_reason = "no_topk_constraints"
+    else:
+        qp_skip_reason = None
+
+    return {
+        "qp_attempted": bool(qp_attempted),
+        "qp_attempted_count": int(attempted_count),
+        "qp_success_count": int(success_count),
+        "qp_skip_reason": qp_skip_reason,
+        "qp_skip_reason_text": _format_qp_skip_reason(qp_skip_reason),
+        "selected_candidate_qp_attempted": bool(
+            selected_candidate_info is not None and selected_candidate_info.get("qp_attempted", False)
+        ),
+        "selected_candidate_qp_success": bool(
+            selected_candidate_info is not None and selected_candidate_info.get("qp_success", False)
+        ),
+        "selected_candidate_qp_skip_reason": None if selected_candidate_info is None else selected_candidate_info.get("qp_skip_reason"),
+        "guidance_num_qp_called": int(guidance_log.get("num_qp_called", 0) or 0),
+        "guidance_num_qp_success": int(guidance_log.get("num_qp_success", 0) or 0),
+        "guidance_candidate_count": int(len(guidance_candidates)),
+    }
+
+
+def print_inference_progress(
+    *,
+    sample_index: int,
+    total_samples: int,
+    mode: str,
+    npz_path: pathlib.Path,
+    summary: dict,
+) -> None:
+    qp_part = (
+        f"QP=yes attempted={summary['qp_attempted_count']} success={summary['qp_success_count']}"
+        if summary["qp_attempted"]
+        else f"QP=no reason={summary['qp_skip_reason_text']}"
+    )
+    min_sdf_value = summary.get("min_sdf_distance_m")
+    min_sdf_text = "n/a" if min_sdf_value is None else f"{float(min_sdf_value):.6f}"
+    print(
+        f"[{sample_index}/{total_samples}] mode={mode} npz={npz_path.name} "
+        f"selected_candidate={int(summary.get('selected_candidate_index', 0))} "
+        f"min_sdf={min_sdf_text} {qp_part}"
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
@@ -1017,6 +1104,7 @@ def run_mode_inference(
     stats_mean: np.ndarray,
     stats_std: np.ndarray,
     sample_index: int,
+    total_samples: int,
     compare_mode: bool,
     candidate_validator: CandidateValidatorWrapper | None,
     cspace_feature_provider: CSpaceFeatureProvider | None,
@@ -1172,12 +1260,27 @@ def run_mode_inference(
         ]
         metadata["min_sdf_distance_m"] = float(selected_score["min_sdf_distance_m"])
         metadata["has_pen"] = float(selected_score["has_pen"])
+    metadata.update(
+        summarize_qp_status(
+            mode=mode,
+            compare_mode=compare_mode,
+            guidance_enabled=bool(args.enable_surface_cbf_qp_guidance),
+            guidance_payload=guidance_payload,
+        )
+    )
     summary = save_prediction_artifacts(
         output_dir=output_dir,
         raw_obs=raw_obs,
         artifact=artifact,
         metadata=metadata,
         candidate_scores=candidate_scores,
+    )
+    print_inference_progress(
+        sample_index=sample_index + 1,
+        total_samples=total_samples,
+        mode=mode,
+        npz_path=npz_path,
+        summary=summary,
     )
     return summary
 
@@ -1366,6 +1469,7 @@ def main() -> None:
                         stats_mean=stats_mean,
                         stats_std=stats_std,
                         sample_index=idx - 1,
+                        total_samples=len(sampled_npz_files),
                         compare_mode=True,
                         candidate_validator=candidate_validator,
                         cspace_feature_provider=cspace_feature_provider,
@@ -1383,6 +1487,7 @@ def main() -> None:
                         stats_mean=stats_mean,
                         stats_std=stats_std,
                         sample_index=idx - 1,
+                        total_samples=len(sampled_npz_files),
                         compare_mode=True,
                         candidate_validator=candidate_validator,
                         cspace_feature_provider=cspace_feature_provider,
@@ -1417,6 +1522,7 @@ def main() -> None:
                         stats_mean=stats_mean,
                         stats_std=stats_std,
                         sample_index=idx - 1,
+                        total_samples=len(sampled_npz_files),
                         compare_mode=False,
                         candidate_validator=candidate_validator,
                         cspace_feature_provider=cspace_feature_provider,

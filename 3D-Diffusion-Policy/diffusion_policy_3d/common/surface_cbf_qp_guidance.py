@@ -394,8 +394,10 @@ class SurfaceCBFQPGuidanceRunner:
             h_min_before = float(np.min(h_before)) if h_before.size > 0 else math.nan
             before_h_values.append(h_min_before)
             guided_control_points = control_points.copy()
+            qp_attempted = False
             qp_success = False
             qp_result: dict[str, Any] | None = None
+            qp_skip_reason: str | None = None
 
             worst_timesteps: list[int] = find_worst_trajectory_timesteps(
                 sdf_result=sdf_result,
@@ -411,6 +413,7 @@ class SurfaceCBFQPGuidanceRunner:
             ) if worst_timesteps else []
 
             if topk_constraints and np.isfinite(h_min_before):
+                qp_attempted = True
                 log.num_qp_called += 1
                 log.num_active_constraints += len(topk_constraints)
                 guidance_start = time.perf_counter()
@@ -429,6 +432,15 @@ class SurfaceCBFQPGuidanceRunner:
                     guided_control_points = np.asarray(qp_result["control_points"], dtype=np.float32)
                     qp_success = True
                     log.num_qp_success += 1
+            else:
+                if not worst_timesteps:
+                    qp_skip_reason = "no_worst_timesteps"
+                elif not topk_constraints:
+                    qp_skip_reason = "no_topk_constraints"
+                elif not np.isfinite(h_min_before):
+                    qp_skip_reason = "non_finite_h_min_before"
+                else:
+                    qp_skip_reason = "unknown_skip_condition"
             q_after_norm = check_basis @ guided_control_points
             q_after_actual = self.environment.normalized_to_actual(q_after_norm)
             sdf_after = self.environment.collect_joint_trajectory_sdf_with_link_details_any_length(q_after_actual)
@@ -449,7 +461,12 @@ class SurfaceCBFQPGuidanceRunner:
                 "h_min_after_guidance": h_min_after,
                 "h_min_final": float(cert_result["h_min_final"]),
                 "certificate_success": bool(cert_result["success"]),
+                "qp_attempted": bool(qp_attempted),
                 "qp_success": bool(qp_success),
+                "qp_skip_reason": qp_skip_reason,
+                "qp_solver_message": None if qp_result is None else qp_result.get("message"),
+                "num_worst_timesteps": int(len(worst_timesteps)),
+                "num_topk_constraints": int(len(topk_constraints)),
                 "control_points_normalized": guided_control_points.astype(np.float32),
                 "joint_trajectory": np.asarray(cert_result["joint_trajectory"], dtype=np.float32),
                 "normalized_free_residual": control_points_to_normalized_free_residual(
