@@ -40,7 +40,7 @@ GUIDANCE_CONFIG_FALLBACKS: dict[str, Any] = {
     "guidance_joint_limit_steps": 32,
     "guidance_targets": [-0.02, 0.0],
     "guidance_fallback_to_terminal_cbf": True,
-    "robot_surface_points_per_link": {"pen_link": 80, "wrist3": 16},
+    "robot_surface_points_per_link": {"pen_link": 80, "wrist_3_link": 16},
 }
 
 

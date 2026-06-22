@@ -6,7 +6,7 @@ surface_cbf_qp_guidance:
   pybullet:
     robot_surface_points_per_link:
       pen_link: 80
-      wrist3: 16
+      wrist_3_link: 16
 
   runner:
     guidance_steps: 3

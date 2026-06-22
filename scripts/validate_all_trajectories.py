@@ -443,7 +443,7 @@ def _build_pybullet_config(
         sdf_filename=str(pyb_cfg_raw.get("sdf_filename", "workpiece_sdf.npz")),
         sdf_required=bool(pyb_cfg_raw.get("sdf_required", True)),
         robot_surface_points_per_link=(
-            pyb_cfg_raw.get("robot_surface_points_per_link", {"pen_link": 80, "wrist3": 16})
+            pyb_cfg_raw.get("robot_surface_points_per_link", {"pen_link": 80, "wrist_3_link": 16})
         ),
         sdf_out_of_bounds_value_m=pyb_cfg_raw.get("sdf_out_of_bounds_value_m"),
         log_legacy_pybullet_metrics=bool(

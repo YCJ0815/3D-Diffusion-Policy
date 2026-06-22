@@ -421,7 +421,7 @@ class PyBulletValidationConfig:
     selection_length_weight: float = 0.005
     sdf_filename: str = "workpiece_sdf.npz"
     sdf_required: bool = True
-    robot_surface_points_per_link: int | dict[str, int] = field(default_factory=lambda: {"pen_link": 80, "wrist3": 16})
+    robot_surface_points_per_link: int | dict[str, int] = field(default_factory=lambda: {"pen_link": 80, "wrist_3_link": 16})
     sdf_out_of_bounds_value_m: float | None = None
     log_legacy_pybullet_metrics: bool = True
     collision_log_path: str | None = None
@@ -502,7 +502,7 @@ class PyBulletValidationConfig:
             sdf_filename=str(cfg.get("sdf_filename", "workpiece_sdf.npz")),
             sdf_required=bool(cfg.get("sdf_required", True)),
             robot_surface_points_per_link=(
-                cfg.get("robot_surface_points_per_link", {"pen_link": 80, "wrist3": 16})
+                cfg.get("robot_surface_points_per_link", {"pen_link": 80, "wrist_3_link": 16})
             ),
             sdf_out_of_bounds_value_m=(
                 None if sdf_out_of_bounds_value_m is None else float(sdf_out_of_bounds_value_m)
@@ -750,6 +750,8 @@ class PyBulletCollisionValidator:
         tree = ET.parse(resolved_urdf_path)
         root = tree.getroot()
         points_by_link: dict[int, list[np.ndarray]] = {}
+        available_collision_link_names: list[str] = []
+        selected_point_counts_by_link: dict[str, int] = {}
 
         for link_elem in root.findall("link"):
             link_name = link_elem.get("name")
@@ -807,14 +809,43 @@ class PyBulletCollisionValidator:
                 link_candidates.append(local_points.astype(np.float32))
 
             if link_candidates:
+                available_collision_link_names.append(str(link_name))
                 merged = np.concatenate(link_candidates, axis=0)
                 selected = _select_deterministic_surface_points(merged, _resolve_points(link_name))
-                points_by_link.setdefault(link_index, []).append(selected)
+                selected_point_counts_by_link[str(link_name)] = int(selected.shape[0])
+                if selected.size > 0:
+                    points_by_link.setdefault(link_index, []).append(selected)
 
-        return {
+        if isinstance(points_per_link, dict):
+            requested_link_names = [str(link_name) for link_name in points_per_link.keys()]
+            missing_requested_links = [
+                link_name
+                for link_name in requested_link_names
+                if link_name not in available_collision_link_names
+            ]
+            if missing_requested_links:
+                raise ValueError(
+                    "Failed to build robot surface points because some configured link names "
+                    "were not found among URDF collision links. "
+                    f"Requested={requested_link_names}, missing={missing_requested_links}, "
+                    f"available_collision_links={available_collision_link_names}, "
+                    f"urdf_path={resolved_urdf_path}"
+                )
+
+        surface_points_by_link = {
             link_index: np.concatenate(point_chunks, axis=0).astype(np.float32)
             for link_index, point_chunks in points_by_link.items()
+            if point_chunks
         }
+        if not surface_points_by_link:
+            raise ValueError(
+                "Failed to build any non-empty robot surface sampling points from the URDF collision geometry. "
+                f"points_per_link={points_per_link}, "
+                f"available_collision_links={available_collision_link_names}, "
+                f"selected_point_counts_by_link={selected_point_counts_by_link}, "
+                f"urdf_path={resolved_urdf_path}"
+            )
+        return surface_points_by_link
 
     def _get_link_pose(self, link_index: int) -> tuple[np.ndarray, np.ndarray]:
         if link_index == -1:
