@@ -288,6 +288,23 @@ def build_parser() -> argparse.ArgumentParser:
             "below simple_workpiece_id_offset are kept; simple jobs are excluded."
         ),
     )
+    parser.add_argument(
+        "--trajopt-success-only",
+        action="store_true",
+        help=(
+            "Only run validation/inference on episodes whose trajopt/planning success flag is true. "
+            "The script will look for a per-episode success field in the zarr dataset."
+        ),
+    )
+    parser.add_argument(
+        "--trajopt-success-key",
+        type=str,
+        default=None,
+        help=(
+            "Optional explicit zarr field name for the per-episode trajopt/planning success flag. "
+            "When omitted, the script will try common candidates automatically."
+        ),
+    )
     return parser
 
 
@@ -562,6 +579,99 @@ def _filter_episode_indices_by_job_type(
         int(episode_idx)
         for episode_idx in np.asarray(episode_indices, dtype=np.int64).tolist()
         if int(workpiece_ids[int(episode_idx)]) < int(simple_workpiece_id_offset)
+    ]
+    return np.asarray(filtered_episode_indices, dtype=np.int64)
+
+
+def _to_episode_bool_flags_from_array(
+    *,
+    values: np.ndarray,
+    replay_buffer,
+    field_name: str,
+) -> np.ndarray | None:
+    array = np.asarray(values)
+    if array.ndim == 0:
+        return None
+    if array.shape[0] == replay_buffer.n_episodes:
+        return np.asarray(array, dtype=bool).reshape(-1)
+    if array.shape[0] == replay_buffer.n_steps:
+        episode_ends = np.asarray(replay_buffer.episode_ends[:], dtype=np.int64)
+        flags: list[bool] = []
+        for episode_idx in range(replay_buffer.n_episodes):
+            start_idx, end_idx = _episode_bounds(episode_ends, episode_idx)
+            episode_values = np.asarray(array[start_idx:end_idx]).reshape(-1)
+            if episode_values.size == 0:
+                raise ValueError(f"Episode {episode_idx} is empty when reading `{field_name}`.")
+            first_value = bool(episode_values[0])
+            if not np.all(np.asarray(episode_values, dtype=bool) == first_value):
+                raise ValueError(
+                    f"Field `{field_name}` varies within episode {episode_idx}; "
+                    "expected a stable per-episode success flag."
+                )
+            flags.append(first_value)
+        return np.asarray(flags, dtype=bool)
+    return None
+
+
+def _resolve_trajopt_success_flags(
+    *,
+    replay_buffer,
+    explicit_key: str | None,
+) -> tuple[np.ndarray, str]:
+    candidate_keys: list[str] = []
+    if explicit_key is not None:
+        candidate_keys.append(str(explicit_key))
+    candidate_keys.extend(
+        [
+            "trajopt_success",
+            "plan_success",
+            "motion_gen_success",
+            "planning_success",
+            "success",
+        ]
+    )
+
+    checked_keys: list[str] = []
+    seen_keys: set[str] = set()
+    for key in candidate_keys:
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        checked_keys.append(key)
+
+        if key in replay_buffer.meta:
+            flags = _to_episode_bool_flags_from_array(
+                values=replay_buffer.meta[key][:],
+                replay_buffer=replay_buffer,
+                field_name=f"meta/{key}",
+            )
+            if flags is not None:
+                return flags, f"meta/{key}"
+
+        if key in replay_buffer:
+            flags = _to_episode_bool_flags_from_array(
+                values=replay_buffer[key][:],
+                replay_buffer=replay_buffer,
+                field_name=f"data/{key}",
+            )
+            if flags is not None:
+                return flags, f"data/{key}"
+
+    raise KeyError(
+        "Unable to find a per-episode trajopt/planning success flag in the zarr dataset. "
+        f"Checked keys: {checked_keys}. "
+        "Pass --trajopt-success-key <field> if your dataset uses a different name."
+    )
+
+
+def _filter_episode_indices_by_trajopt_success(
+    episode_indices: np.ndarray,
+    trajopt_success_flags: np.ndarray,
+) -> np.ndarray:
+    filtered_episode_indices = [
+        int(episode_idx)
+        for episode_idx in np.asarray(episode_indices, dtype=np.int64).tolist()
+        if bool(trajopt_success_flags[int(episode_idx)])
     ]
     return np.asarray(filtered_episode_indices, dtype=np.int64)
 
@@ -962,6 +1072,17 @@ def main() -> None:
             "Rebuild the dataset with workpiece metadata."
         )
     workpiece_ids = np.asarray(replay_buffer.meta["workpiece_ids"][:], dtype=np.int64)
+    trajopt_success_flags = None
+    trajopt_success_source = None
+    if args.trajopt_success_only:
+        trajopt_success_flags, trajopt_success_source = _resolve_trajopt_success_flags(
+            replay_buffer=replay_buffer,
+            explicit_key=args.trajopt_success_key,
+        )
+        print(
+            "  trajopt_success_only=true -> using success flag from "
+            f"{trajopt_success_source}"
+        )
 
     print("Initialising PyBullet validator …")
     resolved_target_steps = args.target_steps
@@ -1027,6 +1148,16 @@ def main() -> None:
             "  regular_jobs_only=true -> filtered validation episodes: "
             f"{len(val_episode_indices)}"
         )
+    if args.trajopt_success_only:
+        before_trajopt_filter = len(val_episode_indices)
+        val_episode_indices = _filter_episode_indices_by_trajopt_success(
+            val_episode_indices,
+            np.asarray(trajopt_success_flags, dtype=bool),
+        )
+        print(
+            "  trajopt_success_only=true -> filtered validation episodes: "
+            f"{len(val_episode_indices)} / {before_trajopt_filter}"
+        )
 
     if args.max_episodes is not None and args.max_episodes < len(val_episode_indices):
         val_episode_indices = val_episode_indices[: args.max_episodes]
@@ -1047,6 +1178,12 @@ def main() -> None:
         print(
             "  (single-episode mode: validation subset index "
             f"{args.single_episode_index})"
+        )
+
+    if len(val_episode_indices) == 0:
+        raise ValueError(
+            "No validation episodes remain after applying the requested filters. "
+            "Check --trajopt-success-key / --regular-jobs-only / --max-episodes."
         )
 
     per_traj_metrics: list[dict] = []
@@ -1235,6 +1372,9 @@ def main() -> None:
             "inference_num_steps": pyb_cfg.inference_num_steps,
             "measure_inference_time": bool(args.measure_inference_time),
             "regular_jobs_only": bool(args.regular_jobs_only),
+            "trajopt_success_only": bool(args.trajopt_success_only),
+            "trajopt_success_key": args.trajopt_success_key,
+            "trajopt_success_source": trajopt_success_source,
             "simple_workpiece_id_offset": int(pyb_cfg.simple_workpiece_id_offset),
             "single_episode_mode": args.single_episode_index is not None,
             "single_episode_validation_offset": args.single_episode_index,
