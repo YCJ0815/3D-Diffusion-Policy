@@ -16,6 +16,7 @@ import pathlib
 import sys
 import time
 from typing import Optional
+import xml.etree.ElementTree as ET
 
 import numpy as np
 import torch
@@ -44,6 +45,7 @@ from diffusion_policy_3d.dataset.transition_dataset import (  # noqa: E402
 from diffusion_policy_3d.dataset.transition_cspace_dataset import (  # noqa: E402
     TransitionTrajectoryCSpaceDataset,
 )
+from diffusion_policy_3d.common.input_data import load_bspline_planning_input_data  # noqa: E402
 from guidance_config import (  # noqa: E402
     add_surface_cbf_qp_guidance_parser_args,
     apply_surface_cbf_qp_guidance_config,
@@ -303,6 +305,25 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Optional explicit zarr field name for the per-episode trajopt/planning success flag. "
             "When omitted, the script will try common candidates automatically."
+        ),
+    )
+    parser.add_argument(
+        "--trajopt-success-results-dir",
+        type=str,
+        action="append",
+        default=None,
+        help=(
+            "Optional planning-results root to read trajopt_success directly from "
+            "transition_*.json files. Can be passed multiple times."
+        ),
+    )
+    parser.add_argument(
+        "--trajopt-success-match-tol",
+        type=float,
+        default=1e-5,
+        help=(
+            "Tolerance used when matching zarr episodes to planning-result JSON/NPZ "
+            "via normalized start/goal joint vectors."
         ),
     )
     return parser
@@ -674,6 +695,265 @@ def _filter_episode_indices_by_trajopt_success(
         if bool(trajopt_success_flags[int(episode_idx)])
     ]
     return np.asarray(filtered_episode_indices, dtype=np.int64)
+
+
+def _default_urdf_path() -> pathlib.Path:
+    return _PROJECT_ROOT / "config" / "ur5e_with_pen.urdf"
+
+
+def _load_joint_limits_from_urdf(urdf_path: str | None) -> tuple[np.ndarray, np.ndarray]:
+    resolved_urdf_path = pathlib.Path(
+        urdf_path if urdf_path is not None else str(_default_urdf_path())
+    ).expanduser().resolve()
+    root = ET.parse(resolved_urdf_path).getroot()
+    lower_limits: list[float] = []
+    upper_limits: list[float] = []
+    for joint in root.findall("joint"):
+        if joint.get("type") != "revolute":
+            continue
+        limit = joint.find("limit")
+        if limit is None:
+            continue
+        lower = limit.get("lower")
+        upper = limit.get("upper")
+        if lower is None or upper is None:
+            continue
+        lower_limits.append(float(lower))
+        upper_limits.append(float(upper))
+    if not lower_limits:
+        raise ValueError(f"No revolute joint limits found in URDF: {resolved_urdf_path}")
+    return (
+        np.asarray(lower_limits, dtype=np.float32),
+        np.asarray(upper_limits, dtype=np.float32),
+    )
+
+
+def _denormalize_joint_angles(
+    normalized_joint_angles: np.ndarray,
+    lower_limits: np.ndarray,
+    upper_limits: np.ndarray,
+) -> np.ndarray:
+    normalized_joint_angles = np.asarray(normalized_joint_angles, dtype=np.float32).reshape(-1)
+    normalized_01 = (normalized_joint_angles + 1.0) * 0.5
+    return (lower_limits + normalized_01 * (upper_limits - lower_limits)).astype(np.float32)
+
+
+def _resolve_episode_joint_vectors(
+    replay_buffer,
+    field_name: str,
+) -> np.ndarray:
+    if field_name not in replay_buffer:
+        raise KeyError(
+            f"Expected zarr data/{field_name} for trajopt-success JSON matching, but it is missing."
+        )
+    array = np.asarray(replay_buffer[field_name][:], dtype=np.float32)
+    if array.ndim != 2:
+        raise ValueError(
+            f"Expected zarr data/{field_name} to have shape [T, J], got {array.shape}."
+        )
+    episode_ends = np.asarray(replay_buffer.episode_ends[:], dtype=np.int64)
+    vectors: list[np.ndarray] = []
+    for episode_idx in range(replay_buffer.n_episodes):
+        start_idx, end_idx = _episode_bounds(episode_ends, episode_idx)
+        episode_values = np.asarray(array[start_idx:end_idx], dtype=np.float32)
+        if episode_values.shape[0] == 0:
+            raise ValueError(f"Episode {episode_idx} is empty when reading data/{field_name}.")
+        first_value = np.asarray(episode_values[0], dtype=np.float32).reshape(-1)
+        if not np.allclose(episode_values, first_value[None, :], atol=1e-6, rtol=0.0):
+            raise ValueError(
+                f"Field data/{field_name} varies within episode {episode_idx}; "
+                "expected a stable per-episode vector."
+            )
+        vectors.append(first_value)
+    return np.asarray(vectors, dtype=np.float32)
+
+
+def _resolve_episode_reversed_flags(replay_buffer) -> np.ndarray:
+    if "is_reversed_episode" not in replay_buffer.meta:
+        return np.zeros(replay_buffer.n_episodes, dtype=bool)
+    values = np.asarray(replay_buffer.meta["is_reversed_episode"][:], dtype=np.int64).reshape(-1)
+    if values.shape != (replay_buffer.n_episodes,):
+        raise ValueError(
+            "`meta/is_reversed_episode` must have shape "
+            f"({replay_buffer.n_episodes},), got {values.shape}"
+        )
+    return values.astype(bool)
+
+
+def _resolve_job_name_from_path(path: pathlib.Path) -> str | None:
+    for parent in path.parents:
+        if parent.name.startswith("job_"):
+            return parent.name
+    return None
+
+
+def _infer_source_kind_from_results_dirs(
+    path: pathlib.Path,
+    results_dirs: list[pathlib.Path],
+) -> str:
+    resolved_path = path.expanduser().resolve()
+    matches: list[pathlib.Path] = []
+    for results_dir in results_dirs:
+        resolved_dir = results_dir.expanduser().resolve()
+        try:
+            resolved_path.relative_to(resolved_dir)
+            matches.append(resolved_dir)
+        except ValueError:
+            continue
+    if matches:
+        matched_root = max(matches, key=lambda current: len(current.parts))
+        return "simple" if "simple" in matched_root.name.lower() else "regular"
+    for parent in resolved_path.parents:
+        if "simple" in parent.name.lower():
+            return "simple"
+    return "regular"
+
+
+def _encode_workpiece_id(local_workpiece_id: int, source_kind: str) -> int:
+    return 1000 + int(local_workpiece_id) if source_kind == "simple" else int(local_workpiece_id)
+
+
+def _episode_signature_key(
+    workpiece_id: int,
+    first_joint_angles: np.ndarray,
+    last_joint_angles: np.ndarray,
+    tol: float,
+) -> tuple[int, tuple[int, ...]]:
+    if tol <= 0:
+        raise ValueError(f"trajopt-success match tolerance must be positive, got {tol}")
+    signature = np.concatenate(
+        [
+            np.asarray(first_joint_angles, dtype=np.float32).reshape(-1),
+            np.asarray(last_joint_angles, dtype=np.float32).reshape(-1),
+        ]
+    )
+    quantized = np.rint(signature / float(tol)).astype(np.int64)
+    return int(workpiece_id), tuple(int(value) for value in quantized.tolist())
+
+
+def _resolve_trajopt_success_flags_from_results_json(
+    *,
+    replay_buffer,
+    workpiece_ids: np.ndarray,
+    goal_position_norm_m: float,
+    urdf_path: str | None,
+    results_dirs: list[str],
+    match_tol: float,
+) -> tuple[np.ndarray, str]:
+    resolved_results_dirs = [
+        pathlib.Path(path).expanduser().resolve() for path in results_dirs
+    ]
+    json_paths: list[pathlib.Path] = []
+    for results_dir in resolved_results_dirs:
+        if not results_dir.is_dir():
+            raise FileNotFoundError(
+                f"--trajopt-success-results-dir does not exist or is not a directory: {results_dir}"
+            )
+        json_paths.extend(sorted(results_dir.rglob("transition_*.json")))
+    if not json_paths:
+        raise FileNotFoundError(
+            "No transition_*.json files found under trajopt-success results dirs: "
+            f"{[str(path) for path in resolved_results_dirs]}"
+        )
+
+    signature_to_success: dict[tuple[int, tuple[int, ...]], bool] = {}
+    for json_path in json_paths:
+        metadata = json.loads(json_path.read_text(encoding="utf-8"))
+        array_file = metadata.get("array_file")
+        if not array_file:
+            raise KeyError(f"Missing `array_file` in planning metadata: {json_path}")
+        npz_path = (json_path.parent / str(array_file)).resolve()
+        if not npz_path.is_file():
+            raise FileNotFoundError(
+                f"Planning metadata {json_path} references missing NPZ file: {npz_path}"
+            )
+        job_name = _resolve_job_name_from_path(npz_path)
+        if job_name is None:
+            raise ValueError(f"Unable to infer job name from planning NPZ path: {npz_path}")
+        try:
+            local_workpiece_id = int(job_name.split("_")[-1])
+        except ValueError as exc:
+            raise ValueError(f"Invalid job name format for planning NPZ path: {npz_path}") from exc
+        source_kind = _infer_source_kind_from_results_dirs(npz_path, resolved_results_dirs)
+        workpiece_id = _encode_workpiece_id(local_workpiece_id, source_kind)
+        planning_input = load_bspline_planning_input_data(
+            npz_path=str(npz_path),
+            norm=float(goal_position_norm_m),
+            urdf_path=urdf_path,
+        )
+        success_value = bool(metadata.get("trajopt_success", False))
+        forward_key = _episode_signature_key(
+            workpiece_id=workpiece_id,
+            first_joint_angles=planning_input.first_joint_angles_normalized,
+            last_joint_angles=planning_input.last_joint_angles_normalized,
+            tol=match_tol,
+        )
+        reversed_key = _episode_signature_key(
+            workpiece_id=workpiece_id,
+            first_joint_angles=planning_input.last_joint_angles_normalized,
+            last_joint_angles=planning_input.first_joint_angles_normalized,
+            tol=match_tol,
+        )
+        for key in (forward_key, reversed_key):
+            existing = signature_to_success.get(key)
+            if existing is not None and bool(existing) != success_value:
+                raise ValueError(
+                    "Conflicting trajopt_success values found for the same trajectory signature "
+                    f"while indexing planning results: {json_path}"
+                )
+            signature_to_success[key] = success_value
+
+    episode_first_joint_angles = _resolve_episode_joint_vectors(
+        replay_buffer, "first_joint_angles_normalized"
+    )
+    episode_last_joint_angles = _resolve_episode_joint_vectors(
+        replay_buffer, "last_joint_angles_normalized"
+    )
+    episode_reversed_flags = _resolve_episode_reversed_flags(replay_buffer)
+
+    flags: list[bool] = []
+    unmatched_episodes: list[int] = []
+    lower_limits, upper_limits = _load_joint_limits_from_urdf(urdf_path)
+    for episode_idx in range(replay_buffer.n_episodes):
+        first_joint_angles = episode_first_joint_angles[episode_idx]
+        last_joint_angles = episode_last_joint_angles[episode_idx]
+        signature_key = _episode_signature_key(
+            workpiece_id=int(workpiece_ids[episode_idx]),
+            first_joint_angles=first_joint_angles,
+            last_joint_angles=last_joint_angles,
+            tol=match_tol,
+        )
+        success_flag = signature_to_success.get(signature_key)
+        if success_flag is None:
+            unmatched_episodes.append(int(episode_idx))
+            if len(unmatched_episodes) <= 5:
+                start_joint_angles = _denormalize_joint_angles(
+                    first_joint_angles, lower_limits, upper_limits
+                )
+                end_joint_angles = _denormalize_joint_angles(
+                    last_joint_angles, lower_limits, upper_limits
+                )
+                print(
+                    "  [trajopt-success-json] unmatched episode "
+                    f"{episode_idx}: workpiece_id={int(workpiece_ids[episode_idx])} "
+                    f"is_reversed={bool(episode_reversed_flags[episode_idx])} "
+                    f"q_start={np.array2string(start_joint_angles, precision=4)} "
+                    f"q_goal={np.array2string(end_joint_angles, precision=4)}"
+                )
+            success_flag = False
+        flags.append(bool(success_flag))
+
+    if unmatched_episodes:
+        print(
+            "  [trajopt-success-json] warning: "
+            f"{len(unmatched_episodes)} / {replay_buffer.n_episodes} episodes could not be matched "
+            "to planning-result JSON and will be treated as trajopt_success=false."
+        )
+
+    return (
+        np.asarray(flags, dtype=bool),
+        "planning_results_json:" + ",".join(str(path) for path in resolved_results_dirs),
+    )
 
 
 def _predict_surface_cbf_qp_guided(
@@ -1075,14 +1355,15 @@ def main() -> None:
     trajopt_success_flags = None
     trajopt_success_source = None
     if args.trajopt_success_only:
-        trajopt_success_flags, trajopt_success_source = _resolve_trajopt_success_flags(
-            replay_buffer=replay_buffer,
-            explicit_key=args.trajopt_success_key,
-        )
-        print(
-            "  trajopt_success_only=true -> using success flag from "
-            f"{trajopt_success_source}"
-        )
+        if not args.trajopt_success_results_dir:
+            trajopt_success_flags, trajopt_success_source = _resolve_trajopt_success_flags(
+                replay_buffer=replay_buffer,
+                explicit_key=args.trajopt_success_key,
+            )
+            print(
+                "  trajopt_success_only=true -> using success flag from "
+                f"{trajopt_success_source}"
+            )
 
     print("Initialising PyBullet validator …")
     resolved_target_steps = args.target_steps
@@ -1098,6 +1379,19 @@ def main() -> None:
         simple_jobs_root=args.simple_jobs_root,
         target_steps=resolved_target_steps,
     )
+    if args.trajopt_success_only and args.trajopt_success_results_dir:
+        trajopt_success_flags, trajopt_success_source = _resolve_trajopt_success_flags_from_results_json(
+            replay_buffer=replay_buffer,
+            workpiece_ids=workpiece_ids,
+            goal_position_norm_m=float(pyb_cfg.goal_position_norm_m),
+            urdf_path=pyb_cfg.urdf_path,
+            results_dirs=args.trajopt_success_results_dir,
+            match_tol=float(args.trajopt_success_match_tol),
+        )
+        print(
+            "  trajopt_success_only=true -> using success flag from "
+            f"{trajopt_success_source}"
+        )
     candidate_pool_enabled = _candidate_pool_enabled(args.candidate_pool)
     guidance_enabled = bool(args.enable_surface_cbf_qp_guidance)
     effective_num_candidates = (
@@ -1183,7 +1477,8 @@ def main() -> None:
     if len(val_episode_indices) == 0:
         raise ValueError(
             "No validation episodes remain after applying the requested filters. "
-            "Check --trajopt-success-key / --regular-jobs-only / --max-episodes."
+            "Check --trajopt-success-key / --trajopt-success-results-dir / "
+            "--regular-jobs-only / --max-episodes."
         )
 
     per_traj_metrics: list[dict] = []
@@ -1374,6 +1669,8 @@ def main() -> None:
             "regular_jobs_only": bool(args.regular_jobs_only),
             "trajopt_success_only": bool(args.trajopt_success_only),
             "trajopt_success_key": args.trajopt_success_key,
+            "trajopt_success_results_dir": list(args.trajopt_success_results_dir or []),
+            "trajopt_success_match_tol": float(args.trajopt_success_match_tol),
             "trajopt_success_source": trajopt_success_source,
             "simple_workpiece_id_offset": int(pyb_cfg.simple_workpiece_id_offset),
             "single_episode_mode": args.single_episode_index is not None,
