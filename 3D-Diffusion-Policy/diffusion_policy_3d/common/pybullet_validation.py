@@ -1012,6 +1012,109 @@ class PyBulletCollisionValidator:
                 physicsClientId=self.client_id,
             )
 
+    def compute_joint_state_singularity_metrics(
+        self,
+        joint_state: np.ndarray,
+        *,
+        link_index: int | None = None,
+        local_point: np.ndarray | None = None,
+    ) -> dict[str, float | str]:
+        joint_state = np.asarray(joint_state, dtype=np.float32).reshape(-1)
+        self._set_robot_joints(joint_state)
+        resolved_link_index = self.tcp_link_index if link_index is None else int(link_index)
+        resolved_local_point = (
+            np.zeros((3,), dtype=np.float32)
+            if local_point is None
+            else np.asarray(local_point, dtype=np.float32).reshape(3)
+        )
+        zero_vec = [0.0] * len(self.revolute_joint_indices)
+        jacobian_result = self.pb.calculateJacobian(
+            self.robot_id,
+            resolved_link_index,
+            resolved_local_point.tolist(),
+            [float(v) for v in joint_state],
+            zero_vec,
+            zero_vec,
+            physicsClientId=self.client_id,
+        )
+        jacobian_t = np.asarray(jacobian_result[0], dtype=np.float64)
+        jacobian_r = np.asarray(jacobian_result[1], dtype=np.float64)
+        geometric_jacobian = np.concatenate([jacobian_t, jacobian_r], axis=0)
+        if geometric_jacobian.size == 0:
+            return {
+                "link_name": self.link_index_to_name.get(int(resolved_link_index), str(resolved_link_index)),
+                "sigma_min": float("nan"),
+                "sigma_max": float("nan"),
+                "condition_number": float("nan"),
+                "reciprocal_condition_number": float("nan"),
+                "manipulability": float("nan"),
+            }
+        singular_values = np.linalg.svd(geometric_jacobian, compute_uv=False)
+        sigma_max = float(np.max(singular_values)) if singular_values.size > 0 else float("nan")
+        sigma_min = float(np.min(singular_values)) if singular_values.size > 0 else float("nan")
+        if singular_values.size == 0 or (not np.isfinite(sigma_min)) or sigma_min <= 1e-12:
+            condition_number = float("inf")
+            reciprocal_condition_number = 0.0
+        else:
+            condition_number = float(sigma_max / sigma_min) if np.isfinite(sigma_max) else float("nan")
+            reciprocal_condition_number = float(sigma_min / sigma_max) if sigma_max > 1e-12 else 0.0
+        gram = geometric_jacobian @ geometric_jacobian.T
+        det_gram = float(np.linalg.det(gram))
+        manipulability = float(np.sqrt(max(det_gram, 0.0))) if np.isfinite(det_gram) else float("nan")
+        return {
+            "link_name": self.link_index_to_name.get(int(resolved_link_index), str(resolved_link_index)),
+            "sigma_min": sigma_min,
+            "sigma_max": sigma_max,
+            "condition_number": condition_number,
+            "reciprocal_condition_number": reciprocal_condition_number,
+            "manipulability": manipulability,
+        }
+
+    def compute_joint_trajectory_singularity_metrics(
+        self,
+        joint_trajectory: np.ndarray,
+        *,
+        link_index: int | None = None,
+        local_point: np.ndarray | None = None,
+    ) -> dict[str, float | str]:
+        joint_trajectory = np.asarray(joint_trajectory, dtype=np.float32)
+        if joint_trajectory.ndim != 2:
+            raise ValueError(
+                f"joint_trajectory must be rank-2 [T, J], got shape {joint_trajectory.shape}"
+            )
+        per_step = [
+            self.compute_joint_state_singularity_metrics(
+                joint_state=joint_state,
+                link_index=link_index,
+                local_point=local_point,
+            )
+            for joint_state in joint_trajectory
+        ]
+
+        def _finite_values(key: str) -> np.ndarray:
+            values = np.asarray([float(item[key]) for item in per_step], dtype=np.float64)
+            return values[np.isfinite(values)]
+
+        sigma_min_values = _finite_values("sigma_min")
+        condition_values = _finite_values("condition_number")
+        reciprocal_condition_values = _finite_values("reciprocal_condition_number")
+        manipulability_values = _finite_values("manipulability")
+        return {
+            "link_name": str(per_step[0]["link_name"]) if per_step else self.cfg.tcp_link_name,
+            "sigma_min_min": float(np.min(sigma_min_values)) if sigma_min_values.size > 0 else float("nan"),
+            "sigma_min_mean": float(np.mean(sigma_min_values)) if sigma_min_values.size > 0 else float("nan"),
+            "condition_number_max": float(np.max(condition_values)) if condition_values.size > 0 else float("nan"),
+            "condition_number_mean": float(np.mean(condition_values)) if condition_values.size > 0 else float("nan"),
+            "reciprocal_condition_number_min": float(np.min(reciprocal_condition_values))
+            if reciprocal_condition_values.size > 0
+            else float("nan"),
+            "reciprocal_condition_number_mean": float(np.mean(reciprocal_condition_values))
+            if reciprocal_condition_values.size > 0
+            else float("nan"),
+            "manipulability_min": float(np.min(manipulability_values)) if manipulability_values.size > 0 else float("nan"),
+            "manipulability_mean": float(np.mean(manipulability_values)) if manipulability_values.size > 0 else float("nan"),
+        }
+
     def _get_tcp_pose(self) -> tuple[np.ndarray, np.ndarray]:
         link_state = self.pb.getLinkState(
             self.robot_id,

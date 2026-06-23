@@ -118,9 +118,115 @@ def _summarize_qp_status_from_selection(selection: dict[str, object]) -> dict[st
         ),
         "guidance_num_qp_called": int(guidance_log.get("num_qp_called", 0) or 0),
         "guidance_num_qp_success": int(guidance_log.get("num_qp_success", 0) or 0),
+        "guidance_scp_iterations": int(guidance_log.get("scp_iterations_configured", 0) or 0),
+        "guidance_selected_candidate_pass_count": int(guidance_log.get("selected_candidate_pass_count", 0) or 0),
+        "guidance_selected_candidate_passes_succeeded": int(
+            guidance_log.get("selected_candidate_passes_succeeded", 0) or 0
+        ),
         "guidance_repair_attempt_count": int(guidance_log.get("repair_attempt_count", 0) or 0),
         "guidance_repair_attempted_indices": list(guidance_log.get("repair_attempted_candidate_indices", []) or []),
     }
+
+
+def _compute_episode_singularity_summary(
+    *,
+    validator: PyBulletCollisionValidator,
+    start_joint_state: np.ndarray,
+    goal_joint_state: np.ndarray,
+    joint_trajectory: np.ndarray,
+) -> dict[str, object]:
+    start_metrics = validator.compute_joint_state_singularity_metrics(start_joint_state)
+    goal_metrics = validator.compute_joint_state_singularity_metrics(goal_joint_state)
+    trajectory_metrics = validator.compute_joint_trajectory_singularity_metrics(joint_trajectory)
+    return {
+        "link_name": str(start_metrics.get("link_name", trajectory_metrics.get("link_name", validator.cfg.tcp_link_name))),
+        "start": start_metrics,
+        "goal": goal_metrics,
+        "trajectory": trajectory_metrics,
+    }
+
+
+def _finite_group_mean(entries: list[dict[str, object]], extractor) -> float:
+    values = []
+    for entry in entries:
+        value = extractor(entry)
+        if value is None:
+            continue
+        value = float(value)
+        if np.isfinite(value):
+            values.append(value)
+    return float(np.mean(values)) if values else float("nan")
+
+
+def _build_singularity_group_summary(per_traj_metrics: list[dict[str, object]]) -> dict[str, dict[str, object]]:
+    def _scp_used(entry: dict[str, object]) -> bool:
+        return bool(entry.get("surface_cbf_qp_guidance_enabled", False)) and int(
+            entry.get("guidance_selected_candidate_pass_count", 0) or 0
+        ) > 0
+
+    groups = {
+        "scp_qp_failed": [
+            entry for entry in per_traj_metrics
+            if _scp_used(entry) and bool(entry.get("has_collision", False))
+        ],
+        "scp_qp_collision_free": [
+            entry for entry in per_traj_metrics
+            if _scp_used(entry) and not bool(entry.get("has_collision", False))
+        ],
+        "no_qp_collision_free": [
+            entry for entry in per_traj_metrics
+            if bool(entry.get("surface_cbf_qp_guidance_enabled", False))
+            and int(entry.get("guidance_selected_candidate_pass_count", 0) or 0) == 0
+            and not bool(entry.get("has_collision", False))
+        ],
+    }
+
+    summary: dict[str, dict[str, object]] = {}
+    for group_name, entries in groups.items():
+        summary[group_name] = {
+            "count": int(len(entries)),
+            "start_sigma_min_mean": _finite_group_mean(
+                entries,
+                lambda entry: (((entry.get("singularity") or {}).get("start") or {}).get("sigma_min")),
+            ),
+            "start_reciprocal_condition_number_mean": _finite_group_mean(
+                entries,
+                lambda entry: (((entry.get("singularity") or {}).get("start") or {}).get("reciprocal_condition_number")),
+            ),
+            "start_manipulability_mean": _finite_group_mean(
+                entries,
+                lambda entry: (((entry.get("singularity") or {}).get("start") or {}).get("manipulability")),
+            ),
+            "goal_sigma_min_mean": _finite_group_mean(
+                entries,
+                lambda entry: (((entry.get("singularity") or {}).get("goal") or {}).get("sigma_min")),
+            ),
+            "goal_reciprocal_condition_number_mean": _finite_group_mean(
+                entries,
+                lambda entry: (((entry.get("singularity") or {}).get("goal") or {}).get("reciprocal_condition_number")),
+            ),
+            "goal_manipulability_mean": _finite_group_mean(
+                entries,
+                lambda entry: (((entry.get("singularity") or {}).get("goal") or {}).get("manipulability")),
+            ),
+            "trajectory_sigma_min_min_mean": _finite_group_mean(
+                entries,
+                lambda entry: (((entry.get("singularity") or {}).get("trajectory") or {}).get("sigma_min_min")),
+            ),
+            "trajectory_sigma_min_mean_mean": _finite_group_mean(
+                entries,
+                lambda entry: (((entry.get("singularity") or {}).get("trajectory") or {}).get("sigma_min_mean")),
+            ),
+            "trajectory_reciprocal_condition_number_min_mean": _finite_group_mean(
+                entries,
+                lambda entry: (((entry.get("singularity") or {}).get("trajectory") or {}).get("reciprocal_condition_number_min")),
+            ),
+            "trajectory_manipulability_min_mean": _finite_group_mean(
+                entries,
+                lambda entry: (((entry.get("singularity") or {}).get("trajectory") or {}).get("manipulability_min")),
+            ),
+        }
+    return summary
 
 
 def _print_validation_progress(
@@ -133,11 +239,15 @@ def _print_validation_progress(
     metric: dict[str, object],
 ) -> None:
     qp_summary = _summarize_qp_status_from_selection(selection)
+    scp_part = (
+        f"SCP={qp_summary['guidance_selected_candidate_passes_succeeded']}/"
+        f"{qp_summary['guidance_selected_candidate_pass_count']}"
+    )
     qp_part = (
-        f"QP=yes passes={qp_summary['guidance_num_qp_success']}/{qp_summary['guidance_num_qp_called']}"
+        f"{scp_part} QP=yes passes={qp_summary['guidance_num_qp_success']}/{qp_summary['guidance_num_qp_called']}"
         if qp_summary["qp_attempted"]
         else (
-            f"QP=no reason={qp_summary['qp_skip_reason_text']} "
+            f"{scp_part} QP=no reason={qp_summary['qp_skip_reason_text']} "
             f"finite_sdf={qp_summary['selected_candidate_finite_sdf_value_count']}/"
             f"{qp_summary['selected_candidate_sdf_value_count']} "
             f"finite_timesteps={qp_summary['selected_candidate_finite_sdf_timestep_count']}"
@@ -192,6 +302,8 @@ def _build_validation_status_lines(
     status_line = (
         f"traj_collision_rate={traj_collision_rate_so_far:.3f} "
         f"step_collision_rate={step_collision_rate_so_far:.3f} "
+        f"SCP={qp_summary['guidance_selected_candidate_passes_succeeded']}/"
+        f"{qp_summary['guidance_selected_candidate_pass_count']} "
         f"QP={qp_summary['guidance_num_qp_success']}/{qp_summary['guidance_num_qp_called']} "
         f"repair={qp_summary['guidance_repair_attempt_count']} "
         f"selected_candidate={int(selection.get('selected_candidate_idx', 0))}"
@@ -1664,6 +1776,18 @@ def main() -> None:
                 goal_position_normalized=raw_obs["goal_position"][0],
                 episode_idx=int(ep_idx),
             )
+            start_joint_state = validator._unnormalize_joint_state(
+                raw_obs["first_joint_angles_normalized"][0]
+            )
+            goal_joint_state = validator._unnormalize_joint_state(
+                raw_obs["last_joint_angles_normalized"][0]
+            )
+            singularity_summary = _compute_episode_singularity_summary(
+                validator=validator,
+                start_joint_state=start_joint_state,
+                goal_joint_state=goal_joint_state,
+                joint_trajectory=joint_trajectory,
+            )
             _append_collision_events(
                 output_dir / "pybullet_collision_events.jsonl",
                 metric.get("collision_events", []),
@@ -1697,6 +1821,7 @@ def main() -> None:
                 "guidance_candidate_count": selection.get("guidance_candidate_count"),
                 "guidance_repair_attempt_count": int(selection.get("guidance_repair_attempt_count", 0) or 0),
                 "guidance_repair_attempted_indices": list(selection.get("guidance_repair_attempted_indices", []) or []),
+                "singularity": singularity_summary,
             }
             traj_entry.update(_summarize_qp_status_from_selection(selection))
             per_traj_metrics.append(traj_entry)
@@ -1740,6 +1865,7 @@ def main() -> None:
     sdf_valid_rate = len(sdf_distances) / total if total > 0 else 0.0
     goal_reached_count = sum(1 for t in per_traj_metrics if t["goal_reached"])
     mean_goal_error = float(np.mean(goal_errors)) if goal_errors else float("nan")
+    singularity_group_summary = _build_singularity_group_summary(per_traj_metrics)
 
     output_json = output_dir / "per_trajectory_metrics.json"
     summary = {
@@ -1802,6 +1928,7 @@ def main() -> None:
             "goal_reached_count": int(goal_reached_count),
             "goal_reached_rate": goal_reached_count / total if total > 0 else 0.0,
             "mean_goal_error_m": float(mean_goal_error),
+            "singularity_groups": singularity_group_summary,
         },
         "per_trajectory": per_traj_metrics,
     }
@@ -1834,6 +1961,14 @@ def main() -> None:
         f"({goal_reached_count / total * 100:.1f}%)"
     )
     print(f"  Mean goal error:                  {mean_goal_error:.4f} m")
+    print("  Singularity groups:")
+    for group_name, group_metrics in singularity_group_summary.items():
+        print(
+            f"    {group_name}: count={group_metrics['count']} "
+            f"start_sigma_min={group_metrics['start_sigma_min_mean']:.6f} "
+            f"goal_sigma_min={group_metrics['goal_sigma_min_mean']:.6f} "
+            f"traj_sigma_min_min={group_metrics['trajectory_sigma_min_min_mean']:.6f}"
+        )
     print("=" * 56)
 
 

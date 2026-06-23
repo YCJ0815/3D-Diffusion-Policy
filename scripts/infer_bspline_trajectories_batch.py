@@ -109,6 +109,11 @@ def summarize_qp_status(
         ),
         "guidance_num_qp_called": int(guidance_log.get("num_qp_called", 0) or 0),
         "guidance_num_qp_success": int(guidance_log.get("num_qp_success", 0) or 0),
+        "guidance_scp_iterations": int(guidance_log.get("scp_iterations_configured", 0) or 0),
+        "guidance_selected_candidate_pass_count": int(guidance_log.get("selected_candidate_pass_count", 0) or 0),
+        "guidance_selected_candidate_passes_succeeded": int(
+            guidance_log.get("selected_candidate_passes_succeeded", 0) or 0
+        ),
         "guidance_candidate_count": int(len(guidance_candidates)),
     }
 
@@ -121,11 +126,15 @@ def print_inference_progress(
     npz_path: pathlib.Path,
     summary: dict,
 ) -> None:
+    scp_part = (
+        f"SCP={summary['guidance_selected_candidate_passes_succeeded']}/"
+        f"{summary['guidance_selected_candidate_pass_count']}"
+    )
     qp_part = (
-        f"QP=yes passes={summary['guidance_num_qp_success']}/{summary['guidance_num_qp_called']}"
+        f"{scp_part} QP=yes passes={summary['guidance_num_qp_success']}/{summary['guidance_num_qp_called']}"
         if summary["qp_attempted"]
         else (
-            f"QP=no reason={summary['qp_skip_reason_text']} "
+            f"{scp_part} QP=no reason={summary['qp_skip_reason_text']} "
             f"finite_sdf={summary['selected_candidate_finite_sdf_value_count']}/"
             f"{summary['selected_candidate_sdf_value_count']} "
             f"finite_timesteps={summary['selected_candidate_finite_sdf_timestep_count']}"
