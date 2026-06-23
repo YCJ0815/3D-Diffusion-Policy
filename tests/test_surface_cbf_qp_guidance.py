@@ -16,7 +16,9 @@ from diffusion_policy_3d.common.surface_cbf_qp_guidance import (
     compute_path_length,
     compute_smoothness,
     interpolate_swept_segments,
+    rank_screened_candidates,
     select_guidance_candidate_indices,
+    summarize_sdf_risk,
 )
 
 
@@ -25,7 +27,7 @@ class SurfaceCBFQPGuidanceHelperTests(unittest.TestCase):
         schedule = build_guidance_target_schedule(5)
         np.testing.assert_allclose(
             schedule,
-            np.asarray([-0.02, -0.01, -0.005, 0.0, 0.0], dtype=np.float32),
+            np.asarray([-0.02, -0.015, -0.01, -0.005, 0.0], dtype=np.float32),
         )
 
     def test_select_guidance_candidate_indices_skips_safe_and_deep_candidates(self):
@@ -37,6 +39,60 @@ class SurfaceCBFQPGuidanceHelperTests(unittest.TestCase):
             eps_deep=0.03,
         )
         np.testing.assert_array_equal(selected, np.asarray([2, 4], dtype=np.int64))
+
+    def test_rank_screened_candidates_prefers_safer_then_shorter_then_smoother(self):
+        ranked = rank_screened_candidates(
+            [
+                {
+                    "candidate_index": 0,
+                    "coarse_min_margin": 0.02,
+                    "coarse_dangerous_timestep_count": 2,
+                    "coarse_total_risk": 0.3,
+                    "coarse_path_length": 4.0,
+                    "coarse_smoothness": 0.5,
+                },
+                {
+                    "candidate_index": 1,
+                    "coarse_min_margin": 0.05,
+                    "coarse_dangerous_timestep_count": 1,
+                    "coarse_total_risk": 0.1,
+                    "coarse_path_length": 5.0,
+                    "coarse_smoothness": 0.7,
+                },
+                {
+                    "candidate_index": 2,
+                    "coarse_min_margin": 0.05,
+                    "coarse_dangerous_timestep_count": 1,
+                    "coarse_total_risk": 0.1,
+                    "coarse_path_length": 4.5,
+                    "coarse_smoothness": 0.9,
+                },
+            ]
+        )
+        self.assertEqual(ranked, [2, 1, 0])
+
+    def test_summarize_sdf_risk_reports_margin_risk_and_counts(self):
+        sdf_result = {
+            "all_sdf_values": np.asarray(
+                [
+                    [0.08, 0.09],
+                    [0.02, 0.05],
+                    [0.01, -0.01],
+                ],
+                dtype=np.float32,
+            )
+        }
+        summary = summarize_sdf_risk(
+            sdf_result=sdf_result,
+            d_safe=0.03,
+            d_trigger=0.06,
+        )
+        self.assertAlmostEqual(summary["min_margin"], -0.04, places=6)
+        self.assertAlmostEqual(summary["min_clearance"], -0.01, places=6)
+        self.assertEqual(summary["dangerous_timestep_count"], 3)
+        self.assertGreater(summary["total_risk"], 0.0)
+        self.assertEqual(summary["finite_sdf_count"], 6)
+        self.assertEqual(summary["finite_timestep_count"], 3)
 
     def test_interpolate_swept_segments_inserts_expected_number_of_points(self):
         trajectory = np.asarray(

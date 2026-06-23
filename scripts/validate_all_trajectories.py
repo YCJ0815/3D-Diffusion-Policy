@@ -113,6 +113,8 @@ def _summarize_qp_status_from_selection(selection: dict[str, object]) -> dict[st
         ),
         "guidance_num_qp_called": int(guidance_log.get("num_qp_called", 0) or 0),
         "guidance_num_qp_success": int(guidance_log.get("num_qp_success", 0) or 0),
+        "guidance_repair_attempt_count": int(guidance_log.get("repair_attempt_count", 0) or 0),
+        "guidance_repair_attempted_indices": list(guidance_log.get("repair_attempted_candidate_indices", []) or []),
     }
 
 
@@ -1071,7 +1073,7 @@ def _predict_surface_cbf_qp_guided(
     return {
         "candidate_pool_enabled": False,
         "surface_cbf_qp_guidance_enabled": True,
-        "selected_candidate_idx": int(guidance_log.get("best_candidate_index", 0) or 0),
+        "selected_candidate_idx": int(guidance_log.get("selected_candidate_index", guidance_log.get("best_candidate_index", 0)) or 0),
         "selected_candidate_seed": int(base_seed),
         "selected_action_horizon": np.asarray(selected_action_horizon, dtype=np.float32),
         "selected_joint_trajectory": np.asarray(selected_result["joint_trajectory"], dtype=np.float32),
@@ -1082,7 +1084,9 @@ def _predict_surface_cbf_qp_guided(
         "inference_elapsed_sec": inference_elapsed_sec,
         "guidance_log": guidance_log,
         "guidance_candidates": list(result.get("guidance_candidates", [])),
-        "guidance_candidate_count": len(result.get("guidance_candidates", [])),
+        "guidance_candidate_count": int(guidance_log.get("num_candidates_total", len(result.get("guidance_candidates", []))) or 0),
+        "guidance_repair_attempt_count": int(guidance_log.get("repair_attempt_count", 0) or 0),
+        "guidance_repair_attempted_indices": list(guidance_log.get("repair_attempted_candidate_indices", []) or []),
     }
 
 
@@ -1604,6 +1608,8 @@ def main() -> None:
                 "guidance_log": selection.get("guidance_log"),
                 "guidance_candidates": selection.get("guidance_candidates", []),
                 "guidance_candidate_count": selection.get("guidance_candidate_count"),
+                "guidance_repair_attempt_count": int(selection.get("guidance_repair_attempt_count", 0) or 0),
+                "guidance_repair_attempted_indices": list(selection.get("guidance_repair_attempted_indices", []) or []),
             }
             traj_entry.update(_summarize_qp_status_from_selection(selection))
             per_traj_metrics.append(traj_entry)

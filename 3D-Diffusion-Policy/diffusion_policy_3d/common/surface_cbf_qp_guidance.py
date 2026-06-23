@@ -19,6 +19,7 @@ from diffusion_policy_3d.common.bspline import (
 
 
 DEFAULT_GUIDANCE_TARGETS = (-0.02, 0.0)
+MAX_REPAIR_ATTEMPTS = 5
 
 
 def _filter_scheduler_step_kwargs(scheduler, step_kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -74,8 +75,14 @@ class GuidanceLog:
     smoothness: float = math.nan
     path_length: float = math.nan
     best_candidate_index: int | None = None
+    selected_candidate_index: int | None = None
     used_existing_terminal_cbf: bool = False
     selected_by_certificate: bool = False
+    num_candidates_total: int = 0
+    num_candidates_screened: int = 0
+    candidate_ranking: list[int] = field(default_factory=list)
+    repair_attempt_count: int = 0
+    repair_attempted_candidate_indices: list[int] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -315,6 +322,30 @@ def select_guidance_candidate_indices(
     return np.asarray(candidate_indices[: int(qp_per_step)], dtype=np.int64)
 
 
+def rank_screened_candidates(candidate_infos: Sequence[dict[str, Any]]) -> list[int]:
+    def _sort_key(candidate_info: dict[str, Any]) -> tuple[float, int, float, float, float, int]:
+        min_margin = float(candidate_info.get("coarse_min_margin", math.nan))
+        dangerous_steps = int(candidate_info.get("coarse_dangerous_timestep_count", 0))
+        total_risk = float(candidate_info.get("coarse_total_risk", 0.0))
+        path_length = float(candidate_info.get("coarse_path_length", 0.0))
+        smoothness = float(candidate_info.get("coarse_smoothness", 0.0))
+        if not math.isfinite(min_margin):
+            min_margin = -math.inf
+        return (
+            -min_margin,
+            dangerous_steps,
+            total_risk,
+            path_length,
+            smoothness,
+            int(candidate_info.get("candidate_index", 0)),
+        )
+
+    return [
+        int(candidate_info["candidate_index"])
+        for candidate_info in sorted(candidate_infos, key=_sort_key)
+    ]
+
+
 def interpolate_swept_segments(joint_trajectory: np.ndarray, num_intermediate: int) -> np.ndarray:
     joint_trajectory = np.asarray(joint_trajectory, dtype=np.float32)
     if joint_trajectory.ndim != 2:
@@ -346,6 +377,54 @@ def compute_smoothness(joint_trajectory: np.ndarray) -> float:
         return 0.0
     accel = joint_trajectory[2:] - 2.0 * joint_trajectory[1:-1] + joint_trajectory[:-2]
     return float(np.mean(np.sum(accel ** 2, axis=1)))
+
+
+def summarize_sdf_risk(
+    *,
+    sdf_result: dict[str, Any],
+    d_safe: float,
+    d_trigger: float,
+) -> dict[str, Any]:
+    all_sdf = np.asarray(
+        sdf_result.get("all_sdf_values", np.empty((0, 0), dtype=np.float32)),
+        dtype=np.float32,
+    )
+    if all_sdf.size == 0 or all_sdf.ndim != 2:
+        return {
+            "min_margin": math.nan,
+            "min_clearance": math.nan,
+            "dangerous_timestep_count": 0,
+            "total_risk": 0.0,
+            "finite_sdf_count": 0,
+            "total_sdf_count": int(all_sdf.size),
+            "finite_timestep_count": 0,
+            "min_margin_per_step": np.empty((0,), dtype=np.float32),
+        }
+
+    finite_mask = np.isfinite(all_sdf)
+    has_finite_value = np.any(finite_mask, axis=1)
+    min_per_step = np.full(all_sdf.shape[0], np.nan, dtype=np.float32)
+    if np.any(has_finite_value):
+        min_per_step[has_finite_value] = np.min(
+            np.where(finite_mask[has_finite_value], all_sdf[has_finite_value], np.inf),
+            axis=1,
+        )
+    h_per_step = min_per_step - float(d_safe)
+    valid_mask = np.isfinite(h_per_step)
+    total_risk = float(np.sum(np.maximum(float(d_trigger) - h_per_step[valid_mask], 0.0))) if np.any(valid_mask) else 0.0
+    dangerous_timestep_count = int(np.count_nonzero(valid_mask & (h_per_step < float(d_trigger))))
+    min_margin = float(np.min(h_per_step[valid_mask])) if np.any(valid_mask) else math.nan
+    min_clearance = float(np.min(min_per_step[has_finite_value])) if np.any(has_finite_value) else math.nan
+    return {
+        "min_margin": min_margin,
+        "min_clearance": min_clearance,
+        "dangerous_timestep_count": dangerous_timestep_count,
+        "total_risk": total_risk,
+        "finite_sdf_count": int(np.count_nonzero(finite_mask)),
+        "total_sdf_count": int(all_sdf.size),
+        "finite_timestep_count": int(np.count_nonzero(has_finite_value)),
+        "min_margin_per_step": h_per_step.astype(np.float32),
+    }
 
 
 class SurfaceCBFQPGuidanceRunner:
@@ -382,13 +461,11 @@ class SurfaceCBFQPGuidanceRunner:
         free_slice = slice(FIXED_CONTROL_POINTS_PER_SIDE, num_control_points - FIXED_CONTROL_POINTS_PER_SIDE)
 
         candidate_infos: list[dict[str, Any]] = []
-        before_h_values = []
-        after_h_values = []
-        final_h_values = []
-        selected_index = 0
+        selected_candidate_info: dict[str, Any] | None = None
+        fallback = None
 
         for candidate_index, free_residual in enumerate(candidate_residuals):
-            candidate_start_time = time.perf_counter()
+            screening_start = time.perf_counter()
             control_points = reconstruct_control_points_from_free_residual(
                 normalized_free_residual=free_residual,
                 q_start_normalized=q_start_normalized,
@@ -400,90 +477,221 @@ class SurfaceCBFQPGuidanceRunner:
             q_check_norm = check_basis @ control_points
             q_check_actual = self.environment.normalized_to_actual(q_check_norm)
             sdf_result = self.environment.collect_joint_trajectory_sdf_with_link_details_any_length(q_check_actual)
-            all_sdf_before = np.asarray(
-                sdf_result.get("all_sdf_values", np.empty((0, 0), dtype=np.float32)),
-                dtype=np.float32,
-            )
-            finite_sdf_mask = np.isfinite(all_sdf_before)
-            finite_sdf_count = int(np.count_nonzero(finite_sdf_mask))
-            total_sdf_count = int(all_sdf_before.size)
-            finite_timestep_count = int(
-                np.count_nonzero(np.any(finite_sdf_mask, axis=1))
-            ) if all_sdf_before.ndim == 2 else 0
-            h_before = flatten_margin_values(sdf_result, d_safe=float(self.config.d_safe))
-            h_min_before = float(np.min(h_before)) if h_before.size > 0 else math.nan
-            before_h_values.append(h_min_before)
-            guided_control_points = control_points.copy()
-            qp_attempted = False
-            qp_success = False
-            qp_result: dict[str, Any] | None = None
-            qp_skip_reason: str | None = None
-
-            worst_timesteps: list[int] = find_worst_trajectory_timesteps(
+            risk_summary = summarize_sdf_risk(
                 sdf_result=sdf_result,
                 d_safe=float(self.config.d_safe),
-                topk=3,
+                d_trigger=float(self.config.d_trigger),
             )
-            topk_constraints = build_topk_cbf_constraints(
-                worst_timesteps=worst_timesteps,
-                sdf_result=sdf_result,
-                check_basis=check_basis,
-                q_check_norm=q_check_norm,
-                environment=self.environment,
-            ) if worst_timesteps else []
-
-            if topk_constraints and np.isfinite(h_min_before):
-                qp_attempted = True
-                log.num_qp_called += 1
-                log.num_active_constraints += len(topk_constraints)
-                guidance_start = time.perf_counter()
-                qp_result = self._solve_guidance_qp(
-                    control_points=control_points,
-                    q_check_norm=q_check_norm,
-                    q_check_actual=q_check_actual,
-                    active_constraints=topk_constraints,
-                    target_margin=float(guidance_targets[-1]),
-                    limit_basis=limit_basis,
-                    free_slice=free_slice,
-                )
-                log.guidance_time += time.perf_counter() - guidance_start
-                log.qp_time += float(qp_result.get("solve_time", 0.0)) if qp_result is not None else 0.0
-                if qp_result is not None and bool(qp_result.get("success", False)):
-                    guided_control_points = np.asarray(qp_result["control_points"], dtype=np.float32)
-                    qp_success = True
-                    log.num_qp_success += 1
-            else:
-                if not worst_timesteps:
-                    if total_sdf_count == 0:
-                        qp_skip_reason = "no_sdf_surface_samples"
-                    elif finite_sdf_count == 0:
-                        qp_skip_reason = "all_surface_samples_outside_sdf"
-                    else:
-                        qp_skip_reason = "no_worst_timesteps"
-                elif not topk_constraints:
-                    qp_skip_reason = "no_topk_constraints"
-                elif not np.isfinite(h_min_before):
-                    qp_skip_reason = "non_finite_h_min_before"
-                else:
-                    qp_skip_reason = "unknown_skip_condition"
-            q_after_norm = check_basis @ guided_control_points
-            q_after_actual = self.environment.normalized_to_actual(q_after_norm)
-            sdf_after = self.environment.collect_joint_trajectory_sdf_with_link_details_any_length(q_after_actual)
-            h_after = flatten_margin_values(sdf_after, d_safe=float(self.config.d_safe))
-            h_min_after = float(np.min(h_after)) if h_after.size > 0 else math.nan
-            after_h_values.append(h_min_after)
-
-            certificate_start = time.perf_counter()
-            cert_result = self._certificate_check(
-                control_points=guided_control_points,
-                cert_basis=cert_basis,
-            )
-            log.certificate_time += time.perf_counter() - certificate_start
-            final_h_values.append(float(cert_result["h_min_final"]))
             candidate_info = {
                 "candidate_index": int(candidate_index),
-                "h_min_before_guidance": h_min_before,
-                "h_min_after_guidance": h_min_after,
+                "coarse_min_margin": float(risk_summary["min_margin"]),
+                "coarse_min_clearance_m": float(risk_summary["min_clearance"]),
+                "coarse_dangerous_timestep_count": int(risk_summary["dangerous_timestep_count"]),
+                "coarse_total_risk": float(risk_summary["total_risk"]),
+                "coarse_path_length": compute_path_length(q_check_actual),
+                "coarse_smoothness": compute_smoothness(q_check_actual),
+                "coarse_screening_time": time.perf_counter() - screening_start,
+                "h_min_before_guidance": float(risk_summary["min_margin"]),
+                "h_min_after_guidance": math.nan,
+                "h_min_final": math.nan,
+                "certificate_success": False,
+                "repair_attempted": False,
+                "repair_attempt_order": None,
+                "qp_attempted": False,
+                "qp_success": False,
+                "qp_skip_reason": None,
+                "qp_solver_message": None,
+                "num_worst_timesteps": 0,
+                "num_topk_constraints": 0,
+                "sdf_value_count": int(risk_summary["total_sdf_count"]),
+                "finite_sdf_value_count": int(risk_summary["finite_sdf_count"]),
+                "finite_sdf_timestep_count": int(risk_summary["finite_timestep_count"]),
+                "control_points_normalized": control_points.astype(np.float32),
+                "joint_trajectory": q_check_actual.astype(np.float32),
+                "normalized_free_residual": np.asarray(free_residual, dtype=np.float32),
+                "path_length": compute_path_length(q_check_actual),
+                "smoothness": compute_smoothness(q_check_actual),
+                "goal_error": 0.0,
+                "candidate_time": 0.0,
+            }
+            candidate_infos.append(candidate_info)
+
+        ranking = rank_screened_candidates(candidate_infos)
+        log.num_candidates_total = int(candidate_residuals.shape[0])
+        log.num_candidates_screened = int(len(candidate_infos))
+        log.candidate_ranking = [int(idx) for idx in ranking]
+        log.dp_time = float(sum(float(info["coarse_screening_time"]) for info in candidate_infos))
+
+        max_repair_attempts = min(len(ranking), MAX_REPAIR_ATTEMPTS)
+        repair_candidate_indices = ranking[:max_repair_attempts]
+        actual_attempt_count = 0
+        for attempt_order, candidate_index in enumerate(repair_candidate_indices, start=1):
+            actual_attempt_count = attempt_order
+            candidate_info = candidate_infos[candidate_index]
+            self._repair_single_candidate(
+                candidate_info=candidate_info,
+                q_start_normalized=q_start_normalized,
+                q_goal_normalized=q_goal_normalized,
+                delta_w_mean=delta_w_mean,
+                delta_w_std=delta_w_std,
+                check_basis=check_basis,
+                cert_basis=cert_basis,
+                limit_basis=limit_basis,
+                free_slice=free_slice,
+                guidance_targets=guidance_targets,
+                attempt_order=attempt_order,
+                log=log,
+            )
+            if bool(candidate_info.get("certificate_success", False)):
+                selected_candidate_info = candidate_info
+                log.certificate_success = True
+                log.selected_by_certificate = True
+                break
+
+        attempted_candidate_indices = repair_candidate_indices[:actual_attempt_count]
+        log.repair_attempt_count = int(actual_attempt_count)
+        log.repair_attempted_candidate_indices = [int(idx) for idx in attempted_candidate_indices]
+        attempted_candidates = [candidate_infos[idx] for idx in attempted_candidate_indices]
+        if selected_candidate_info is None:
+            attempted_candidates.sort(
+                key=lambda info: (
+                    -float(info["h_min_final"]) if math.isfinite(float(info["h_min_final"])) else math.inf,
+                    float(info["path_length"]),
+                    int(info["candidate_index"]),
+                )
+            )
+            selected_candidate_info = attempted_candidates[0] if attempted_candidates else candidate_infos[ranking[0]]
+            if self.config.fallback_to_terminal_cbf:
+                fallback = self.environment.try_existing_terminal_cbf(selected_candidate_info["joint_trajectory"])
+            log.fallback_used = fallback is not None
+            log.used_existing_terminal_cbf = fallback is not None
+
+        selected_index = int(selected_candidate_info["candidate_index"])
+        log.best_candidate_index = selected_index
+        log.selected_candidate_index = selected_index
+        log.goal_error = float(selected_candidate_info["goal_error"])
+        log.smoothness = float(selected_candidate_info["smoothness"])
+        log.path_length = float(selected_candidate_info["path_length"])
+        log.h_min_before_guidance = float(selected_candidate_info["h_min_before_guidance"])
+        log.h_min_after_guidance = float(selected_candidate_info["h_min_after_guidance"])
+        log.h_min_final = float(selected_candidate_info["h_min_final"])
+        log.total_time = time.perf_counter() - start_time
+        return GuidanceResult(
+            best_index=selected_index,
+            best_normalized_free_residual=np.asarray(selected_candidate_info["normalized_free_residual"], dtype=np.float32),
+            best_control_points_normalized=np.asarray(selected_candidate_info["control_points_normalized"], dtype=np.float32),
+            best_joint_trajectory=np.asarray(selected_candidate_info["joint_trajectory"], dtype=np.float32),
+            candidate_infos=candidate_infos,
+            log=log,
+        )
+
+    def _repair_single_candidate(
+        self,
+        *,
+        candidate_info: dict[str, Any],
+        q_start_normalized: np.ndarray,
+        q_goal_normalized: np.ndarray,
+        delta_w_mean: np.ndarray,
+        delta_w_std: np.ndarray,
+        check_basis: np.ndarray,
+        cert_basis: np.ndarray,
+        limit_basis: np.ndarray,
+        free_slice: slice,
+        guidance_targets: np.ndarray,
+        attempt_order: int,
+        log: GuidanceLog,
+    ) -> None:
+        candidate_start_time = time.perf_counter()
+        control_points = np.asarray(candidate_info["control_points_normalized"], dtype=np.float32)
+        q_check_norm = check_basis @ control_points
+        q_check_actual = self.environment.normalized_to_actual(q_check_norm)
+        sdf_result = self.environment.collect_joint_trajectory_sdf_with_link_details_any_length(q_check_actual)
+        risk_summary = summarize_sdf_risk(
+            sdf_result=sdf_result,
+            d_safe=float(self.config.d_safe),
+            d_trigger=float(self.config.d_trigger),
+        )
+
+        guided_control_points = control_points.copy()
+        qp_attempted = False
+        qp_success = False
+        qp_result: dict[str, Any] | None = None
+        qp_skip_reason: str | None = None
+
+        candidate_info["repair_attempted"] = True
+        candidate_info["repair_attempt_order"] = int(attempt_order)
+
+        worst_timesteps = find_worst_trajectory_timesteps(
+            sdf_result=sdf_result,
+            d_safe=float(self.config.d_safe),
+            topk=min(int(self.config.qp_candidates), int(self.config.active_constraints)),
+            d_trigger=float(self.config.d_trigger),
+            eps_deep=float(self.config.eps_deep),
+        )
+        topk_constraints = build_topk_cbf_constraints(
+            worst_timesteps=worst_timesteps,
+            sdf_result=sdf_result,
+            check_basis=check_basis,
+            q_check_norm=q_check_norm,
+            environment=self.environment,
+            max_active=int(self.config.active_constraints),
+        ) if worst_timesteps else []
+
+        if topk_constraints and np.isfinite(float(risk_summary["min_margin"])):
+            qp_attempted = True
+            log.num_qp_called += 1
+            log.num_active_constraints += len(topk_constraints)
+            guidance_start = time.perf_counter()
+            qp_result = self._solve_guidance_qp(
+                control_points=control_points,
+                q_check_norm=q_check_norm,
+                q_check_actual=q_check_actual,
+                active_constraints=topk_constraints,
+                target_margin=float(guidance_targets[-1]),
+                limit_basis=limit_basis,
+                free_slice=free_slice,
+            )
+            log.guidance_time += time.perf_counter() - guidance_start
+            log.qp_time += float(qp_result.get("solve_time", 0.0)) if qp_result is not None else 0.0
+            if qp_result is not None and bool(qp_result.get("success", False)):
+                guided_control_points = np.asarray(qp_result["control_points"], dtype=np.float32)
+                qp_success = True
+                log.num_qp_success += 1
+        else:
+            if not worst_timesteps:
+                if int(risk_summary["total_sdf_count"]) == 0:
+                    qp_skip_reason = "no_sdf_surface_samples"
+                elif int(risk_summary["finite_sdf_count"]) == 0:
+                    qp_skip_reason = "all_surface_samples_outside_sdf"
+                else:
+                    qp_skip_reason = "no_worst_timesteps"
+            elif not topk_constraints:
+                qp_skip_reason = "no_topk_constraints"
+            elif not np.isfinite(float(risk_summary["min_margin"])):
+                qp_skip_reason = "non_finite_h_min_before"
+            else:
+                qp_skip_reason = "unknown_skip_condition"
+
+        q_after_norm = check_basis @ guided_control_points
+        q_after_actual = self.environment.normalized_to_actual(q_after_norm)
+        sdf_after = self.environment.collect_joint_trajectory_sdf_with_link_details_any_length(q_after_actual)
+        after_summary = summarize_sdf_risk(
+            sdf_result=sdf_after,
+            d_safe=float(self.config.d_safe),
+            d_trigger=float(self.config.d_trigger),
+        )
+
+        certificate_start = time.perf_counter()
+        cert_result = self._certificate_check(
+            control_points=guided_control_points,
+            cert_basis=cert_basis,
+        )
+        log.certificate_time += time.perf_counter() - certificate_start
+
+        candidate_info.update(
+            {
+                "h_min_before_guidance": float(risk_summary["min_margin"]),
+                "h_min_after_guidance": float(after_summary["min_margin"]),
                 "h_min_final": float(cert_result["h_min_final"]),
                 "certificate_success": bool(cert_result["success"]),
                 "qp_attempted": bool(qp_attempted),
@@ -492,9 +700,6 @@ class SurfaceCBFQPGuidanceRunner:
                 "qp_solver_message": None if qp_result is None else qp_result.get("message"),
                 "num_worst_timesteps": int(len(worst_timesteps)),
                 "num_topk_constraints": int(len(topk_constraints)),
-                "sdf_value_count": total_sdf_count,
-                "finite_sdf_value_count": finite_sdf_count,
-                "finite_sdf_timestep_count": finite_timestep_count,
                 "control_points_normalized": guided_control_points.astype(np.float32),
                 "joint_trajectory": np.asarray(cert_result["joint_trajectory"], dtype=np.float32),
                 "normalized_free_residual": control_points_to_normalized_free_residual(
@@ -506,43 +711,9 @@ class SurfaceCBFQPGuidanceRunner:
                 ),
                 "path_length": compute_path_length(cert_result["joint_trajectory"]),
                 "smoothness": compute_smoothness(cert_result["joint_trajectory"]),
-                "goal_error": float(np.linalg.norm(cert_result["joint_trajectory"][-1] - cert_result["joint_trajectory"][-1])),
+                "goal_error": 0.0,
                 "candidate_time": time.perf_counter() - candidate_start_time,
             }
-            candidate_infos.append(candidate_info)
-
-        log.dp_time = sum(float(info["candidate_time"]) for info in candidate_infos)
-        log.h_min_before_guidance = float(np.nanmin(np.asarray(before_h_values, dtype=np.float32))) if before_h_values else math.nan
-        log.h_min_after_guidance = float(np.nanmin(np.asarray(after_h_values, dtype=np.float32))) if after_h_values else math.nan
-        log.h_min_final = float(np.nanmin(np.asarray(final_h_values, dtype=np.float32))) if final_h_values else math.nan
-
-        successful = [info for info in candidate_infos if bool(info["certificate_success"])]
-        if successful:
-            successful.sort(key=lambda info: (-float(info["h_min_final"]), float(info["path_length"])))
-            best = successful[0]
-            log.certificate_success = True
-            log.selected_by_certificate = True
-        else:
-            candidate_infos.sort(key=lambda info: float(info["h_min_final"]))
-            best = candidate_infos[-1]
-            fallback = None
-            if self.config.fallback_to_terminal_cbf:
-                fallback = self.environment.try_existing_terminal_cbf(best["joint_trajectory"])
-            log.fallback_used = fallback is not None
-            log.used_existing_terminal_cbf = fallback is not None
-        selected_index = int(best["candidate_index"])
-        log.best_candidate_index = selected_index
-        log.goal_error = float(best["goal_error"])
-        log.smoothness = float(best["smoothness"])
-        log.path_length = float(best["path_length"])
-        log.total_time = time.perf_counter() - start_time
-        return GuidanceResult(
-            best_index=selected_index,
-            best_normalized_free_residual=np.asarray(best["normalized_free_residual"], dtype=np.float32),
-            best_control_points_normalized=np.asarray(best["control_points_normalized"], dtype=np.float32),
-            best_joint_trajectory=np.asarray(best["joint_trajectory"], dtype=np.float32),
-            candidate_infos=candidate_infos,
-            log=log,
         )
 
     def _certificate_check(self, *, control_points: np.ndarray, cert_basis: np.ndarray) -> dict[str, Any]:
@@ -812,6 +983,8 @@ def find_worst_trajectory_timesteps(
     sdf_result: dict[str, Any],
     d_safe: float,
     topk: int = 3,
+    d_trigger: float | None = None,
+    eps_deep: float | None = None,
 ) -> list[int]:
     """Find the `topk` timesteps with smallest SDF along a trajectory."""
     all_sdf = np.asarray(
@@ -836,6 +1009,14 @@ def find_worst_trajectory_timesteps(
         return []
     valid_indices = np.flatnonzero(valid_mask)
     valid_h = h_per_step[valid_indices]
+    if d_trigger is not None:
+        trigger_mask = valid_h < float(d_trigger)
+        if eps_deep is not None:
+            trigger_mask &= valid_h >= -float(eps_deep)
+        valid_indices = valid_indices[trigger_mask]
+        valid_h = valid_h[trigger_mask]
+    if valid_indices.size == 0:
+        return []
     order = np.argsort(valid_h)
     topk = min(int(topk), valid_indices.size)
     return valid_indices[order[:topk]].tolist()
@@ -858,6 +1039,7 @@ def build_topk_cbf_constraints(
     check_basis: np.ndarray,
     q_check_norm: np.ndarray,
     environment: PyBulletSurfaceEnvironmentAdapter,
+    max_active: int | None = None,
 ) -> list[dict[str, Any]]:
     """Build CBF constraints for the top-k worst trajectory timesteps."""
     all_sdf = np.asarray(sdf_result["all_sdf_values"], dtype=np.float32)
@@ -899,6 +1081,9 @@ def build_topk_cbf_constraints(
             "link_index": int(sample_info["link_index"]),
             "point_index": int(sample_info["point_index"]),
         })
+    constraints.sort(key=lambda item: float(item["h_value"]))
+    if max_active is not None:
+        return constraints[: int(max_active)]
     return constraints
 
 
