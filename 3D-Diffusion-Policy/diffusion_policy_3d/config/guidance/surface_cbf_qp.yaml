@@ -9,7 +9,7 @@ surface_cbf_qp_guidance:
       wrist_3_link: 16
 
   runner:
-    guidance_steps: 3
+    guidance_steps: 5
     qp_candidates: 4
     active_constraints: 16
     check_steps: 32
