@@ -13,6 +13,7 @@ import argparse
 import datetime
 import json
 import pathlib
+import shutil
 import sys
 import time
 from typing import Optional
@@ -143,6 +144,78 @@ def _print_validation_progress(
         f"collision={bool(metric['has_collision'])} min_sdf={float(metric['min_sdf_distance_m']):.6f} "
         f"goal_error={float(metric['goal_error_m']):.6f} {qp_part}"
     )
+
+
+def _truncate_status_text(text: str, width: int) -> str:
+    if width <= 0 or len(text) <= width:
+        return text
+    if width <= 3:
+        return text[:width]
+    return text[: width - 3] + "..."
+
+
+def _build_validation_status_lines(
+    *,
+    index: int,
+    total: int,
+    episode_idx: int,
+    workpiece_id: int,
+    selection: dict[str, object],
+    metric: dict[str, object],
+    collision_count: int,
+    total_segment_collision_steps: float,
+    total_segment_steps: float,
+) -> list[str]:
+    qp_summary = _summarize_qp_status_from_selection(selection)
+    traj_collision_rate_so_far = collision_count / index if index > 0 else 0.0
+    step_collision_rate_so_far = (
+        total_segment_collision_steps / total_segment_steps
+        if total_segment_steps > 0
+        else 0.0
+    )
+    inference_elapsed_sec = selection.get("inference_elapsed_sec")
+    inference_text = (
+        f" infer={float(inference_elapsed_sec):.3f}s"
+        if inference_elapsed_sec is not None
+        else ""
+    )
+    progress_line = (
+        f"[{index}/{total}] episode={episode_idx} workpiece_id={workpiece_id} "
+        f"collision={bool(metric['has_collision'])} "
+        f"min_sdf={float(metric['min_sdf_distance_m']):.6f} "
+        f"goal_error={float(metric['goal_error_m']):.6f}{inference_text}"
+    )
+    status_line = (
+        f"traj_collision_rate={traj_collision_rate_so_far:.3f} "
+        f"step_collision_rate={step_collision_rate_so_far:.3f} "
+        f"QP={qp_summary['qp_attempted_count']}/{qp_summary['qp_success_count']} "
+        f"repair={qp_summary['guidance_repair_attempt_count']} "
+        f"selected_candidate={int(selection.get('selected_candidate_idx', 0))}"
+    )
+    return [progress_line, status_line]
+
+
+class _ValidationStatusDisplay:
+    def __init__(self) -> None:
+        self._enabled = sys.stdout.isatty()
+        self._last_line_count = 0
+
+    def render(self, lines: list[str]) -> None:
+        if not lines:
+            return
+        width = shutil.get_terminal_size(fallback=(120, 20)).columns
+        clipped_lines = [_truncate_status_text(line, width) for line in lines]
+        if not self._enabled:
+            print(" | ".join(clipped_lines))
+            return
+        if self._last_line_count > 0:
+            sys.stdout.write(f"\x1b[{self._last_line_count}F")
+        for line in clipped_lines:
+            sys.stdout.write("\x1b[2K")
+            sys.stdout.write(line)
+            sys.stdout.write("\n")
+        sys.stdout.flush()
+        self._last_line_count = len(clipped_lines)
 
 
 # ---------------------------------------------------------------------------
@@ -1503,6 +1576,7 @@ def main() -> None:
     total_segment_steps = 0
     sdf_distances = []
     goal_errors = []
+    status_display = _ValidationStatusDisplay()
 
     print(f"\nRunning validation on {len(val_episode_indices)} episodes …")
     with torch.no_grad():
@@ -1622,33 +1696,19 @@ def main() -> None:
                 sdf_distances.append(float(metric["min_sdf_distance_m"]))
             goal_errors.append(float(metric["goal_error_m"]))
 
-            if selection["inference_elapsed_sec"] is not None:
-                print(
-                    "  Inference-to-selected-output time: "
-                    f"{float(selection['inference_elapsed_sec']):.6f} s"
+            status_display.render(
+                _build_validation_status_lines(
+                    index=idx + 1,
+                    total=len(val_episode_indices),
+                    episode_idx=int(ep_idx),
+                    workpiece_id=wid,
+                    selection=selection,
+                    metric=metric,
+                    collision_count=collision_count,
+                    total_segment_collision_steps=total_segment_collision_steps,
+                    total_segment_steps=total_segment_steps,
                 )
-
-            _print_validation_progress(
-                index=idx + 1,
-                total=len(val_episode_indices),
-                episode_idx=int(ep_idx),
-                workpiece_id=wid,
-                selection=selection,
-                metric=metric,
             )
-
-            if (idx + 1) % max(1, len(val_episode_indices) // 10) == 0 or idx == 0:
-                traj_collision_rate_so_far = collision_count / (idx + 1)
-                step_collision_rate_so_far = (
-                    total_segment_collision_steps / total_segment_steps
-                    if total_segment_steps > 0
-                    else 0.0
-                )
-                print(
-                    f"  [{idx + 1}/{len(val_episode_indices)}] "
-                    f"traj_collision_rate_so_far={traj_collision_rate_so_far:.3f} "
-                    f"step_collision_rate_so_far={step_collision_rate_so_far:.3f}"
-                )
 
     if runner is not None:
         runner.close()
