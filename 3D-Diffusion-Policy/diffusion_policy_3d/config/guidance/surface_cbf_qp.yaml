@@ -10,8 +10,11 @@ surface_cbf_qp_guidance:
 
   runner:
     guidance_steps: 3
-    qp_candidates: 4
-    active_constraints: 16
+    max_risk_segments: 5
+    window_radius: 4
+    points_per_segment: 3
+    min_constraints_per_segment: 4
+    active_constraints: 24
     check_steps: 32
     cert_steps: 64
     cert_swept_intermediate: 3

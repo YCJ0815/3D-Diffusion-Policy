@@ -24,8 +24,11 @@ GUIDANCE_CONFIG_FALLBACKS: dict[str, Any] = {
     "num_candidates": 32,
     "candidate_inference_steps": None,
     "guidance_steps": 2,
-    "guidance_qp_candidates": 4,
-    "guidance_active_constraints": 16,
+    "guidance_max_risk_segments": 3,
+    "guidance_window_radius": 2,
+    "guidance_points_per_segment": 2,
+    "guidance_min_constraints_per_segment": 4,
+    "guidance_active_constraints": 24,
     "guidance_check_steps": 64,
     "guidance_cert_steps": 256,
     "guidance_cert_swept_intermediate": 3,
@@ -49,7 +52,10 @@ GUIDANCE_CONFIG_KEY_PATHS: dict[str, tuple[str, ...]] = {
     "num_candidates": ("surface_cbf_qp_guidance", "num_candidates"),
     "candidate_inference_steps": ("surface_cbf_qp_guidance", "candidate_inference_steps"),
     "guidance_steps": ("surface_cbf_qp_guidance", "runner", "guidance_steps"),
-    "guidance_qp_candidates": ("surface_cbf_qp_guidance", "runner", "qp_candidates"),
+    "guidance_max_risk_segments": ("surface_cbf_qp_guidance", "runner", "max_risk_segments"),
+    "guidance_window_radius": ("surface_cbf_qp_guidance", "runner", "window_radius"),
+    "guidance_points_per_segment": ("surface_cbf_qp_guidance", "runner", "points_per_segment"),
+    "guidance_min_constraints_per_segment": ("surface_cbf_qp_guidance", "runner", "min_constraints_per_segment"),
     "guidance_active_constraints": ("surface_cbf_qp_guidance", "runner", "active_constraints"),
     "guidance_check_steps": ("surface_cbf_qp_guidance", "runner", "check_steps"),
     "guidance_cert_steps": ("surface_cbf_qp_guidance", "runner", "cert_steps"),
@@ -88,7 +94,10 @@ GUIDANCE_PARAMETER_GROUPS: dict[str, tuple[str, ...]] = {
         "guidance_targets",
     ),
     "qp_optimization": (
-        "guidance_qp_candidates",
+        "guidance_max_risk_segments",
+        "guidance_window_radius",
+        "guidance_points_per_segment",
+        "guidance_min_constraints_per_segment",
         "guidance_active_constraints",
         "guidance_delta_max",
         "guidance_lambda_s",
@@ -157,10 +166,28 @@ def add_surface_cbf_qp_guidance_parser_args(
         help="Number of final denoising steps that run surface-sample CBF-QP guidance.",
     )
     parser.add_argument(
-        "--guidance-qp-candidates",
+        "--guidance-max-risk-segments",
         type=int,
         default=argparse.SUPPRESS,
-        help="How many near-collision candidates to project with QP per guidance step.",
+        help="Maximum number of independent risk segments repaired within one candidate trajectory.",
+    )
+    parser.add_argument(
+        "--guidance-window-radius",
+        type=int,
+        default=argparse.SUPPRESS,
+        help="Half-width of the timestep window centered at each selected risk peak.",
+    )
+    parser.add_argument(
+        "--guidance-points-per-segment",
+        type=int,
+        default=argparse.SUPPRESS,
+        help="How many high-risk timesteps to sample inside each selected risk segment window.",
+    )
+    parser.add_argument(
+        "--guidance-min-constraints-per-segment",
+        type=int,
+        default=argparse.SUPPRESS,
+        help="Minimum number of CBF constraints to keep for each selected risk segment.",
     )
     parser.add_argument(
         "--guidance-active-constraints",
@@ -219,7 +246,10 @@ def apply_surface_cbf_qp_guidance_config(
     keys = [
         "enable_surface_cbf_qp_guidance",
         "guidance_steps",
-        "guidance_qp_candidates",
+        "guidance_max_risk_segments",
+        "guidance_window_radius",
+        "guidance_points_per_segment",
+        "guidance_min_constraints_per_segment",
         "guidance_active_constraints",
         "guidance_check_steps",
         "guidance_cert_steps",
@@ -264,7 +294,10 @@ def build_surface_cbf_qp_parameter_summary(
     included_keys = {
         "enable_surface_cbf_qp_guidance",
         "guidance_steps",
-        "guidance_qp_candidates",
+        "guidance_max_risk_segments",
+        "guidance_window_radius",
+        "guidance_points_per_segment",
+        "guidance_min_constraints_per_segment",
         "guidance_active_constraints",
         "guidance_check_steps",
         "guidance_cert_steps",

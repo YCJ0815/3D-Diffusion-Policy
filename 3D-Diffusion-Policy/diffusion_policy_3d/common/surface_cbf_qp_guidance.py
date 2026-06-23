@@ -38,8 +38,11 @@ class SurfaceCBFQPGuidanceConfig:
     enabled: bool = False
     num_candidates: int = 32
     guidance_steps: int = 2
-    qp_candidates: int = 4
-    active_constraints: int = 16
+    max_risk_segments: int = 3
+    window_radius: int = 2
+    points_per_segment: int = 2
+    min_constraints_per_segment: int = 4
+    active_constraints: int = 24
     check_steps: int = 64
     cert_steps: int = 256
     cert_swept_intermediate: int = 3
@@ -83,6 +86,11 @@ class GuidanceLog:
     candidate_ranking: list[int] = field(default_factory=list)
     repair_attempt_count: int = 0
     repair_attempted_candidate_indices: list[int] = field(default_factory=list)
+    risk_segment_count_total: int = 0
+    risk_segment_count_selected: int = 0
+    selected_risk_segments: list[dict[str, Any]] = field(default_factory=list)
+    selected_window_timesteps: list[int] = field(default_factory=list)
+    selected_constraint_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -427,6 +435,251 @@ def summarize_sdf_risk(
     }
 
 
+def build_risk_segments(
+    *,
+    sdf_result: dict[str, Any],
+    d_trigger: float,
+) -> list[dict[str, Any]]:
+    all_sdf = np.asarray(
+        sdf_result.get("all_sdf_values", np.empty((0, 0), dtype=np.float32)),
+        dtype=np.float32,
+    )
+    if all_sdf.size == 0 or all_sdf.ndim != 2:
+        return []
+
+    finite_mask = np.isfinite(all_sdf)
+    has_finite_value = np.any(finite_mask, axis=1)
+    min_clearance_per_step = np.full(all_sdf.shape[0], np.nan, dtype=np.float32)
+    if np.any(has_finite_value):
+        min_clearance_per_step[has_finite_value] = np.min(
+            np.where(finite_mask[has_finite_value], all_sdf[has_finite_value], np.inf),
+            axis=1,
+        )
+
+    segments: list[dict[str, Any]] = []
+    current_steps: list[int] = []
+    trigger_value = float(d_trigger)
+
+    def _finalize_segment(step_indices: list[int]) -> None:
+        if not step_indices:
+            return
+        clearances = min_clearance_per_step[np.asarray(step_indices, dtype=np.int64)]
+        peak_local_index = int(np.argmin(clearances))
+        peak_timestep = int(step_indices[peak_local_index])
+        min_clearance = float(clearances[peak_local_index])
+        accumulated_risk = float(np.sum(np.maximum(trigger_value - clearances, 0.0)))
+        deep_penalty = max(-min_clearance, 0.0)
+        segments.append(
+            {
+                "segment_index": int(len(segments)),
+                "start_timestep": int(step_indices[0]),
+                "end_timestep": int(step_indices[-1]),
+                "timesteps": [int(v) for v in step_indices],
+                "peak_timestep": peak_timestep,
+                "min_clearance": min_clearance,
+                "risk_score": float(accumulated_risk + deep_penalty),
+                "accumulated_risk": accumulated_risk,
+                "deep_penalty": deep_penalty,
+            }
+        )
+
+    for timestep, clearance in enumerate(min_clearance_per_step.tolist()):
+        if math.isfinite(clearance) and clearance < trigger_value:
+            current_steps.append(int(timestep))
+        else:
+            _finalize_segment(current_steps)
+            current_steps = []
+    _finalize_segment(current_steps)
+
+    segments.sort(
+        key=lambda segment: (
+            -float(segment["risk_score"]),
+            float(segment["min_clearance"]),
+            int(segment["start_timestep"]),
+        )
+    )
+    for segment_index, segment in enumerate(segments):
+        segment["segment_index"] = int(segment_index)
+    return segments
+
+
+def _build_segment_window(segment: dict[str, Any], *, horizon: int, window_radius: int) -> list[int]:
+    peak_timestep = int(segment["peak_timestep"])
+    start = max(0, peak_timestep - int(window_radius))
+    end = min(int(horizon) - 1, peak_timestep + int(window_radius))
+    return list(range(start, end + 1))
+
+
+def select_segment_window_timesteps(
+    *,
+    sdf_result: dict[str, Any],
+    segment: dict[str, Any],
+    points_per_segment: int,
+    window_radius: int,
+) -> list[int]:
+    all_sdf = np.asarray(sdf_result.get("all_sdf_values", np.empty((0, 0), dtype=np.float32)), dtype=np.float32)
+    if all_sdf.size == 0 or all_sdf.ndim != 2:
+        return []
+    window = _build_segment_window(segment, horizon=all_sdf.shape[0], window_radius=window_radius)
+    scored_timesteps: list[tuple[float, int]] = []
+    for timestep in window:
+        step_sdf = np.asarray(all_sdf[timestep], dtype=np.float32).reshape(-1)
+        finite_step = step_sdf[np.isfinite(step_sdf)]
+        if finite_step.size == 0:
+            continue
+        scored_timesteps.append((float(np.min(finite_step)), int(timestep)))
+    if not scored_timesteps:
+        return []
+    scored_timesteps.sort(key=lambda item: (item[0], item[1]))
+    chosen = [int(timestep) for _, timestep in scored_timesteps[: int(points_per_segment)]]
+    if int(segment["peak_timestep"]) not in chosen:
+        chosen.append(int(segment["peak_timestep"]))
+    return sorted(set(chosen))
+
+
+def build_segment_window_cbf_constraints(
+    *,
+    segments: Sequence[dict[str, Any]],
+    sdf_result: dict[str, Any],
+    check_basis: np.ndarray,
+    q_check_norm: np.ndarray,
+    environment: PyBulletSurfaceEnvironmentAdapter,
+    d_trigger: float,
+    points_per_segment: int,
+    min_constraints_per_segment: int,
+    window_radius: int,
+    max_active: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[int]]:
+    all_sdf = np.asarray(sdf_result.get("all_sdf_values", np.empty((0, 0), dtype=np.float32)), dtype=np.float32)
+    if all_sdf.size == 0 or all_sdf.ndim != 2 or not segments:
+        return [], [], []
+
+    selected_segments: list[dict[str, Any]] = []
+    selected_timesteps: list[int] = []
+    all_constraints: list[dict[str, Any]] = []
+
+    for segment in segments:
+        window_timesteps = _build_segment_window(
+            segment,
+            horizon=all_sdf.shape[0],
+            window_radius=window_radius,
+        )
+        anchor_timesteps = select_segment_window_timesteps(
+            sdf_result=sdf_result,
+            segment=segment,
+            points_per_segment=points_per_segment,
+            window_radius=window_radius,
+        )
+        if not anchor_timesteps:
+            continue
+        segment_constraints: list[dict[str, Any]] = []
+        for timestep in anchor_timesteps:
+            step_sdf = np.asarray(all_sdf[timestep], dtype=np.float32).reshape(-1)
+            finite_indices = np.flatnonzero(np.isfinite(step_sdf))
+            if finite_indices.size == 0:
+                continue
+            ordered_indices = finite_indices[np.argsort(step_sdf[finite_indices])]
+            for flat_index in ordered_indices[: max(1, int(points_per_segment))]:
+                sample_info = _flat_index_to_surface_sample(environment.surface_samples, int(flat_index))
+                if sample_info is None:
+                    continue
+                q_norm = np.asarray(q_check_norm[timestep], dtype=np.float32).reshape(-1)
+                q_actual = environment.normalized_to_actual(q_norm)
+                point_world = environment.surface_point_world(
+                    link_index=int(sample_info["link_index"]),
+                    local_point=np.asarray(sample_info["local_point"], dtype=np.float32),
+                )
+                grad_world = approximate_sdf_gradient(environment.load_sdf_grid(), point_world)
+                jacobian = environment.surface_point_jacobian(
+                    link_index=int(sample_info["link_index"]),
+                    local_point=np.asarray(sample_info["local_point"], dtype=np.float32),
+                    q_actual=q_actual,
+                )
+                j_pos = np.asarray(jacobian[:3, :], dtype=np.float32)
+                g_actual = (j_pos.T @ grad_world.reshape(3)).astype(np.float32)
+                segment_constraints.append(
+                    {
+                        "segment_index": int(segment["segment_index"]),
+                        "t_index": int(timestep),
+                        "h_value": float(step_sdf[int(flat_index)]),
+                        "basis_row": np.asarray(check_basis[timestep], dtype=np.float32),
+                        "g_actual": g_actual,
+                        "link_index": int(sample_info["link_index"]),
+                        "point_index": int(sample_info["point_index"]),
+                    }
+                )
+
+        if len(segment_constraints) < int(min_constraints_per_segment):
+            fallback_constraints: list[dict[str, Any]] = []
+            for timestep in window_timesteps:
+                step_sdf = np.asarray(all_sdf[timestep], dtype=np.float32).reshape(-1)
+                finite_indices = np.flatnonzero(np.isfinite(step_sdf))
+                if finite_indices.size == 0:
+                    continue
+                ordered_indices = finite_indices[np.argsort(step_sdf[finite_indices])]
+                for flat_index in ordered_indices:
+                    sample_info = _flat_index_to_surface_sample(environment.surface_samples, int(flat_index))
+                    if sample_info is None:
+                        continue
+                    q_norm = np.asarray(q_check_norm[timestep], dtype=np.float32).reshape(-1)
+                    q_actual = environment.normalized_to_actual(q_norm)
+                    point_world = environment.surface_point_world(
+                        link_index=int(sample_info["link_index"]),
+                        local_point=np.asarray(sample_info["local_point"], dtype=np.float32),
+                    )
+                    grad_world = approximate_sdf_gradient(environment.load_sdf_grid(), point_world)
+                    jacobian = environment.surface_point_jacobian(
+                        link_index=int(sample_info["link_index"]),
+                        local_point=np.asarray(sample_info["local_point"], dtype=np.float32),
+                        q_actual=q_actual,
+                    )
+                    j_pos = np.asarray(jacobian[:3, :], dtype=np.float32)
+                    g_actual = (j_pos.T @ grad_world.reshape(3)).astype(np.float32)
+                    fallback_constraints.append(
+                        {
+                            "segment_index": int(segment["segment_index"]),
+                            "t_index": int(timestep),
+                            "h_value": float(step_sdf[int(flat_index)]),
+                            "basis_row": np.asarray(check_basis[timestep], dtype=np.float32),
+                            "g_actual": g_actual,
+                            "link_index": int(sample_info["link_index"]),
+                            "point_index": int(sample_info["point_index"]),
+                        }
+                    )
+            segment_constraints.extend(fallback_constraints)
+
+        deduped_constraints: list[dict[str, Any]] = []
+        seen_keys: set[tuple[int, int, int]] = set()
+        for constraint in sorted(segment_constraints, key=lambda item: (float(item["h_value"]), int(item["t_index"]))):
+            key = (int(constraint["t_index"]), int(constraint["link_index"]), int(constraint["point_index"]))
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            deduped_constraints.append(constraint)
+            if len(deduped_constraints) >= max(int(min_constraints_per_segment), int(points_per_segment)):
+                break
+
+        if not deduped_constraints:
+            continue
+        selected_segments.append(
+            {
+                "segment_index": int(segment["segment_index"]),
+                "start_timestep": int(segment["start_timestep"]),
+                "end_timestep": int(segment["end_timestep"]),
+                "peak_timestep": int(segment["peak_timestep"]),
+                "risk_score": float(segment["risk_score"]),
+                "window_timesteps": [int(v) for v in window_timesteps],
+                "anchor_timesteps": [int(v) for v in anchor_timesteps],
+                "constraint_count": int(len(deduped_constraints)),
+            }
+        )
+        selected_timesteps.extend(window_timesteps)
+        all_constraints.extend(deduped_constraints)
+
+    all_constraints.sort(key=lambda item: (int(item["segment_index"]), float(item["h_value"]), int(item["t_index"])))
+    return all_constraints[: int(max_active)], selected_segments, sorted(set(int(v) for v in selected_timesteps))
+
+
 class SurfaceCBFQPGuidanceRunner:
     def __init__(self, *, config: SurfaceCBFQPGuidanceConfig, environment: PyBulletSurfaceEnvironmentAdapter):
         self.config = config
@@ -503,6 +756,11 @@ class SurfaceCBFQPGuidanceRunner:
                 "qp_solver_message": None,
                 "num_worst_timesteps": 0,
                 "num_topk_constraints": 0,
+                "risk_segment_count_total": 0,
+                "risk_segment_count_selected": 0,
+                "selected_risk_segments": [],
+                "selected_window_timesteps": [],
+                "selected_constraint_count": 0,
                 "sdf_value_count": int(risk_summary["total_sdf_count"]),
                 "finite_sdf_value_count": int(risk_summary["finite_sdf_count"]),
                 "finite_sdf_timestep_count": int(risk_summary["finite_timestep_count"]),
@@ -621,32 +879,34 @@ class SurfaceCBFQPGuidanceRunner:
         candidate_info["repair_attempted"] = True
         candidate_info["repair_attempt_order"] = int(attempt_order)
 
-        worst_timesteps = find_worst_trajectory_timesteps(
+        risk_segments = build_risk_segments(
             sdf_result=sdf_result,
-            d_safe=float(self.config.d_safe),
-            topk=min(int(self.config.qp_candidates), int(self.config.active_constraints)),
             d_trigger=float(self.config.d_trigger),
-            eps_deep=float(self.config.eps_deep),
         )
-        topk_constraints = build_topk_cbf_constraints(
-            worst_timesteps=worst_timesteps,
+        selected_segments = risk_segments[: int(self.config.max_risk_segments)]
+        segment_constraints, selected_segment_summaries, selected_window_timesteps = build_segment_window_cbf_constraints(
+            segments=selected_segments,
             sdf_result=sdf_result,
             check_basis=check_basis,
             q_check_norm=q_check_norm,
             environment=self.environment,
+            d_trigger=float(self.config.d_trigger),
+            points_per_segment=int(self.config.points_per_segment),
+            min_constraints_per_segment=int(self.config.min_constraints_per_segment),
+            window_radius=int(self.config.window_radius),
             max_active=int(self.config.active_constraints),
-        ) if worst_timesteps else []
+        ) if selected_segments else ([], [], [])
 
-        if topk_constraints and np.isfinite(float(risk_summary["min_margin"])):
+        if segment_constraints and np.isfinite(float(risk_summary["min_margin"])):
             qp_attempted = True
             log.num_qp_called += 1
-            log.num_active_constraints += len(topk_constraints)
+            log.num_active_constraints += len(segment_constraints)
             guidance_start = time.perf_counter()
             qp_result = self._solve_guidance_qp(
                 control_points=control_points,
                 q_check_norm=q_check_norm,
                 q_check_actual=q_check_actual,
-                active_constraints=topk_constraints,
+                active_constraints=segment_constraints,
                 target_margin=float(guidance_targets[-1]),
                 limit_basis=limit_basis,
                 free_slice=free_slice,
@@ -658,14 +918,14 @@ class SurfaceCBFQPGuidanceRunner:
                 qp_success = True
                 log.num_qp_success += 1
         else:
-            if not worst_timesteps:
+            if not risk_segments:
                 if int(risk_summary["total_sdf_count"]) == 0:
                     qp_skip_reason = "no_sdf_surface_samples"
                 elif int(risk_summary["finite_sdf_count"]) == 0:
                     qp_skip_reason = "all_surface_samples_outside_sdf"
                 else:
-                    qp_skip_reason = "no_worst_timesteps"
-            elif not topk_constraints:
+                    qp_skip_reason = "no_risk_segments"
+            elif not selected_segments or not segment_constraints:
                 qp_skip_reason = "no_topk_constraints"
             elif not np.isfinite(float(risk_summary["min_margin"])):
                 qp_skip_reason = "non_finite_h_min_before"
@@ -698,8 +958,13 @@ class SurfaceCBFQPGuidanceRunner:
                 "qp_success": bool(qp_success),
                 "qp_skip_reason": qp_skip_reason,
                 "qp_solver_message": None if qp_result is None else qp_result.get("message"),
-                "num_worst_timesteps": int(len(worst_timesteps)),
-                "num_topk_constraints": int(len(topk_constraints)),
+                "num_worst_timesteps": int(sum(len(segment.get("anchor_timesteps", [])) for segment in selected_segment_summaries)),
+                "num_topk_constraints": int(len(segment_constraints)),
+                "risk_segment_count_total": int(len(risk_segments)),
+                "risk_segment_count_selected": int(len(selected_segment_summaries)),
+                "selected_risk_segments": selected_segment_summaries,
+                "selected_window_timesteps": [int(v) for v in selected_window_timesteps],
+                "selected_constraint_count": int(len(segment_constraints)),
                 "control_points_normalized": guided_control_points.astype(np.float32),
                 "joint_trajectory": np.asarray(cert_result["joint_trajectory"], dtype=np.float32),
                 "normalized_free_residual": control_points_to_normalized_free_residual(
@@ -715,6 +980,11 @@ class SurfaceCBFQPGuidanceRunner:
                 "candidate_time": time.perf_counter() - candidate_start_time,
             }
         )
+        log.risk_segment_count_total = int(len(risk_segments))
+        log.risk_segment_count_selected = int(len(selected_segment_summaries))
+        log.selected_risk_segments = list(selected_segment_summaries)
+        log.selected_window_timesteps = [int(v) for v in selected_window_timesteps]
+        log.selected_constraint_count = int(len(segment_constraints))
 
     def _certificate_check(self, *, control_points: np.ndarray, cert_basis: np.ndarray) -> dict[str, Any]:
         q_cert_norm = cert_basis @ control_points
@@ -776,7 +1046,7 @@ class SurfaceCBFQPGuidanceRunner:
         linear_lb = []
         linear_ub = []
 
-        # CBF constraints (only for the selected worst timesteps)
+        # CBF constraints collected from the selected risk-segment windows.
         for slack_index, constraint in enumerate(active_constraints):
             row = np.zeros(num_selected * dof + num_slack, dtype=np.float64)
             g_actual = np.asarray(constraint["g_actual"], dtype=np.float32).reshape(-1)

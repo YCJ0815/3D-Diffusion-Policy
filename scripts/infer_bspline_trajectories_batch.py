@@ -42,7 +42,7 @@ def _format_qp_skip_reason(reason: str | None) -> str:
         "no_sdf_surface_samples": "no robot surface SDF samples were collected",
         "all_surface_samples_outside_sdf": "all robot surface samples are outside the SDF grid",
         "no_worst_timesteps": "no worst trajectory timesteps found",
-        "no_topk_constraints": "no valid top-k CBF constraints built",
+        "no_topk_constraints": "no valid risk-window CBF constraints built",
         "non_finite_h_min_before": "pre-guidance minimum margin is non-finite",
         "unknown_skip_condition": "unknown guidance skip condition",
     }
@@ -357,9 +357,24 @@ def validate_args(args) -> None:
         )
     if args.guidance_steps <= 0:
         raise ValueError(f"guidance-steps must be positive, got {args.guidance_steps}")
-    if args.guidance_qp_candidates <= 0:
+    if args.guidance_max_risk_segments <= 0:
         raise ValueError(
-            f"guidance-qp-candidates must be positive, got {args.guidance_qp_candidates}"
+            "guidance-max-risk-segments must be positive, "
+            f"got {args.guidance_max_risk_segments}"
+        )
+    if args.guidance_window_radius < 0:
+        raise ValueError(
+            f"guidance-window-radius must be non-negative, got {args.guidance_window_radius}"
+        )
+    if args.guidance_points_per_segment <= 0:
+        raise ValueError(
+            "guidance-points-per-segment must be positive, "
+            f"got {args.guidance_points_per_segment}"
+        )
+    if args.guidance_min_constraints_per_segment <= 0:
+        raise ValueError(
+            "guidance-min-constraints-per-segment must be positive, "
+            f"got {args.guidance_min_constraints_per_segment}"
         )
     if args.guidance_active_constraints <= 0:
         raise ValueError(
@@ -844,7 +859,10 @@ def predict_surface_cbf_qp_guided_outputs(
         enabled=True,
         num_candidates=int(args.num_candidates),
         guidance_steps=int(args.guidance_steps),
-        qp_candidates=int(args.guidance_qp_candidates),
+        max_risk_segments=int(args.guidance_max_risk_segments),
+        window_radius=int(args.guidance_window_radius),
+        points_per_segment=int(args.guidance_points_per_segment),
+        min_constraints_per_segment=int(args.guidance_min_constraints_per_segment),
         active_constraints=int(args.guidance_active_constraints),
         check_steps=int(args.guidance_check_steps),
         cert_steps=int(args.guidance_cert_steps),
