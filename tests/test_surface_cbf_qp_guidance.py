@@ -15,7 +15,10 @@ from diffusion_policy_3d.common.surface_cbf_qp_guidance import (
     build_risk_segments,
     build_segment_window_cbf_constraints,
     build_guidance_target_schedule,
+    classify_candidate_repair,
+    compute_delta_box_bounds,
     compute_path_length,
+    compute_scp_pass_trigger,
     compute_smoothness,
     interpolate_swept_segments,
     rank_screened_candidates,
@@ -26,6 +29,39 @@ from diffusion_policy_3d.common.surface_cbf_qp_guidance import (
 
 
 class SurfaceCBFQPGuidanceHelperTests(unittest.TestCase):
+    def test_classify_candidate_repair_distinguishes_deep_repair_and_safe(self):
+        self.assertEqual(
+            classify_candidate_repair(min_clearance=-0.04, d_trigger=0.05, eps_deep=0.03),
+            "deep",
+        )
+        self.assertEqual(
+            classify_candidate_repair(min_clearance=0.02, d_trigger=0.05, eps_deep=0.03),
+            "repair",
+        )
+        self.assertEqual(
+            classify_candidate_repair(min_clearance=0.08, d_trigger=0.05, eps_deep=0.03),
+            "safe",
+        )
+
+    def test_compute_scp_pass_trigger_applies_offset_only_on_second_pass(self):
+        self.assertAlmostEqual(
+            compute_scp_pass_trigger(d_trigger=0.06, pass_index=0, pass2_offset=0.005),
+            0.06,
+        )
+        self.assertAlmostEqual(
+            compute_scp_pass_trigger(d_trigger=0.06, pass_index=1, pass2_offset=0.005),
+            0.065,
+        )
+
+    def test_compute_delta_box_bounds_respects_local_and_total_limits(self):
+        lower, upper = compute_delta_box_bounds(
+            base_delta_total=np.asarray([0.04, -0.04], dtype=np.float32),
+            delta_max_local=0.025,
+            delta_max_total=0.05,
+        )
+        np.testing.assert_allclose(lower, np.asarray([-0.025, -0.01], dtype=np.float64))
+        np.testing.assert_allclose(upper, np.asarray([0.01, 0.025], dtype=np.float64))
+
     def test_build_risk_segments_groups_contiguous_trigger_violations(self):
         sdf_result = {
             "all_sdf_values": np.asarray(

@@ -51,6 +51,12 @@ class SurfaceCBFQPGuidanceConfig:
     d_cert: float = 0.01
     eps_deep: float = 0.03
     delta_max: float = 0.05
+    scp_iterations: int = 2
+    delta_max_total: float = 0.05
+    delta_max_pass1: float = 0.025
+    delta_max_pass2: float = 0.025
+    d_trigger_pass2_offset: float = 0.005
+    margin_buffer: float = 0.005
     lambda_s: float = 0.25
     rho: float = 1.0e5
     ddim_eta: float = 0.0
@@ -91,6 +97,15 @@ class GuidanceLog:
     selected_risk_segments: list[dict[str, Any]] = field(default_factory=list)
     selected_window_timesteps: list[int] = field(default_factory=list)
     selected_constraint_count: int = 0
+    scp_iterations_configured: int = 2
+    scp_passes_attempted_total: int = 0
+    scp_passes_succeeded_total: int = 0
+    selected_candidate_pass_count: int = 0
+    selected_candidate_passes_succeeded: int = 0
+    selected_candidate_pre_qp_min_clearance: float = math.nan
+    selected_candidate_post_qp1_min_clearance: float = math.nan
+    selected_candidate_post_qp2_min_clearance: float = math.nan
+    selected_candidate_certificate_min_clearance: float = math.nan
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -703,7 +718,7 @@ class SurfaceCBFQPGuidanceRunner:
         q_goal_normalized = np.asarray(q_goal_normalized, dtype=np.float32).reshape(-1)
         delta_w_mean = np.asarray(delta_w_mean, dtype=np.float32).reshape(1, -1)
         delta_w_std = np.asarray(delta_w_std, dtype=np.float32).reshape(1, -1)
-        log = GuidanceLog()
+        log = GuidanceLog(scp_iterations_configured=int(self.config.scp_iterations))
         guidance_targets = build_guidance_target_schedule(
             int(self.config.guidance_steps),
             self.config.guidance_targets,
@@ -754,6 +769,22 @@ class SurfaceCBFQPGuidanceRunner:
                 "qp_success": False,
                 "qp_skip_reason": None,
                 "qp_solver_message": None,
+                "scp_iterations_configured": int(self.config.scp_iterations),
+                "scp_passes_attempted": 0,
+                "scp_passes_succeeded": 0,
+                "scp_stopped_after_pass": 0,
+                "unrepairable_by_local_qp": False,
+                "deep_penetration_flag": False,
+                "pre_qp_min_clearance": float(risk_summary["min_clearance"]),
+                "post_qp1_min_clearance": math.nan,
+                "post_qp2_min_clearance": math.nan,
+                "certificate_min_clearance": math.nan,
+                "pass1_total_slack": math.nan,
+                "pass2_total_slack": math.nan,
+                "pass1_risk_segment_count": 0,
+                "pass2_risk_segment_count": 0,
+                "new_risk_segments_after_qp1": False,
+                "scp_pass_details": [],
                 "num_worst_timesteps": 0,
                 "num_topk_constraints": 0,
                 "risk_segment_count_total": 0,
@@ -833,6 +864,12 @@ class SurfaceCBFQPGuidanceRunner:
         log.h_min_before_guidance = float(selected_candidate_info["h_min_before_guidance"])
         log.h_min_after_guidance = float(selected_candidate_info["h_min_after_guidance"])
         log.h_min_final = float(selected_candidate_info["h_min_final"])
+        log.selected_candidate_pass_count = int(selected_candidate_info.get("scp_passes_attempted", 0))
+        log.selected_candidate_passes_succeeded = int(selected_candidate_info.get("scp_passes_succeeded", 0))
+        log.selected_candidate_pre_qp_min_clearance = float(selected_candidate_info.get("pre_qp_min_clearance", math.nan))
+        log.selected_candidate_post_qp1_min_clearance = float(selected_candidate_info.get("post_qp1_min_clearance", math.nan))
+        log.selected_candidate_post_qp2_min_clearance = float(selected_candidate_info.get("post_qp2_min_clearance", math.nan))
+        log.selected_candidate_certificate_min_clearance = float(selected_candidate_info.get("certificate_min_clearance", math.nan))
         log.total_time = time.perf_counter() - start_time
         return GuidanceResult(
             best_index=selected_index,
@@ -860,86 +897,130 @@ class SurfaceCBFQPGuidanceRunner:
         log: GuidanceLog,
     ) -> None:
         candidate_start_time = time.perf_counter()
-        control_points = np.asarray(candidate_info["control_points_normalized"], dtype=np.float32)
-        q_check_norm = check_basis @ control_points
-        q_check_actual = self.environment.normalized_to_actual(q_check_norm)
-        sdf_result = self.environment.collect_joint_trajectory_sdf_with_link_details_any_length(q_check_actual)
-        risk_summary = summarize_sdf_risk(
-            sdf_result=sdf_result,
-            d_safe=float(self.config.d_safe),
+        _ = guidance_targets
+        original_control_points = np.asarray(candidate_info["control_points_normalized"], dtype=np.float32)
+        current_control_points = original_control_points.copy()
+        initial_state = self._evaluate_candidate_state(
+            control_points=original_control_points,
+            check_basis=check_basis,
             d_trigger=float(self.config.d_trigger),
         )
-
-        guided_control_points = control_points.copy()
+        initial_summary = initial_state["risk_summary"]
+        initial_min_clearance = float(initial_summary["min_clearance"])
+        guided_control_points = original_control_points.copy()
         qp_attempted = False
         qp_success = False
-        qp_result: dict[str, Any] | None = None
         qp_skip_reason: str | None = None
+        pass_results: list[dict[str, Any]] = []
 
         candidate_info["repair_attempted"] = True
         candidate_info["repair_attempt_order"] = int(attempt_order)
-
-        risk_segments = build_risk_segments(
-            sdf_result=sdf_result,
+        repair_mode = classify_candidate_repair(
+            min_clearance=initial_min_clearance,
             d_trigger=float(self.config.d_trigger),
+            eps_deep=float(self.config.eps_deep),
         )
-        selected_segments = risk_segments[: int(self.config.max_risk_segments)]
-        segment_constraints, selected_segment_summaries, selected_window_timesteps = build_segment_window_cbf_constraints(
-            segments=selected_segments,
-            sdf_result=sdf_result,
-            check_basis=check_basis,
-            q_check_norm=q_check_norm,
-            environment=self.environment,
-            d_trigger=float(self.config.d_trigger),
-            points_per_segment=int(self.config.points_per_segment),
-            min_constraints_per_segment=int(self.config.min_constraints_per_segment),
-            window_radius=int(self.config.window_radius),
-            max_active=int(self.config.active_constraints),
-        ) if selected_segments else ([], [], [])
+        deep_penetration_flag = repair_mode == "deep"
+        safe_enough = repair_mode == "safe"
 
-        if segment_constraints and np.isfinite(float(risk_summary["min_margin"])):
-            qp_attempted = True
-            log.num_qp_called += 1
-            log.num_active_constraints += len(segment_constraints)
-            guidance_start = time.perf_counter()
-            qp_result = self._solve_guidance_qp(
-                control_points=control_points,
-                q_check_norm=q_check_norm,
-                q_check_actual=q_check_actual,
-                active_constraints=segment_constraints,
-                target_margin=float(guidance_targets[-1]),
-                limit_basis=limit_basis,
-                free_slice=free_slice,
-            )
-            log.guidance_time += time.perf_counter() - guidance_start
-            log.qp_time += float(qp_result.get("solve_time", 0.0)) if qp_result is not None else 0.0
-            if qp_result is not None and bool(qp_result.get("success", False)):
-                guided_control_points = np.asarray(qp_result["control_points"], dtype=np.float32)
-                qp_success = True
-                log.num_qp_success += 1
+        if deep_penetration_flag:
+            qp_skip_reason = "deep_penetration_unrepairable"
+        elif safe_enough:
+            qp_skip_reason = "safe_candidate_no_repair"
         else:
-            if not risk_segments:
-                if int(risk_summary["total_sdf_count"]) == 0:
-                    qp_skip_reason = "no_sdf_surface_samples"
-                elif int(risk_summary["finite_sdf_count"]) == 0:
-                    qp_skip_reason = "all_surface_samples_outside_sdf"
-                else:
-                    qp_skip_reason = "no_risk_segments"
-            elif not selected_segments or not segment_constraints:
-                qp_skip_reason = "no_topk_constraints"
-            elif not np.isfinite(float(risk_summary["min_margin"])):
-                qp_skip_reason = "non_finite_h_min_before"
-            else:
-                qp_skip_reason = "unknown_skip_condition"
+            for pass_index in range(int(self.config.scp_iterations)):
+                pass_trigger = compute_scp_pass_trigger(
+                    d_trigger=float(self.config.d_trigger),
+                    pass_index=pass_index,
+                    pass2_offset=float(self.config.d_trigger_pass2_offset),
+                )
+                state = self._evaluate_candidate_state(
+                    control_points=current_control_points,
+                    check_basis=check_basis,
+                    d_trigger=pass_trigger,
+                )
+                pass_detail = self._build_scp_pass_detail(
+                    pass_index=pass_index,
+                    state=state,
+                    check_basis=check_basis,
+                    d_trigger=pass_trigger,
+                )
+                pass_results.append(pass_detail)
+                if pass_index == 1 and bool(pass_detail["risk_segment_count_total"] > 0):
+                    prev_ids = {
+                        tuple(segment["timesteps"])
+                        for segment in pass_results[0].get("risk_segments_raw", [])
+                    }
+                    curr_ids = {
+                        tuple(segment["timesteps"])
+                        for segment in pass_detail.get("risk_segments_raw", [])
+                    }
+                    candidate_info["new_risk_segments_after_qp1"] = bool(curr_ids - prev_ids)
+                if not np.isfinite(float(state["risk_summary"]["min_margin"])):
+                    qp_skip_reason = "non_finite_h_min_before"
+                    pass_detail["skip_reason"] = qp_skip_reason
+                    break
+                if not pass_detail["risk_segments_raw"]:
+                    qp_skip_reason = None if pass_index > 0 else "no_risk_segments"
+                    pass_detail["skip_reason"] = qp_skip_reason
+                    break
+                if not pass_detail["active_constraints"]:
+                    qp_skip_reason = "no_topk_constraints"
+                    pass_detail["skip_reason"] = qp_skip_reason
+                    break
 
-        q_after_norm = check_basis @ guided_control_points
-        q_after_actual = self.environment.normalized_to_actual(q_after_norm)
-        sdf_after = self.environment.collect_joint_trajectory_sdf_with_link_details_any_length(q_after_actual)
-        after_summary = summarize_sdf_risk(
-            sdf_result=sdf_after,
-            d_safe=float(self.config.d_safe),
+                qp_attempted = True
+                candidate_info["scp_passes_attempted"] += 1
+                log.num_qp_called += 1
+                log.scp_passes_attempted_total += 1
+                log.num_active_constraints += int(pass_detail["selected_constraint_count"])
+                guidance_start = time.perf_counter()
+                qp_result = self._solve_guidance_qp(
+                    base_control_points=current_control_points,
+                    reference_control_points=original_control_points,
+                    active_constraints=pass_detail["active_constraints"],
+                    target_margin=float(self.config.d_cert) + float(self.config.margin_buffer),
+                    limit_basis=limit_basis,
+                    free_slice=free_slice,
+                    delta_max_local=float(
+                        self.config.delta_max_pass1 if pass_index == 0 else self.config.delta_max_pass2
+                    ),
+                    delta_max_total=float(self.config.delta_max_total),
+                )
+                log.guidance_time += time.perf_counter() - guidance_start
+                if qp_result is not None:
+                    log.qp_time += float(qp_result.get("solve_time", 0.0))
+                pass_detail["solver_success"] = bool(qp_result is not None and qp_result.get("success", False))
+                pass_detail["solver_message"] = None if qp_result is None else qp_result.get("message")
+                pass_detail["total_slack"] = float(
+                    np.sum(np.asarray(qp_result.get("slack", []), dtype=np.float32))
+                ) if qp_result is not None else math.nan
+                if qp_result is None or not bool(qp_result.get("success", False)):
+                    qp_skip_reason = "solver_failure"
+                    candidate_info["qp_solver_message"] = None if qp_result is None else qp_result.get("message")
+                    break
+                current_control_points = np.asarray(qp_result["control_points"], dtype=np.float32)
+                guided_control_points = current_control_points.copy()
+                candidate_info["scp_passes_succeeded"] += 1
+                log.num_qp_success += 1
+                log.scp_passes_succeeded_total += 1
+                pass_detail["control_points_updated"] = True
+                updated_state = self._evaluate_candidate_state(
+                    control_points=current_control_points,
+                    check_basis=check_basis,
+                    d_trigger=pass_trigger,
+                )
+                pass_detail["post_min_clearance"] = float(updated_state["risk_summary"]["min_clearance"])
+            qp_success = bool(qp_attempted and candidate_info["scp_passes_attempted"] == candidate_info["scp_passes_succeeded"])
+            if qp_attempted and qp_skip_reason is None and candidate_info["scp_passes_attempted"] < int(self.config.scp_iterations):
+                qp_skip_reason = "no_risk_segments"
+
+        after_state = self._evaluate_candidate_state(
+            control_points=guided_control_points,
+            check_basis=check_basis,
             d_trigger=float(self.config.d_trigger),
         )
+        after_summary = after_state["risk_summary"]
 
         certificate_start = time.perf_counter()
         cert_result = self._certificate_check(
@@ -947,24 +1028,56 @@ class SurfaceCBFQPGuidanceRunner:
             cert_basis=cert_basis,
         )
         log.certificate_time += time.perf_counter() - certificate_start
+        serialized_pass_details = [self._serialize_pass_detail(detail) for detail in pass_results]
+        while len(serialized_pass_details) < int(self.config.scp_iterations):
+            serialized_pass_details.append(
+                self._serialize_pass_detail(
+                    {
+                        "pass_index": len(serialized_pass_details) + 1,
+                        "d_trigger": float(self.config.d_trigger)
+                        + (float(self.config.d_trigger_pass2_offset) if len(serialized_pass_details) == 1 else 0.0),
+                        "risk_segment_count_total": 0,
+                        "risk_segment_count_selected": 0,
+                        "selected_segments": [],
+                        "selected_window_timesteps": [],
+                        "selected_constraint_count": 0,
+                        "solver_success": False,
+                        "solver_message": None,
+                        "total_slack": math.nan,
+                        "skip_reason": None,
+                        "post_min_clearance": math.nan,
+                    }
+                )
+            )
 
         candidate_info.update(
             {
-                "h_min_before_guidance": float(risk_summary["min_margin"]),
+                "h_min_before_guidance": float(initial_summary["min_margin"]),
                 "h_min_after_guidance": float(after_summary["min_margin"]),
                 "h_min_final": float(cert_result["h_min_final"]),
                 "certificate_success": bool(cert_result["success"]),
                 "qp_attempted": bool(qp_attempted),
                 "qp_success": bool(qp_success),
                 "qp_skip_reason": qp_skip_reason,
-                "qp_solver_message": None if qp_result is None else qp_result.get("message"),
-                "num_worst_timesteps": int(sum(len(segment.get("anchor_timesteps", [])) for segment in selected_segment_summaries)),
-                "num_topk_constraints": int(len(segment_constraints)),
-                "risk_segment_count_total": int(len(risk_segments)),
-                "risk_segment_count_selected": int(len(selected_segment_summaries)),
-                "selected_risk_segments": selected_segment_summaries,
-                "selected_window_timesteps": [int(v) for v in selected_window_timesteps],
-                "selected_constraint_count": int(len(segment_constraints)),
+                "scp_stopped_after_pass": int(candidate_info["scp_passes_attempted"]),
+                "unrepairable_by_local_qp": bool(deep_penetration_flag),
+                "deep_penetration_flag": bool(deep_penetration_flag),
+                "pre_qp_min_clearance": float(initial_summary["min_clearance"]),
+                "post_qp1_min_clearance": float(pass_results[0].get("post_min_clearance", math.nan)) if pass_results else math.nan,
+                "post_qp2_min_clearance": float(pass_results[1].get("post_min_clearance", math.nan)) if len(pass_results) > 1 else math.nan,
+                "certificate_min_clearance": float(cert_result["min_clearance"]),
+                "pass1_total_slack": float(pass_results[0].get("total_slack", math.nan)) if pass_results else math.nan,
+                "pass2_total_slack": float(pass_results[1].get("total_slack", math.nan)) if len(pass_results) > 1 else math.nan,
+                "pass1_risk_segment_count": int(pass_results[0].get("risk_segment_count_total", 0)) if pass_results else 0,
+                "pass2_risk_segment_count": int(pass_results[1].get("risk_segment_count_total", 0)) if len(pass_results) > 1 else 0,
+                "scp_pass_details": serialized_pass_details,
+                "num_worst_timesteps": int(sum(len(segment.get("anchor_timesteps", [])) for detail in pass_results for segment in detail.get("selected_segments", []))),
+                "num_topk_constraints": int(max((detail.get("selected_constraint_count", 0) for detail in pass_results), default=0)),
+                "risk_segment_count_total": int(pass_results[-1].get("risk_segment_count_total", 0)) if pass_results else int(len(initial_state["risk_segments"])),
+                "risk_segment_count_selected": int(pass_results[-1].get("risk_segment_count_selected", 0)) if pass_results else 0,
+                "selected_risk_segments": list(pass_results[-1].get("selected_segments", [])) if pass_results else [],
+                "selected_window_timesteps": [int(v) for v in pass_results[-1].get("selected_window_timesteps", [])] if pass_results else [],
+                "selected_constraint_count": int(pass_results[-1].get("selected_constraint_count", 0)) if pass_results else 0,
                 "control_points_normalized": guided_control_points.astype(np.float32),
                 "joint_trajectory": np.asarray(cert_result["joint_trajectory"], dtype=np.float32),
                 "normalized_free_residual": control_points_to_normalized_free_residual(
@@ -980,11 +1093,100 @@ class SurfaceCBFQPGuidanceRunner:
                 "candidate_time": time.perf_counter() - candidate_start_time,
             }
         )
-        log.risk_segment_count_total = int(len(risk_segments))
-        log.risk_segment_count_selected = int(len(selected_segment_summaries))
-        log.selected_risk_segments = list(selected_segment_summaries)
-        log.selected_window_timesteps = [int(v) for v in selected_window_timesteps]
-        log.selected_constraint_count = int(len(segment_constraints))
+        log.risk_segment_count_total = int(candidate_info["risk_segment_count_total"])
+        log.risk_segment_count_selected = int(candidate_info["risk_segment_count_selected"])
+        log.selected_risk_segments = list(candidate_info["selected_risk_segments"])
+        log.selected_window_timesteps = list(candidate_info["selected_window_timesteps"])
+        log.selected_constraint_count = int(candidate_info["selected_constraint_count"])
+        log.selected_candidate_pass_count = int(candidate_info["scp_passes_attempted"])
+        log.selected_candidate_passes_succeeded = int(candidate_info["scp_passes_succeeded"])
+        log.selected_candidate_pre_qp_min_clearance = float(candidate_info["pre_qp_min_clearance"])
+        log.selected_candidate_post_qp1_min_clearance = float(candidate_info["post_qp1_min_clearance"])
+        log.selected_candidate_post_qp2_min_clearance = float(candidate_info["post_qp2_min_clearance"])
+        log.selected_candidate_certificate_min_clearance = float(candidate_info["certificate_min_clearance"])
+
+    def _evaluate_candidate_state(
+        self,
+        *,
+        control_points: np.ndarray,
+        check_basis: np.ndarray,
+        d_trigger: float,
+    ) -> dict[str, Any]:
+        q_check_norm = check_basis @ np.asarray(control_points, dtype=np.float32)
+        q_check_actual = self.environment.normalized_to_actual(q_check_norm)
+        sdf_result = self.environment.collect_joint_trajectory_sdf_with_link_details_any_length(q_check_actual)
+        risk_summary = summarize_sdf_risk(
+            sdf_result=sdf_result,
+            d_safe=float(self.config.d_safe),
+            d_trigger=float(d_trigger),
+        )
+        risk_segments = build_risk_segments(
+            sdf_result=sdf_result,
+            d_trigger=float(d_trigger),
+        )
+        return {
+            "q_check_norm": q_check_norm,
+            "q_check_actual": q_check_actual,
+            "sdf_result": sdf_result,
+            "risk_summary": risk_summary,
+            "risk_segments": risk_segments,
+        }
+
+    def _build_scp_pass_detail(
+        self,
+        *,
+        pass_index: int,
+        state: dict[str, Any],
+        check_basis: np.ndarray,
+        d_trigger: float,
+    ) -> dict[str, Any]:
+        risk_segments = list(state["risk_segments"])
+        selected_segments = risk_segments[: int(self.config.max_risk_segments)]
+        constraints, selected_segment_summaries, selected_window_timesteps = build_segment_window_cbf_constraints(
+            segments=selected_segments,
+            sdf_result=state["sdf_result"],
+            check_basis=check_basis,
+            q_check_norm=state["q_check_norm"],
+            environment=self.environment,
+            d_trigger=float(d_trigger),
+            points_per_segment=int(self.config.points_per_segment),
+            min_constraints_per_segment=int(self.config.min_constraints_per_segment),
+            window_radius=int(self.config.window_radius),
+            max_active=int(self.config.active_constraints),
+        ) if selected_segments else ([], [], [])
+        return {
+            "pass_index": int(pass_index + 1),
+            "d_trigger": float(d_trigger),
+            "risk_segments_raw": risk_segments,
+            "risk_segment_count_total": int(len(risk_segments)),
+            "risk_segment_count_selected": int(len(selected_segment_summaries)),
+            "selected_segments": selected_segment_summaries,
+            "selected_window_timesteps": [int(v) for v in selected_window_timesteps],
+            "selected_constraint_count": int(len(constraints)),
+            "active_constraints": constraints,
+            "solver_success": False,
+            "solver_message": None,
+            "total_slack": math.nan,
+            "skip_reason": None,
+            "control_points_updated": False,
+            "post_min_clearance": math.nan,
+        }
+
+    def _serialize_pass_detail(self, detail: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "pass_index": int(detail["pass_index"]),
+            "d_trigger": float(detail["d_trigger"]),
+            "risk_segment_count_total": int(detail["risk_segment_count_total"]),
+            "risk_segment_count_selected": int(detail["risk_segment_count_selected"]),
+            "selected_segments": list(detail["selected_segments"]),
+            "selected_window_timesteps": [int(v) for v in detail["selected_window_timesteps"]],
+            "selected_constraint_count": int(detail["selected_constraint_count"]),
+            "solver_success": bool(detail["solver_success"]),
+            "solver_message": detail["solver_message"],
+            "total_slack": float(detail["total_slack"]) if detail["total_slack"] is not None else math.nan,
+            "skip_reason": detail["skip_reason"],
+            "post_min_clearance": float(detail["post_min_clearance"]),
+        }
 
     def _certificate_check(self, *, control_points: np.ndarray, cert_basis: np.ndarray) -> dict[str, Any]:
         q_cert_norm = cert_basis @ control_points
@@ -992,30 +1194,36 @@ class SurfaceCBFQPGuidanceRunner:
         q_cert_swept = interpolate_swept_segments(q_cert_actual, int(self.config.cert_swept_intermediate))
         sdf_cert = self.environment.collect_joint_trajectory_sdf_with_link_details_any_length(q_cert_swept)
         h_cert = flatten_margin_values(sdf_cert, d_safe=float(self.config.d_safe))
+        all_sdf = np.asarray(sdf_cert.get("all_sdf_values", np.empty((0, 0), dtype=np.float32)), dtype=np.float32)
+        finite_sdf = all_sdf[np.isfinite(all_sdf)]
         h_min_final = float(np.min(h_cert)) if h_cert.size > 0 else math.nan
+        min_clearance = float(np.min(finite_sdf)) if finite_sdf.size > 0 else math.nan
         return {
             "success": bool(np.isfinite(h_min_final) and h_min_final >= float(self.config.d_cert)),
             "h_min_final": h_min_final,
+            "min_clearance": min_clearance,
             "joint_trajectory": q_cert_swept.astype(np.float32),
         }
 
     def _solve_guidance_qp(
         self,
         *,
-        control_points: np.ndarray,
-        q_check_norm: np.ndarray,
-        q_check_actual: np.ndarray,
+        base_control_points: np.ndarray,
+        reference_control_points: np.ndarray,
         active_constraints: list[dict[str, Any]],
         target_margin: float,
         limit_basis: np.ndarray,
         free_slice: slice,
+        delta_max_local: float,
+        delta_max_total: float,
     ) -> dict[str, Any] | None:
         solve_start = time.perf_counter()
-        dof = control_points.shape[1]
+        dof = base_control_points.shape[1]
         num_slack = len(active_constraints)
         if num_slack <= 0:
             return None
-        base_control_points = np.asarray(control_points, dtype=np.float32)
+        base_control_points = np.asarray(base_control_points, dtype=np.float32)
+        reference_control_points = np.asarray(reference_control_points, dtype=np.float32)
 
         # ---- identify which free control points influence the active constraints ----
         all_free_indices = list(range(free_slice.start, free_slice.stop))
@@ -1035,8 +1243,24 @@ class SurfaceCBFQPGuidanceRunner:
         d2_matrix = build_second_difference_matrix(num_control_points=base_control_points.shape[0])
         lower_bounds = np.full(num_selected * dof + num_slack, -np.inf, dtype=np.float64)
         upper_bounds = np.full(num_selected * dof + num_slack, np.inf, dtype=np.float64)
-        lower_bounds[: num_selected * dof] = -float(self.config.delta_max)
-        upper_bounds[: num_selected * dof] = float(self.config.delta_max)
+        for cp_idx, local_idx in selected_to_local.items():
+            base_delta_total = (
+                base_control_points[cp_idx].astype(np.float64) - reference_control_points[cp_idx].astype(np.float64)
+            )
+            local_lower, local_upper = compute_delta_box_bounds(
+                base_delta_total=base_delta_total,
+                delta_max_local=float(delta_max_local),
+                delta_max_total=float(delta_max_total),
+            )
+            if np.any(local_lower > local_upper):
+                return {
+                    "success": False,
+                    "solve_time": time.perf_counter() - solve_start,
+                    "message": "infeasible cumulative delta bounds",
+                    "slack": np.empty((0,), dtype=np.float32),
+                }
+            lower_bounds[local_idx * dof : (local_idx + 1) * dof] = local_lower
+            upper_bounds[local_idx * dof : (local_idx + 1) * dof] = local_upper
         lower_bounds[num_selected * dof :] = 0.0
         joint_lower_norm = np.full(dof, -1.0, dtype=np.float32)
         joint_upper_norm = np.full(dof, 1.0, dtype=np.float32)
@@ -1154,6 +1378,37 @@ def build_second_difference_matrix(num_control_points: int) -> np.ndarray:
         row[index + 2] = 1.0
         rows.append(row)
     return np.stack(rows, axis=0).astype(np.float32)
+
+
+def classify_candidate_repair(
+    *,
+    min_clearance: float,
+    d_trigger: float,
+    eps_deep: float,
+) -> str:
+    if np.isfinite(min_clearance) and min_clearance < -float(eps_deep):
+        return "deep"
+    if np.isfinite(min_clearance) and min_clearance >= float(d_trigger):
+        return "safe"
+    return "repair"
+
+
+def compute_scp_pass_trigger(*, d_trigger: float, pass_index: int, pass2_offset: float) -> float:
+    if int(pass_index) <= 0:
+        return float(d_trigger)
+    return float(d_trigger) + float(pass2_offset)
+
+
+def compute_delta_box_bounds(
+    *,
+    base_delta_total: np.ndarray,
+    delta_max_local: float,
+    delta_max_total: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    base_delta_total = np.asarray(base_delta_total, dtype=np.float64)
+    local_lower = np.maximum(-float(delta_max_local), -float(delta_max_total) - base_delta_total)
+    local_upper = np.minimum(float(delta_max_local), float(delta_max_total) - base_delta_total)
+    return local_lower.astype(np.float64), local_upper.astype(np.float64)
 
 
 def reconstruct_control_points_from_free_residual(

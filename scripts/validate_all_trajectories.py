@@ -62,6 +62,9 @@ def _format_qp_skip_reason(reason: str | None) -> str:
         "no_worst_timesteps": "no worst trajectory timesteps found",
         "no_risk_segments": "no risk segments found below the trigger threshold",
         "no_topk_constraints": "no valid risk-window CBF constraints built",
+        "deep_penetration_unrepairable": "candidate is too deeply in collision for local SCP-QP repair",
+        "safe_candidate_no_repair": "candidate clearance is already above the repair trigger",
+        "solver_failure": "SCP-QP solver failed before certificate",
         "non_finite_h_min_before": "pre-guidance minimum margin is non-finite",
         "unknown_skip_condition": "unknown guidance skip condition",
     }
@@ -131,7 +134,7 @@ def _print_validation_progress(
 ) -> None:
     qp_summary = _summarize_qp_status_from_selection(selection)
     qp_part = (
-        f"QP=yes attempted={qp_summary['qp_attempted_count']} success={qp_summary['qp_success_count']}"
+        f"QP=yes passes={qp_summary['guidance_num_qp_success']}/{qp_summary['guidance_num_qp_called']}"
         if qp_summary["qp_attempted"]
         else (
             f"QP=no reason={qp_summary['qp_skip_reason_text']} "
@@ -189,7 +192,7 @@ def _build_validation_status_lines(
     status_line = (
         f"traj_collision_rate={traj_collision_rate_so_far:.3f} "
         f"step_collision_rate={step_collision_rate_so_far:.3f} "
-        f"QP={qp_summary['qp_attempted_count']}/{qp_summary['qp_success_count']} "
+        f"QP={qp_summary['guidance_num_qp_success']}/{qp_summary['guidance_num_qp_called']} "
         f"repair={qp_summary['guidance_repair_attempt_count']} "
         f"selected_candidate={int(selection.get('selected_candidate_idx', 0))}"
     )
@@ -1100,6 +1103,12 @@ def _predict_surface_cbf_qp_guided(
         d_cert=float(args.guidance_d_cert),
         eps_deep=float(args.guidance_eps_deep),
         delta_max=float(args.guidance_delta_max),
+        scp_iterations=int(args.guidance_scp_iterations),
+        delta_max_total=float(args.guidance_delta_max_total),
+        delta_max_pass1=float(args.guidance_delta_max_pass1),
+        delta_max_pass2=float(args.guidance_delta_max_pass2),
+        d_trigger_pass2_offset=float(args.guidance_d_trigger_pass2_offset),
+        margin_buffer=float(args.guidance_margin_buffer),
         lambda_s=float(args.guidance_lambda_s),
         rho=float(args.guidance_rho),
         ddim_eta=float(args.guidance_ddim_eta),
@@ -1772,6 +1781,12 @@ def main() -> None:
             "guidance_d_cert": float(args.guidance_d_cert),
             "guidance_eps_deep": float(args.guidance_eps_deep),
             "guidance_delta_max": float(args.guidance_delta_max),
+            "guidance_scp_iterations": int(args.guidance_scp_iterations),
+            "guidance_delta_max_total": float(args.guidance_delta_max_total),
+            "guidance_delta_max_pass1": float(args.guidance_delta_max_pass1),
+            "guidance_delta_max_pass2": float(args.guidance_delta_max_pass2),
+            "guidance_d_trigger_pass2_offset": float(args.guidance_d_trigger_pass2_offset),
+            "guidance_margin_buffer": float(args.guidance_margin_buffer),
             "guidance_lambda_s": float(args.guidance_lambda_s),
             "guidance_rho": float(args.guidance_rho),
             "guidance_ddim_eta": float(args.guidance_ddim_eta),

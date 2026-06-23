@@ -37,6 +37,12 @@ GUIDANCE_CONFIG_FALLBACKS: dict[str, Any] = {
     "guidance_d_cert": 0.01,
     "guidance_eps_deep": 0.03,
     "guidance_delta_max": 0.05,
+    "guidance_scp_iterations": 2,
+    "guidance_delta_max_total": 0.05,
+    "guidance_delta_max_pass1": 0.025,
+    "guidance_delta_max_pass2": 0.025,
+    "guidance_d_trigger_pass2_offset": 0.005,
+    "guidance_margin_buffer": 0.005,
     "guidance_lambda_s": 0.25,
     "guidance_rho": 1.0e5,
     "guidance_ddim_eta": 0.0,
@@ -65,6 +71,12 @@ GUIDANCE_CONFIG_KEY_PATHS: dict[str, tuple[str, ...]] = {
     "guidance_d_cert": ("surface_cbf_qp_guidance", "runner", "d_cert"),
     "guidance_eps_deep": ("surface_cbf_qp_guidance", "runner", "eps_deep"),
     "guidance_delta_max": ("surface_cbf_qp_guidance", "runner", "delta_max"),
+    "guidance_scp_iterations": ("surface_cbf_qp_guidance", "runner", "scp_iterations"),
+    "guidance_delta_max_total": ("surface_cbf_qp_guidance", "runner", "delta_max_total"),
+    "guidance_delta_max_pass1": ("surface_cbf_qp_guidance", "runner", "delta_max_pass1"),
+    "guidance_delta_max_pass2": ("surface_cbf_qp_guidance", "runner", "delta_max_pass2"),
+    "guidance_d_trigger_pass2_offset": ("surface_cbf_qp_guidance", "runner", "d_trigger_pass2_offset"),
+    "guidance_margin_buffer": ("surface_cbf_qp_guidance", "runner", "margin_buffer"),
     "guidance_lambda_s": ("surface_cbf_qp_guidance", "runner", "lambda_s"),
     "guidance_rho": ("surface_cbf_qp_guidance", "runner", "rho"),
     "guidance_ddim_eta": ("surface_cbf_qp_guidance", "runner", "ddim_eta"),
@@ -100,6 +112,12 @@ GUIDANCE_PARAMETER_GROUPS: dict[str, tuple[str, ...]] = {
         "guidance_min_constraints_per_segment",
         "guidance_active_constraints",
         "guidance_delta_max",
+        "guidance_scp_iterations",
+        "guidance_delta_max_total",
+        "guidance_delta_max_pass1",
+        "guidance_delta_max_pass2",
+        "guidance_d_trigger_pass2_offset",
+        "guidance_margin_buffer",
         "guidance_lambda_s",
         "guidance_rho",
         "guidance_joint_limit_steps",
@@ -218,6 +236,12 @@ def add_surface_cbf_qp_guidance_parser_args(
     parser.add_argument("--guidance-d-cert", type=float, default=argparse.SUPPRESS)
     parser.add_argument("--guidance-eps-deep", type=float, default=argparse.SUPPRESS)
     parser.add_argument("--guidance-delta-max", type=float, default=argparse.SUPPRESS)
+    parser.add_argument("--guidance-scp-iterations", type=int, default=argparse.SUPPRESS)
+    parser.add_argument("--guidance-delta-max-total", type=float, default=argparse.SUPPRESS)
+    parser.add_argument("--guidance-delta-max-pass1", type=float, default=argparse.SUPPRESS)
+    parser.add_argument("--guidance-delta-max-pass2", type=float, default=argparse.SUPPRESS)
+    parser.add_argument("--guidance-d-trigger-pass2-offset", type=float, default=argparse.SUPPRESS)
+    parser.add_argument("--guidance-margin-buffer", type=float, default=argparse.SUPPRESS)
     parser.add_argument("--guidance-lambda-s", type=float, default=argparse.SUPPRESS)
     parser.add_argument("--guidance-rho", type=float, default=argparse.SUPPRESS)
     parser.add_argument(
@@ -259,6 +283,12 @@ def apply_surface_cbf_qp_guidance_config(
         "guidance_d_cert",
         "guidance_eps_deep",
         "guidance_delta_max",
+        "guidance_scp_iterations",
+        "guidance_delta_max_total",
+        "guidance_delta_max_pass1",
+        "guidance_delta_max_pass2",
+        "guidance_d_trigger_pass2_offset",
+        "guidance_margin_buffer",
         "guidance_lambda_s",
         "guidance_rho",
         "guidance_ddim_eta",
@@ -307,6 +337,12 @@ def build_surface_cbf_qp_parameter_summary(
         "guidance_d_cert",
         "guidance_eps_deep",
         "guidance_delta_max",
+        "guidance_scp_iterations",
+        "guidance_delta_max_total",
+        "guidance_delta_max_pass1",
+        "guidance_delta_max_pass2",
+        "guidance_d_trigger_pass2_offset",
+        "guidance_margin_buffer",
         "guidance_lambda_s",
         "guidance_rho",
         "guidance_ddim_eta",

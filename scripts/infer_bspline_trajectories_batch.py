@@ -42,7 +42,11 @@ def _format_qp_skip_reason(reason: str | None) -> str:
         "no_sdf_surface_samples": "no robot surface SDF samples were collected",
         "all_surface_samples_outside_sdf": "all robot surface samples are outside the SDF grid",
         "no_worst_timesteps": "no worst trajectory timesteps found",
+        "no_risk_segments": "no risk segments found below the trigger threshold",
         "no_topk_constraints": "no valid risk-window CBF constraints built",
+        "deep_penetration_unrepairable": "candidate is too deeply in collision for local SCP-QP repair",
+        "safe_candidate_no_repair": "candidate clearance is already above the repair trigger",
+        "solver_failure": "SCP-QP solver failed before certificate",
         "non_finite_h_min_before": "pre-guidance minimum margin is non-finite",
         "unknown_skip_condition": "unknown guidance skip condition",
     }
@@ -118,7 +122,7 @@ def print_inference_progress(
     summary: dict,
 ) -> None:
     qp_part = (
-        f"QP=yes attempted={summary['qp_attempted_count']} success={summary['qp_success_count']}"
+        f"QP=yes passes={summary['guidance_num_qp_success']}/{summary['guidance_num_qp_called']}"
         if summary["qp_attempted"]
         else (
             f"QP=no reason={summary['qp_skip_reason_text']} "
@@ -380,6 +384,31 @@ def validate_args(args) -> None:
         raise ValueError(
             "guidance-active-constraints must be positive, "
             f"got {args.guidance_active_constraints}"
+        )
+    if args.guidance_scp_iterations != 2:
+        raise ValueError(
+            f"guidance-scp-iterations must be 2 for the current SCP implementation, got {args.guidance_scp_iterations}"
+        )
+    if args.guidance_delta_max_total <= 0.0:
+        raise ValueError(
+            f"guidance-delta-max-total must be positive, got {args.guidance_delta_max_total}"
+        )
+    if args.guidance_delta_max_pass1 <= 0.0:
+        raise ValueError(
+            f"guidance-delta-max-pass1 must be positive, got {args.guidance_delta_max_pass1}"
+        )
+    if args.guidance_delta_max_pass2 <= 0.0:
+        raise ValueError(
+            f"guidance-delta-max-pass2 must be positive, got {args.guidance_delta_max_pass2}"
+        )
+    if args.guidance_d_trigger_pass2_offset < 0.0:
+        raise ValueError(
+            "guidance-d-trigger-pass2-offset must be non-negative, "
+            f"got {args.guidance_d_trigger_pass2_offset}"
+        )
+    if args.guidance_margin_buffer < 0.0:
+        raise ValueError(
+            f"guidance-margin-buffer must be non-negative, got {args.guidance_margin_buffer}"
         )
     if resolve_sampling_mode(args) in {"candidate", "compare"} and args.candidate_selection == "weighted_sdf":
         if args.jobs_root is None:
@@ -872,6 +901,12 @@ def predict_surface_cbf_qp_guided_outputs(
         d_cert=float(args.guidance_d_cert),
         eps_deep=float(args.guidance_eps_deep),
         delta_max=float(args.guidance_delta_max),
+        scp_iterations=int(args.guidance_scp_iterations),
+        delta_max_total=float(args.guidance_delta_max_total),
+        delta_max_pass1=float(args.guidance_delta_max_pass1),
+        delta_max_pass2=float(args.guidance_delta_max_pass2),
+        d_trigger_pass2_offset=float(args.guidance_d_trigger_pass2_offset),
+        margin_buffer=float(args.guidance_margin_buffer),
         lambda_s=float(args.guidance_lambda_s),
         rho=float(args.guidance_rho),
         ddim_eta=float(args.guidance_ddim_eta),

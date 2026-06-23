@@ -23,6 +23,12 @@ surface_cbf_qp_guidance:
     d_cert: 0.001
     eps_deep: 0.03
     delta_max: 0.05
+    scp_iterations: 2
+    delta_max_total: 0.05
+    delta_max_pass1: 0.025
+    delta_max_pass2: 0.025
+    d_trigger_pass2_offset: 0.005
+    margin_buffer: 0.005
     lambda_s: 0.25
     rho: 1.0e5
     ddim_eta: 0.0

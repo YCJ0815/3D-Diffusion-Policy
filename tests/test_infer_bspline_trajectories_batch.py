@@ -49,6 +49,21 @@ def _install_import_stubs() -> None:
     input_data_stub.load_bspline_planning_input_data = lambda **kwargs: None
     sys.modules.setdefault("diffusion_policy_3d.common.input_data", input_data_stub)
 
+    class _FakeOmegaConf:
+        @staticmethod
+        def load(path):
+            _ = path
+            return {}
+
+        @staticmethod
+        def to_container(value, resolve=True):
+            _ = resolve
+            return value
+
+    omegaconf_stub = types.ModuleType("omegaconf")
+    omegaconf_stub.OmegaConf = _FakeOmegaConf
+    sys.modules.setdefault("omegaconf", omegaconf_stub)
+
     single_infer_stub = types.ModuleType("infer_bspline_trajectory")
     single_infer_stub.build_obs_dict = lambda **kwargs: ({}, {})
     single_infer_stub.ensure_dir = lambda path: path
@@ -110,6 +125,18 @@ class InferBsplineTrajectoriesBatchTests(unittest.TestCase):
                 "4",
                 "--guidance-active-constraints",
                 "24",
+                "--guidance-scp-iterations",
+                "2",
+                "--guidance-delta-max-total",
+                "0.05",
+                "--guidance-delta-max-pass1",
+                "0.025",
+                "--guidance-delta-max-pass2",
+                "0.025",
+                "--guidance-d-trigger-pass2-offset",
+                "0.005",
+                "--guidance-margin-buffer",
+                "0.005",
             ]
         )
 
@@ -127,6 +154,12 @@ class InferBsplineTrajectoriesBatchTests(unittest.TestCase):
         self.assertEqual(args.guidance_points_per_segment, 2)
         self.assertEqual(args.guidance_min_constraints_per_segment, 4)
         self.assertEqual(args.guidance_active_constraints, 24)
+        self.assertEqual(args.guidance_scp_iterations, 2)
+        self.assertEqual(args.guidance_delta_max_total, 0.05)
+        self.assertEqual(args.guidance_delta_max_pass1, 0.025)
+        self.assertEqual(args.guidance_delta_max_pass2, 0.025)
+        self.assertEqual(args.guidance_d_trigger_pass2_offset, 0.005)
+        self.assertEqual(args.guidance_margin_buffer, 0.005)
 
     def test_policy_requires_cspace_feature_detects_cspace_checkpoint(self):
         module = self.module
