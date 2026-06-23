@@ -137,6 +137,25 @@ class InferBsplineTrajectoriesBatchTests(unittest.TestCase):
                 "0.005",
                 "--guidance-margin-buffer",
                 "0.005",
+                "--enable-local-waypoint-qp-after-certificate",
+                "--local-waypoint-qp-window-radius",
+                "2",
+                "--local-waypoint-qp-max-collision-segments",
+                "2",
+                "--local-waypoint-qp-min-clearance-trigger",
+                "-0.01",
+                "--local-waypoint-qp-target-buffer",
+                "0.005",
+                "--local-waypoint-qp-lambda-s",
+                "0.25",
+                "--local-waypoint-qp-delta-max",
+                "0.02",
+                "--local-waypoint-qp-max-velocity-step",
+                "0.2",
+                "--local-waypoint-qp-max-acceleration-step",
+                "0.4",
+                "--local-waypoint-qp-maxiter",
+                "100",
             ]
         )
 
@@ -160,6 +179,16 @@ class InferBsplineTrajectoriesBatchTests(unittest.TestCase):
         self.assertEqual(args.guidance_delta_max_pass2, 0.025)
         self.assertEqual(args.guidance_d_trigger_pass2_offset, 0.005)
         self.assertEqual(args.guidance_margin_buffer, 0.005)
+        self.assertTrue(args.enable_local_waypoint_qp_after_certificate)
+        self.assertEqual(args.local_waypoint_qp_window_radius, 2)
+        self.assertEqual(args.local_waypoint_qp_max_collision_segments, 2)
+        self.assertEqual(args.local_waypoint_qp_min_clearance_trigger, -0.01)
+        self.assertEqual(args.local_waypoint_qp_target_buffer, 0.005)
+        self.assertEqual(args.local_waypoint_qp_lambda_s, 0.25)
+        self.assertEqual(args.local_waypoint_qp_delta_max, 0.02)
+        self.assertEqual(args.local_waypoint_qp_max_velocity_step, 0.2)
+        self.assertEqual(args.local_waypoint_qp_max_acceleration_step, 0.4)
+        self.assertEqual(args.local_waypoint_qp_maxiter, 100)
 
     def test_policy_requires_cspace_feature_detects_cspace_checkpoint(self):
         module = self.module

@@ -43,6 +43,16 @@ GUIDANCE_CONFIG_FALLBACKS: dict[str, Any] = {
     "guidance_delta_max_pass2": 0.025,
     "guidance_d_trigger_pass2_offset": 0.005,
     "guidance_margin_buffer": 0.005,
+    "enable_local_waypoint_qp_after_certificate": True,
+    "local_waypoint_qp_window_radius": 2,
+    "local_waypoint_qp_max_collision_segments": 2,
+    "local_waypoint_qp_min_clearance_trigger": -0.01,
+    "local_waypoint_qp_target_buffer": 0.005,
+    "local_waypoint_qp_lambda_s": 0.25,
+    "local_waypoint_qp_delta_max": 0.02,
+    "local_waypoint_qp_max_velocity_step": 0.2,
+    "local_waypoint_qp_max_acceleration_step": 0.4,
+    "local_waypoint_qp_maxiter": 100,
     "guidance_lambda_s": 0.25,
     "guidance_rho": 1.0e5,
     "guidance_ddim_eta": 0.0,
@@ -77,6 +87,16 @@ GUIDANCE_CONFIG_KEY_PATHS: dict[str, tuple[str, ...]] = {
     "guidance_delta_max_pass2": ("surface_cbf_qp_guidance", "runner", "delta_max_pass2"),
     "guidance_d_trigger_pass2_offset": ("surface_cbf_qp_guidance", "runner", "d_trigger_pass2_offset"),
     "guidance_margin_buffer": ("surface_cbf_qp_guidance", "runner", "margin_buffer"),
+    "enable_local_waypoint_qp_after_certificate": ("surface_cbf_qp_guidance", "runner", "enable_local_waypoint_qp_after_certificate"),
+    "local_waypoint_qp_window_radius": ("surface_cbf_qp_guidance", "runner", "local_waypoint_qp_window_radius"),
+    "local_waypoint_qp_max_collision_segments": ("surface_cbf_qp_guidance", "runner", "local_waypoint_qp_max_collision_segments"),
+    "local_waypoint_qp_min_clearance_trigger": ("surface_cbf_qp_guidance", "runner", "local_waypoint_qp_min_clearance_trigger"),
+    "local_waypoint_qp_target_buffer": ("surface_cbf_qp_guidance", "runner", "local_waypoint_qp_target_buffer"),
+    "local_waypoint_qp_lambda_s": ("surface_cbf_qp_guidance", "runner", "local_waypoint_qp_lambda_s"),
+    "local_waypoint_qp_delta_max": ("surface_cbf_qp_guidance", "runner", "local_waypoint_qp_delta_max"),
+    "local_waypoint_qp_max_velocity_step": ("surface_cbf_qp_guidance", "runner", "local_waypoint_qp_max_velocity_step"),
+    "local_waypoint_qp_max_acceleration_step": ("surface_cbf_qp_guidance", "runner", "local_waypoint_qp_max_acceleration_step"),
+    "local_waypoint_qp_maxiter": ("surface_cbf_qp_guidance", "runner", "local_waypoint_qp_maxiter"),
     "guidance_lambda_s": ("surface_cbf_qp_guidance", "runner", "lambda_s"),
     "guidance_rho": ("surface_cbf_qp_guidance", "runner", "rho"),
     "guidance_ddim_eta": ("surface_cbf_qp_guidance", "runner", "ddim_eta"),
@@ -118,6 +138,16 @@ GUIDANCE_PARAMETER_GROUPS: dict[str, tuple[str, ...]] = {
         "guidance_delta_max_pass2",
         "guidance_d_trigger_pass2_offset",
         "guidance_margin_buffer",
+        "enable_local_waypoint_qp_after_certificate",
+        "local_waypoint_qp_window_radius",
+        "local_waypoint_qp_max_collision_segments",
+        "local_waypoint_qp_min_clearance_trigger",
+        "local_waypoint_qp_target_buffer",
+        "local_waypoint_qp_lambda_s",
+        "local_waypoint_qp_delta_max",
+        "local_waypoint_qp_max_velocity_step",
+        "local_waypoint_qp_max_acceleration_step",
+        "local_waypoint_qp_maxiter",
         "guidance_lambda_s",
         "guidance_rho",
         "guidance_joint_limit_steps",
@@ -242,6 +272,17 @@ def add_surface_cbf_qp_guidance_parser_args(
     parser.add_argument("--guidance-delta-max-pass2", type=float, default=argparse.SUPPRESS)
     parser.add_argument("--guidance-d-trigger-pass2-offset", type=float, default=argparse.SUPPRESS)
     parser.add_argument("--guidance-margin-buffer", type=float, default=argparse.SUPPRESS)
+    parser.add_argument("--enable-local-waypoint-qp-after-certificate", dest="enable_local_waypoint_qp_after_certificate", action="store_true", default=argparse.SUPPRESS)
+    parser.add_argument("--disable-local-waypoint-qp-after-certificate", dest="enable_local_waypoint_qp_after_certificate", action="store_false", default=argparse.SUPPRESS)
+    parser.add_argument("--local-waypoint-qp-window-radius", type=int, default=argparse.SUPPRESS)
+    parser.add_argument("--local-waypoint-qp-max-collision-segments", type=int, default=argparse.SUPPRESS)
+    parser.add_argument("--local-waypoint-qp-min-clearance-trigger", type=float, default=argparse.SUPPRESS)
+    parser.add_argument("--local-waypoint-qp-target-buffer", type=float, default=argparse.SUPPRESS)
+    parser.add_argument("--local-waypoint-qp-lambda-s", type=float, default=argparse.SUPPRESS)
+    parser.add_argument("--local-waypoint-qp-delta-max", type=float, default=argparse.SUPPRESS)
+    parser.add_argument("--local-waypoint-qp-max-velocity-step", type=float, default=argparse.SUPPRESS)
+    parser.add_argument("--local-waypoint-qp-max-acceleration-step", type=float, default=argparse.SUPPRESS)
+    parser.add_argument("--local-waypoint-qp-maxiter", type=int, default=argparse.SUPPRESS)
     parser.add_argument("--guidance-lambda-s", type=float, default=argparse.SUPPRESS)
     parser.add_argument("--guidance-rho", type=float, default=argparse.SUPPRESS)
     parser.add_argument(
@@ -289,6 +330,16 @@ def apply_surface_cbf_qp_guidance_config(
         "guidance_delta_max_pass2",
         "guidance_d_trigger_pass2_offset",
         "guidance_margin_buffer",
+        "enable_local_waypoint_qp_after_certificate",
+        "local_waypoint_qp_window_radius",
+        "local_waypoint_qp_max_collision_segments",
+        "local_waypoint_qp_min_clearance_trigger",
+        "local_waypoint_qp_target_buffer",
+        "local_waypoint_qp_lambda_s",
+        "local_waypoint_qp_delta_max",
+        "local_waypoint_qp_max_velocity_step",
+        "local_waypoint_qp_max_acceleration_step",
+        "local_waypoint_qp_maxiter",
         "guidance_lambda_s",
         "guidance_rho",
         "guidance_ddim_eta",
@@ -343,6 +394,16 @@ def build_surface_cbf_qp_parameter_summary(
         "guidance_delta_max_pass2",
         "guidance_d_trigger_pass2_offset",
         "guidance_margin_buffer",
+        "enable_local_waypoint_qp_after_certificate",
+        "local_waypoint_qp_window_radius",
+        "local_waypoint_qp_max_collision_segments",
+        "local_waypoint_qp_min_clearance_trigger",
+        "local_waypoint_qp_target_buffer",
+        "local_waypoint_qp_lambda_s",
+        "local_waypoint_qp_delta_max",
+        "local_waypoint_qp_max_velocity_step",
+        "local_waypoint_qp_max_acceleration_step",
+        "local_waypoint_qp_maxiter",
         "guidance_lambda_s",
         "guidance_rho",
         "guidance_ddim_eta",

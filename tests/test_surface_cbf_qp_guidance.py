@@ -12,6 +12,7 @@ if str(PACKAGE_ROOT) not in sys.path:
 
 
 from diffusion_policy_3d.common.surface_cbf_qp_guidance import (
+    build_collision_windows_from_clearance,
     build_risk_segments,
     build_segment_window_cbf_constraints,
     build_guidance_target_schedule,
@@ -24,6 +25,7 @@ from diffusion_policy_3d.common.surface_cbf_qp_guidance import (
     rank_screened_candidates,
     select_segment_window_timesteps,
     select_guidance_candidate_indices,
+    should_attempt_local_waypoint_qp,
     summarize_sdf_risk,
 )
 
@@ -61,6 +63,35 @@ class SurfaceCBFQPGuidanceHelperTests(unittest.TestCase):
         )
         np.testing.assert_allclose(lower, np.asarray([-0.025, -0.01], dtype=np.float64))
         np.testing.assert_allclose(upper, np.asarray([0.01, 0.025], dtype=np.float64))
+
+    def test_build_collision_windows_from_clearance_expands_local_window(self):
+        windows = build_collision_windows_from_clearance(
+            min_clearance_per_step=np.asarray([0.05, 0.02, -0.005, -0.002, 0.03, 0.04], dtype=np.float32),
+            collision_threshold=0.01,
+            window_radius=1,
+            max_segments=2,
+        )
+        self.assertEqual(len(windows), 1)
+        self.assertEqual(windows[0]["timesteps"], [2, 3])
+        self.assertEqual(windows[0]["window_timesteps"], [1, 2, 3, 4])
+
+    def test_should_attempt_local_waypoint_qp_only_for_shallow_failures(self):
+        self.assertTrue(
+            should_attempt_local_waypoint_qp(
+                enable_local_waypoint_qp_after_certificate=True,
+                min_clearance=-0.005,
+                min_clearance_trigger=-0.01,
+                collision_threshold=0.031,
+            )
+        )
+        self.assertFalse(
+            should_attempt_local_waypoint_qp(
+                enable_local_waypoint_qp_after_certificate=True,
+                min_clearance=-0.02,
+                min_clearance_trigger=-0.01,
+                collision_threshold=0.031,
+            )
+        )
 
     def test_build_risk_segments_groups_contiguous_trigger_violations(self):
         sdf_result = {

@@ -29,6 +29,16 @@ surface_cbf_qp_guidance:
     delta_max_pass2: 0.025
     d_trigger_pass2_offset: 0.005
     margin_buffer: 0.005
+    enable_local_waypoint_qp_after_certificate: true
+    local_waypoint_qp_window_radius: 2
+    local_waypoint_qp_max_collision_segments: 2
+    local_waypoint_qp_min_clearance_trigger: -0.01
+    local_waypoint_qp_target_buffer: 0.005
+    local_waypoint_qp_lambda_s: 0.25
+    local_waypoint_qp_delta_max: 0.02
+    local_waypoint_qp_max_velocity_step: 0.2
+    local_waypoint_qp_max_acceleration_step: 0.4
+    local_waypoint_qp_maxiter: 100
     lambda_s: 0.25
     rho: 1.0e5
     ddim_eta: 0.0

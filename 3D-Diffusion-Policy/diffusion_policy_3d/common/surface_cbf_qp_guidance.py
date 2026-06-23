@@ -57,6 +57,16 @@ class SurfaceCBFQPGuidanceConfig:
     delta_max_pass2: float = 0.025
     d_trigger_pass2_offset: float = 0.005
     margin_buffer: float = 0.005
+    enable_local_waypoint_qp_after_certificate: bool = True
+    local_waypoint_qp_window_radius: int = 2
+    local_waypoint_qp_max_collision_segments: int = 2
+    local_waypoint_qp_min_clearance_trigger: float = -0.01
+    local_waypoint_qp_target_buffer: float = 0.005
+    local_waypoint_qp_lambda_s: float = 0.25
+    local_waypoint_qp_delta_max: float = 0.02
+    local_waypoint_qp_max_velocity_step: float = 0.2
+    local_waypoint_qp_max_acceleration_step: float = 0.4
+    local_waypoint_qp_maxiter: int = 100
     lambda_s: float = 0.25
     rho: float = 1.0e5
     ddim_eta: float = 0.0
@@ -106,6 +116,12 @@ class GuidanceLog:
     selected_candidate_post_qp1_min_clearance: float = math.nan
     selected_candidate_post_qp2_min_clearance: float = math.nan
     selected_candidate_certificate_min_clearance: float = math.nan
+    local_waypoint_qp_attempted_total: int = 0
+    local_waypoint_qp_success_total: int = 0
+    selected_candidate_local_waypoint_qp_attempted: bool = False
+    selected_candidate_local_waypoint_qp_success: bool = False
+    selected_candidate_post_local_waypoint_qp_min_clearance: float = math.nan
+    final_success_source: str = "failure"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -695,6 +711,63 @@ def build_segment_window_cbf_constraints(
     return all_constraints[: int(max_active)], selected_segments, sorted(set(int(v) for v in selected_timesteps))
 
 
+def build_collision_windows_from_clearance(
+    *,
+    min_clearance_per_step: np.ndarray,
+    collision_threshold: float,
+    window_radius: int,
+    max_segments: int,
+) -> list[dict[str, Any]]:
+    min_clearance_per_step = np.asarray(min_clearance_per_step, dtype=np.float32).reshape(-1)
+    if min_clearance_per_step.size == 0:
+        return []
+    segments: list[list[int]] = []
+    current: list[int] = []
+    for timestep, clearance in enumerate(min_clearance_per_step.tolist()):
+        if math.isfinite(clearance) and clearance < float(collision_threshold):
+            current.append(int(timestep))
+        elif current:
+            segments.append(current)
+            current = []
+    if current:
+        segments.append(current)
+    ranked = []
+    for seg in segments:
+        clearances = min_clearance_per_step[np.asarray(seg, dtype=np.int64)]
+        peak_local_index = int(np.argmin(clearances))
+        peak_timestep = int(seg[peak_local_index])
+        start = max(0, int(seg[0]) - int(window_radius))
+        end = min(int(min_clearance_per_step.shape[0]) - 1, int(seg[-1]) + int(window_radius))
+        ranked.append(
+            {
+                "start_timestep": int(seg[0]),
+                "end_timestep": int(seg[-1]),
+                "peak_timestep": peak_timestep,
+                "min_clearance": float(clearances[peak_local_index]),
+                "window_start": int(start),
+                "window_end": int(end),
+                "window_timesteps": list(range(start, end + 1)),
+                "timesteps": [int(v) for v in seg],
+            }
+        )
+    ranked.sort(key=lambda item: (float(item["min_clearance"]), int(item["start_timestep"])))
+    return ranked[: int(max_segments)]
+
+
+def should_attempt_local_waypoint_qp(
+    *,
+    enable_local_waypoint_qp_after_certificate: bool,
+    min_clearance: float,
+    min_clearance_trigger: float,
+    collision_threshold: float,
+) -> bool:
+    if not bool(enable_local_waypoint_qp_after_certificate):
+        return False
+    if not np.isfinite(min_clearance):
+        return False
+    return float(min_clearance_trigger) <= float(min_clearance) < float(collision_threshold)
+
+
 class SurfaceCBFQPGuidanceRunner:
     def __init__(self, *, config: SurfaceCBFQPGuidanceConfig, environment: PyBulletSurfaceEnvironmentAdapter):
         self.config = config
@@ -785,6 +858,17 @@ class SurfaceCBFQPGuidanceRunner:
                 "pass2_risk_segment_count": 0,
                 "new_risk_segments_after_qp1": False,
                 "scp_pass_details": [],
+                "final_success_source": "failure",
+                "local_waypoint_qp_attempted": False,
+                "local_waypoint_qp_success": False,
+                "local_waypoint_qp_skip_reason": None,
+                "local_waypoint_qp_window_count": 0,
+                "local_waypoint_qp_windows": [],
+                "local_waypoint_qp_constraint_count": 0,
+                "local_waypoint_qp_total_slack": math.nan,
+                "local_waypoint_qp_solver_message": None,
+                "post_local_waypoint_qp_min_clearance": math.nan,
+                "post_local_waypoint_qp_certificate_success": False,
                 "num_worst_timesteps": 0,
                 "num_topk_constraints": 0,
                 "risk_segment_count_total": 0,
@@ -834,7 +918,8 @@ class SurfaceCBFQPGuidanceRunner:
             if bool(candidate_info.get("certificate_success", False)):
                 selected_candidate_info = candidate_info
                 log.certificate_success = True
-                log.selected_by_certificate = True
+                log.selected_by_certificate = str(candidate_info.get("final_success_source", "certificate_success")) == "certificate_success"
+                log.final_success_source = str(candidate_info.get("final_success_source", "certificate_success"))
                 break
 
         attempted_candidate_indices = repair_candidate_indices[:actual_attempt_count]
@@ -854,6 +939,7 @@ class SurfaceCBFQPGuidanceRunner:
                 fallback = self.environment.try_existing_terminal_cbf(selected_candidate_info["joint_trajectory"])
             log.fallback_used = fallback is not None
             log.used_existing_terminal_cbf = fallback is not None
+            log.final_success_source = "fallback_success" if fallback is not None else "failure"
 
         selected_index = int(selected_candidate_info["candidate_index"])
         log.best_candidate_index = selected_index
@@ -1028,6 +1114,22 @@ class SurfaceCBFQPGuidanceRunner:
             cert_basis=cert_basis,
         )
         log.certificate_time += time.perf_counter() - certificate_start
+        local_waypoint_qp_result = {"attempted": False, "success": False, "skip_reason": None}
+        final_joint_trajectory = np.asarray(cert_result["joint_trajectory"], dtype=np.float32)
+        final_cert_success = bool(cert_result["success"])
+        final_success_source = "certificate_success" if final_cert_success else "failure"
+        if not final_cert_success:
+            local_waypoint_qp_result = self._try_local_waypoint_qp(
+                cert_result=cert_result,
+                log=log,
+            )
+            if bool(local_waypoint_qp_result.get("success", False)):
+                cert_result = dict(local_waypoint_qp_result["recert_result"])
+                final_joint_trajectory = np.asarray(local_waypoint_qp_result["joint_trajectory"], dtype=np.float32)
+                final_cert_success = True
+                final_success_source = "local_qp_success"
+            else:
+                final_joint_trajectory = np.asarray(cert_result["joint_trajectory"], dtype=np.float32)
         serialized_pass_details = [self._serialize_pass_detail(detail) for detail in pass_results]
         while len(serialized_pass_details) < int(self.config.scp_iterations):
             serialized_pass_details.append(
@@ -1055,7 +1157,7 @@ class SurfaceCBFQPGuidanceRunner:
                 "h_min_before_guidance": float(initial_summary["min_margin"]),
                 "h_min_after_guidance": float(after_summary["min_margin"]),
                 "h_min_final": float(cert_result["h_min_final"]),
-                "certificate_success": bool(cert_result["success"]),
+                "certificate_success": bool(final_cert_success),
                 "qp_attempted": bool(qp_attempted),
                 "qp_success": bool(qp_success),
                 "qp_skip_reason": qp_skip_reason,
@@ -1071,6 +1173,21 @@ class SurfaceCBFQPGuidanceRunner:
                 "pass1_risk_segment_count": int(pass_results[0].get("risk_segment_count_total", 0)) if pass_results else 0,
                 "pass2_risk_segment_count": int(pass_results[1].get("risk_segment_count_total", 0)) if len(pass_results) > 1 else 0,
                 "scp_pass_details": serialized_pass_details,
+                "final_success_source": final_success_source,
+                "local_waypoint_qp_attempted": bool(local_waypoint_qp_result.get("attempted", False)),
+                "local_waypoint_qp_success": bool(local_waypoint_qp_result.get("success", False)),
+                "local_waypoint_qp_skip_reason": local_waypoint_qp_result.get("skip_reason"),
+                "local_waypoint_qp_window_count": int(len(local_waypoint_qp_result.get("windows", []) or [])),
+                "local_waypoint_qp_windows": list(local_waypoint_qp_result.get("windows", []) or []),
+                "local_waypoint_qp_constraint_count": int(local_waypoint_qp_result.get("constraint_count", 0) or 0),
+                "local_waypoint_qp_total_slack": float(local_waypoint_qp_result.get("total_slack", math.nan)),
+                "local_waypoint_qp_solver_message": local_waypoint_qp_result.get("solver_message"),
+                "post_local_waypoint_qp_min_clearance": float(
+                    math.nan
+                    if not local_waypoint_qp_result.get("success", False)
+                    else local_waypoint_qp_result["recert_result"]["min_clearance"]
+                ),
+                "post_local_waypoint_qp_certificate_success": bool(local_waypoint_qp_result.get("success", False)),
                 "num_worst_timesteps": int(sum(len(segment.get("anchor_timesteps", [])) for detail in pass_results for segment in detail.get("selected_segments", []))),
                 "num_topk_constraints": int(max((detail.get("selected_constraint_count", 0) for detail in pass_results), default=0)),
                 "risk_segment_count_total": int(pass_results[-1].get("risk_segment_count_total", 0)) if pass_results else int(len(initial_state["risk_segments"])),
@@ -1079,7 +1196,7 @@ class SurfaceCBFQPGuidanceRunner:
                 "selected_window_timesteps": [int(v) for v in pass_results[-1].get("selected_window_timesteps", [])] if pass_results else [],
                 "selected_constraint_count": int(pass_results[-1].get("selected_constraint_count", 0)) if pass_results else 0,
                 "control_points_normalized": guided_control_points.astype(np.float32),
-                "joint_trajectory": np.asarray(cert_result["joint_trajectory"], dtype=np.float32),
+                "joint_trajectory": final_joint_trajectory,
                 "normalized_free_residual": control_points_to_normalized_free_residual(
                     guided_control_points,
                     q_start_normalized=q_start_normalized,
@@ -1087,8 +1204,8 @@ class SurfaceCBFQPGuidanceRunner:
                     delta_w_mean=delta_w_mean,
                     delta_w_std=delta_w_std,
                 ),
-                "path_length": compute_path_length(cert_result["joint_trajectory"]),
-                "smoothness": compute_smoothness(cert_result["joint_trajectory"]),
+                "path_length": compute_path_length(final_joint_trajectory),
+                "smoothness": compute_smoothness(final_joint_trajectory),
                 "goal_error": 0.0,
                 "candidate_time": time.perf_counter() - candidate_start_time,
             }
@@ -1104,6 +1221,10 @@ class SurfaceCBFQPGuidanceRunner:
         log.selected_candidate_post_qp1_min_clearance = float(candidate_info["post_qp1_min_clearance"])
         log.selected_candidate_post_qp2_min_clearance = float(candidate_info["post_qp2_min_clearance"])
         log.selected_candidate_certificate_min_clearance = float(candidate_info["certificate_min_clearance"])
+        log.selected_candidate_local_waypoint_qp_attempted = bool(candidate_info["local_waypoint_qp_attempted"])
+        log.selected_candidate_local_waypoint_qp_success = bool(candidate_info["local_waypoint_qp_success"])
+        log.selected_candidate_post_local_waypoint_qp_min_clearance = float(candidate_info["post_local_waypoint_qp_min_clearance"])
+        log.final_success_source = str(candidate_info["final_success_source"])
 
     def _evaluate_candidate_state(
         self,
@@ -1188,22 +1309,307 @@ class SurfaceCBFQPGuidanceRunner:
             "post_min_clearance": float(detail["post_min_clearance"]),
         }
 
-    def _certificate_check(self, *, control_points: np.ndarray, cert_basis: np.ndarray) -> dict[str, Any]:
-        q_cert_norm = cert_basis @ control_points
-        q_cert_actual = self.environment.normalized_to_actual(q_cert_norm)
-        q_cert_swept = interpolate_swept_segments(q_cert_actual, int(self.config.cert_swept_intermediate))
+    def _certificate_check_joint_trajectory(self, *, joint_trajectory_actual: np.ndarray) -> dict[str, Any]:
+        joint_trajectory_actual = np.asarray(joint_trajectory_actual, dtype=np.float32)
+        q_cert_swept = interpolate_swept_segments(joint_trajectory_actual, int(self.config.cert_swept_intermediate))
         sdf_cert = self.environment.collect_joint_trajectory_sdf_with_link_details_any_length(q_cert_swept)
         h_cert = flatten_margin_values(sdf_cert, d_safe=float(self.config.d_safe))
         all_sdf = np.asarray(sdf_cert.get("all_sdf_values", np.empty((0, 0), dtype=np.float32)), dtype=np.float32)
         finite_sdf = all_sdf[np.isfinite(all_sdf)]
+        min_clearance_per_step = np.full(all_sdf.shape[0], np.nan, dtype=np.float32) if all_sdf.ndim == 2 else np.empty((0,), dtype=np.float32)
+        if all_sdf.ndim == 2 and all_sdf.size > 0:
+            finite_mask = np.isfinite(all_sdf)
+            has_finite = np.any(finite_mask, axis=1)
+            if np.any(has_finite):
+                min_clearance_per_step[has_finite] = np.min(
+                    np.where(finite_mask[has_finite], all_sdf[has_finite], np.inf),
+                    axis=1,
+                )
         h_min_final = float(np.min(h_cert)) if h_cert.size > 0 else math.nan
         min_clearance = float(np.min(finite_sdf)) if finite_sdf.size > 0 else math.nan
         return {
             "success": bool(np.isfinite(h_min_final) and h_min_final >= float(self.config.d_cert)),
             "h_min_final": h_min_final,
             "min_clearance": min_clearance,
-            "joint_trajectory": q_cert_swept.astype(np.float32),
+            "joint_trajectory": joint_trajectory_actual.astype(np.float32),
+            "certificate_joint_trajectory": q_cert_swept.astype(np.float32),
+            "sdf_result": sdf_cert,
+            "min_clearance_per_step": min_clearance_per_step.astype(np.float32),
         }
+
+    def _build_local_waypoint_constraints(
+        self,
+        *,
+        joint_trajectory_actual: np.ndarray,
+        sdf_result: dict[str, Any],
+        window_timesteps: list[int],
+        target_clearance: float,
+    ) -> list[dict[str, Any]]:
+        all_sdf = np.asarray(sdf_result.get("all_sdf_values", np.empty((0, 0), dtype=np.float32)), dtype=np.float32)
+        if all_sdf.size == 0 or all_sdf.ndim != 2:
+            return []
+        constraints: list[dict[str, Any]] = []
+        for timestep in window_timesteps:
+            if timestep < 0 or timestep >= all_sdf.shape[0]:
+                continue
+            step_sdf = np.asarray(all_sdf[timestep], dtype=np.float32).reshape(-1)
+            finite_indices = np.flatnonzero(np.isfinite(step_sdf))
+            if finite_indices.size == 0:
+                continue
+            worst_flat_index = int(finite_indices[np.argmin(step_sdf[finite_indices])])
+            clearance = float(step_sdf[worst_flat_index])
+            if clearance >= float(target_clearance):
+                continue
+            sample_info = _flat_index_to_surface_sample(self.environment.surface_samples, worst_flat_index)
+            if sample_info is None:
+                continue
+            q_actual = np.asarray(joint_trajectory_actual[timestep], dtype=np.float32).reshape(-1)
+            point_world = self.environment.surface_point_world(
+                link_index=int(sample_info["link_index"]),
+                local_point=np.asarray(sample_info["local_point"], dtype=np.float32),
+            )
+            grad_world = approximate_sdf_gradient(self.environment.load_sdf_grid(), point_world)
+            jacobian = self.environment.surface_point_jacobian(
+                link_index=int(sample_info["link_index"]),
+                local_point=np.asarray(sample_info["local_point"], dtype=np.float32),
+                q_actual=q_actual,
+            )
+            j_pos = np.asarray(jacobian[:3, :], dtype=np.float32)
+            g_actual = (j_pos.T @ grad_world.reshape(3)).astype(np.float32)
+            constraints.append(
+                {
+                    "t_index": int(timestep),
+                    "clearance": clearance,
+                    "target_clearance": float(target_clearance),
+                    "g_actual": g_actual,
+                    "link_index": int(sample_info["link_index"]),
+                    "point_index": int(sample_info["point_index"]),
+                }
+            )
+        return constraints
+
+    def _solve_local_waypoint_qp(
+        self,
+        *,
+        joint_trajectory_actual: np.ndarray,
+        windows: list[dict[str, Any]],
+        active_constraints: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        if not active_constraints or not windows:
+            return None
+        base = np.asarray(joint_trajectory_actual, dtype=np.float32)
+        dof = base.shape[1]
+        variable_timesteps = sorted(
+            {
+                int(t)
+                for window in windows
+                for t in range(int(window["window_start"]) + 1, int(window["window_end"]))
+            }
+        )
+        if not variable_timesteps:
+            return None
+        timestep_to_local = {t: i for i, t in enumerate(variable_timesteps)}
+        num_selected = len(variable_timesteps)
+        num_slack = len(active_constraints)
+        joint_lower = self.environment.joint_lower_limits.astype(np.float64)
+        joint_upper = self.environment.joint_upper_limits.astype(np.float64)
+        lower_bounds = np.full(num_selected * dof + num_slack, -np.inf, dtype=np.float64)
+        upper_bounds = np.full(num_selected * dof + num_slack, np.inf, dtype=np.float64)
+        for timestep, local_index in timestep_to_local.items():
+            q_base = base[timestep].astype(np.float64)
+            local_lower = np.maximum(-float(self.config.local_waypoint_qp_delta_max), joint_lower - q_base)
+            local_upper = np.minimum(float(self.config.local_waypoint_qp_delta_max), joint_upper - q_base)
+            lower_bounds[local_index * dof : (local_index + 1) * dof] = local_lower
+            upper_bounds[local_index * dof : (local_index + 1) * dof] = local_upper
+        lower_bounds[num_selected * dof :] = 0.0
+
+        linear_rows = []
+        linear_lb = []
+        linear_ub = []
+        for slack_index, constraint in enumerate(active_constraints):
+            timestep = int(constraint["t_index"])
+            if timestep not in timestep_to_local:
+                continue
+            row = np.zeros(num_selected * dof + num_slack, dtype=np.float64)
+            local_index = timestep_to_local[timestep]
+            row[local_index * dof : (local_index + 1) * dof] = np.asarray(constraint["g_actual"], dtype=np.float64)
+            row[num_selected * dof + slack_index] = 1.0
+            linear_rows.append(row)
+            linear_lb.append(float(constraint["target_clearance"]) - float(constraint["clearance"]))
+            linear_ub.append(np.inf)
+
+        max_vel = float(self.config.local_waypoint_qp_max_velocity_step)
+        for timestep in range(base.shape[0] - 1):
+            base_diff = base[timestep + 1].astype(np.float64) - base[timestep].astype(np.float64)
+            for joint_index in range(dof):
+                row = np.zeros(num_selected * dof + num_slack, dtype=np.float64)
+                if timestep in timestep_to_local:
+                    row[timestep_to_local[timestep] * dof + joint_index] -= 1.0
+                if (timestep + 1) in timestep_to_local:
+                    row[timestep_to_local[timestep + 1] * dof + joint_index] += 1.0
+                if not np.any(row):
+                    continue
+                linear_rows.append(row.copy())
+                linear_lb.append(-np.inf)
+                linear_ub.append(max_vel - float(base_diff[joint_index]))
+                linear_rows.append(row)
+                linear_lb.append(-max_vel - float(base_diff[joint_index]))
+                linear_ub.append(np.inf)
+
+        max_acc = float(self.config.local_waypoint_qp_max_acceleration_step)
+        for timestep in range(1, base.shape[0] - 1):
+            base_acc = base[timestep + 1].astype(np.float64) - 2.0 * base[timestep].astype(np.float64) + base[timestep - 1].astype(np.float64)
+            for joint_index in range(dof):
+                row = np.zeros(num_selected * dof + num_slack, dtype=np.float64)
+                if (timestep - 1) in timestep_to_local:
+                    row[timestep_to_local[timestep - 1] * dof + joint_index] += 1.0
+                if timestep in timestep_to_local:
+                    row[timestep_to_local[timestep] * dof + joint_index] -= 2.0
+                if (timestep + 1) in timestep_to_local:
+                    row[timestep_to_local[timestep + 1] * dof + joint_index] += 1.0
+                if not np.any(row):
+                    continue
+                linear_rows.append(row.copy())
+                linear_lb.append(-np.inf)
+                linear_ub.append(max_acc - float(base_acc[joint_index]))
+                linear_rows.append(row)
+                linear_lb.append(-max_acc - float(base_acc[joint_index]))
+                linear_ub.append(np.inf)
+
+        constraints = []
+        if linear_rows:
+            constraints.append(
+                LinearConstraint(
+                    np.stack(linear_rows, axis=0),
+                    np.asarray(linear_lb, dtype=np.float64),
+                    np.asarray(linear_ub, dtype=np.float64),
+                )
+            )
+
+        def unpack(vector: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+            delta_selected = np.asarray(vector[: num_selected * dof], dtype=np.float64).reshape(num_selected, dof)
+            slack = np.asarray(vector[num_selected * dof :], dtype=np.float64)
+            return delta_selected, slack
+
+        def objective(vector: np.ndarray) -> float:
+            delta_selected, slack = unpack(vector)
+            delta_full = np.zeros_like(base, dtype=np.float64)
+            for timestep, local_index in timestep_to_local.items():
+                delta_full[timestep] = delta_selected[local_index]
+            smooth_term = delta_full[2:] - 2.0 * delta_full[1:-1] + delta_full[:-2]
+            return float(
+                np.sum(delta_selected ** 2)
+                + float(self.config.local_waypoint_qp_lambda_s) * np.sum(smooth_term ** 2)
+                + float(self.config.rho) * np.sum(slack ** 2)
+            )
+
+        x0 = np.zeros(num_selected * dof + num_slack, dtype=np.float64)
+        solve_start = time.perf_counter()
+        try:
+            result = minimize(
+                objective,
+                x0,
+                method="SLSQP",
+                bounds=Bounds(lower_bounds, upper_bounds),
+                constraints=constraints,
+                options={"maxiter": int(self.config.local_waypoint_qp_maxiter), "ftol": 1e-6, "disp": False},
+            )
+        except Exception as exc:
+            return {
+                "success": False,
+                "solve_time": time.perf_counter() - solve_start,
+                "message": str(exc),
+                "slack": np.empty((0,), dtype=np.float32),
+            }
+        delta_selected, slack = unpack(np.asarray(result.x, dtype=np.float64))
+        repaired = base.astype(np.float64).copy()
+        for timestep, local_index in timestep_to_local.items():
+            repaired[timestep] += delta_selected[local_index]
+        return {
+            "success": bool(result.success),
+            "joint_trajectory": repaired.astype(np.float32),
+            "slack": np.asarray(slack, dtype=np.float32),
+            "message": str(result.message),
+            "solve_time": time.perf_counter() - solve_start,
+        }
+
+    def _try_local_waypoint_qp(
+        self,
+        *,
+        cert_result: dict[str, Any],
+        log: GuidanceLog,
+    ) -> dict[str, Any]:
+        collision_threshold = float(self.config.d_safe) + float(self.config.d_cert)
+        if not should_attempt_local_waypoint_qp(
+            enable_local_waypoint_qp_after_certificate=bool(self.config.enable_local_waypoint_qp_after_certificate),
+            min_clearance=float(cert_result["min_clearance"]),
+            min_clearance_trigger=float(self.config.local_waypoint_qp_min_clearance_trigger),
+            collision_threshold=collision_threshold,
+        ):
+            return {"attempted": False, "success": False, "skip_reason": "local_waypoint_qp_not_applicable"}
+        windows = build_collision_windows_from_clearance(
+            min_clearance_per_step=np.asarray(cert_result["min_clearance_per_step"], dtype=np.float32),
+            collision_threshold=collision_threshold,
+            window_radius=int(self.config.local_waypoint_qp_window_radius),
+            max_segments=int(self.config.local_waypoint_qp_max_collision_segments),
+        )
+        if not windows:
+            return {"attempted": False, "success": False, "skip_reason": "no_local_collision_windows"}
+        active_constraints: list[dict[str, Any]] = []
+        for window in windows:
+            active_constraints.extend(
+                self._build_local_waypoint_constraints(
+                    joint_trajectory_actual=np.asarray(cert_result["certificate_joint_trajectory"], dtype=np.float32),
+                    sdf_result=cert_result["sdf_result"],
+                    window_timesteps=[int(v) for v in window["window_timesteps"]],
+                    target_clearance=float(self.config.d_safe) + float(self.config.local_waypoint_qp_target_buffer),
+                )
+            )
+        log.local_waypoint_qp_attempted_total += 1
+        if not active_constraints:
+            return {
+                "attempted": True,
+                "success": False,
+                "skip_reason": "no_local_waypoint_constraints",
+                "windows": windows,
+                "constraint_count": 0,
+            }
+        solve_result = self._solve_local_waypoint_qp(
+            joint_trajectory_actual=np.asarray(cert_result["certificate_joint_trajectory"], dtype=np.float32),
+            windows=windows,
+            active_constraints=active_constraints,
+        )
+        if solve_result is None or not bool(solve_result.get("success", False)):
+            return {
+                "attempted": True,
+                "success": False,
+                "skip_reason": "local_waypoint_solver_failure",
+                "windows": windows,
+                "constraint_count": int(len(active_constraints)),
+                "solver_message": None if solve_result is None else solve_result.get("message"),
+                "total_slack": math.nan if solve_result is None else float(np.sum(np.asarray(solve_result.get("slack", []), dtype=np.float32))),
+            }
+        recert_result = self._certificate_check_joint_trajectory(
+            joint_trajectory_actual=np.asarray(solve_result["joint_trajectory"], dtype=np.float32)
+        )
+        if bool(recert_result["success"]):
+            log.local_waypoint_qp_success_total += 1
+        return {
+            "attempted": True,
+            "success": bool(recert_result["success"]),
+            "skip_reason": None if bool(recert_result["success"]) else "local_waypoint_certificate_failure",
+            "windows": windows,
+            "constraint_count": int(len(active_constraints)),
+            "solver_message": solve_result.get("message"),
+            "total_slack": float(np.sum(np.asarray(solve_result.get("slack", []), dtype=np.float32))),
+            "joint_trajectory": np.asarray(solve_result["joint_trajectory"], dtype=np.float32),
+            "recert_result": recert_result,
+        }
+
+    def _certificate_check(self, *, control_points: np.ndarray, cert_basis: np.ndarray) -> dict[str, Any]:
+        q_cert_norm = cert_basis @ control_points
+        q_cert_actual = self.environment.normalized_to_actual(q_cert_norm)
+        return self._certificate_check_joint_trajectory(joint_trajectory_actual=q_cert_actual)
 
     def _solve_guidance_qp(
         self,

@@ -47,10 +47,31 @@ def _format_qp_skip_reason(reason: str | None) -> str:
         "deep_penetration_unrepairable": "candidate is too deeply in collision for local SCP-QP repair",
         "safe_candidate_no_repair": "candidate clearance is already above the repair trigger",
         "solver_failure": "SCP-QP solver failed before certificate",
+        "local_waypoint_qp_not_applicable": "local waypoint QP was not applicable for this certificate failure",
+        "no_local_collision_windows": "no local collision window was found from certificate failures",
+        "no_local_waypoint_constraints": "no valid local waypoint constraints were built",
+        "local_waypoint_solver_failure": "local waypoint QP solver failed",
+        "local_waypoint_certificate_failure": "local waypoint QP did not pass the re-certificate",
         "non_finite_h_min_before": "pre-guidance minimum margin is non-finite",
         "unknown_skip_condition": "unknown guidance skip condition",
     }
     return reason_map.get(reason, str(reason))
+
+
+def _resample_joint_trajectory_to_steps(joint_trajectory, num_steps: int):
+    joint_trajectory = np.asarray(joint_trajectory, dtype=np.float32)
+    if joint_trajectory.ndim != 2:
+        raise ValueError(f"joint_trajectory must be rank-2 [T, J], got {joint_trajectory.shape}")
+    if joint_trajectory.shape[0] == int(num_steps):
+        return joint_trajectory.astype(np.float32)
+    if joint_trajectory.shape[0] <= 1:
+        return np.repeat(joint_trajectory.astype(np.float32), int(num_steps), axis=0)
+    source_axis = np.linspace(0.0, 1.0, joint_trajectory.shape[0], dtype=np.float64)
+    target_axis = np.linspace(0.0, 1.0, int(num_steps), dtype=np.float64)
+    return np.stack(
+        [np.interp(target_axis, source_axis, joint_trajectory[:, joint_index]) for joint_index in range(joint_trajectory.shape[1])],
+        axis=1,
+    ).astype(np.float32)
 
 
 def summarize_qp_status(
@@ -114,6 +135,7 @@ def summarize_qp_status(
         "guidance_selected_candidate_passes_succeeded": int(
             guidance_log.get("selected_candidate_passes_succeeded", 0) or 0
         ),
+        "guidance_final_success_source": str(guidance_log.get("final_success_source", "failure") or "failure"),
         "guidance_candidate_count": int(len(guidance_candidates)),
     }
 
@@ -145,7 +167,7 @@ def print_inference_progress(
     print(
         f"[{sample_index}/{total_samples}] mode={mode} npz={npz_path.name} "
         f"selected_candidate={int(summary.get('selected_candidate_index', 0))} "
-        f"min_sdf={min_sdf_text} {qp_part}"
+        f"min_sdf={min_sdf_text} final={summary.get('guidance_final_success_source', 'failure')} {qp_part}"
     )
 
 
@@ -418,6 +440,37 @@ def validate_args(args) -> None:
     if args.guidance_margin_buffer < 0.0:
         raise ValueError(
             f"guidance-margin-buffer must be non-negative, got {args.guidance_margin_buffer}"
+        )
+    if args.local_waypoint_qp_window_radius < 0:
+        raise ValueError(
+            f"local-waypoint-qp-window-radius must be non-negative, got {args.local_waypoint_qp_window_radius}"
+        )
+    if args.local_waypoint_qp_max_collision_segments <= 0:
+        raise ValueError(
+            "local-waypoint-qp-max-collision-segments must be positive, "
+            f"got {args.local_waypoint_qp_max_collision_segments}"
+        )
+    if args.local_waypoint_qp_target_buffer < 0.0:
+        raise ValueError(
+            f"local-waypoint-qp-target-buffer must be non-negative, got {args.local_waypoint_qp_target_buffer}"
+        )
+    if args.local_waypoint_qp_delta_max <= 0.0:
+        raise ValueError(
+            f"local-waypoint-qp-delta-max must be positive, got {args.local_waypoint_qp_delta_max}"
+        )
+    if args.local_waypoint_qp_max_velocity_step <= 0.0:
+        raise ValueError(
+            "local-waypoint-qp-max-velocity-step must be positive, "
+            f"got {args.local_waypoint_qp_max_velocity_step}"
+        )
+    if args.local_waypoint_qp_max_acceleration_step <= 0.0:
+        raise ValueError(
+            "local-waypoint-qp-max-acceleration-step must be positive, "
+            f"got {args.local_waypoint_qp_max_acceleration_step}"
+        )
+    if args.local_waypoint_qp_maxiter <= 0:
+        raise ValueError(
+            f"local-waypoint-qp-maxiter must be positive, got {args.local_waypoint_qp_maxiter}"
         )
     if resolve_sampling_mode(args) in {"candidate", "compare"} and args.candidate_selection == "weighted_sdf":
         if args.jobs_root is None:
@@ -916,6 +969,16 @@ def predict_surface_cbf_qp_guided_outputs(
         delta_max_pass2=float(args.guidance_delta_max_pass2),
         d_trigger_pass2_offset=float(args.guidance_d_trigger_pass2_offset),
         margin_buffer=float(args.guidance_margin_buffer),
+        enable_local_waypoint_qp_after_certificate=bool(args.enable_local_waypoint_qp_after_certificate),
+        local_waypoint_qp_window_radius=int(args.local_waypoint_qp_window_radius),
+        local_waypoint_qp_max_collision_segments=int(args.local_waypoint_qp_max_collision_segments),
+        local_waypoint_qp_min_clearance_trigger=float(args.local_waypoint_qp_min_clearance_trigger),
+        local_waypoint_qp_target_buffer=float(args.local_waypoint_qp_target_buffer),
+        local_waypoint_qp_lambda_s=float(args.local_waypoint_qp_lambda_s),
+        local_waypoint_qp_delta_max=float(args.local_waypoint_qp_delta_max),
+        local_waypoint_qp_max_velocity_step=float(args.local_waypoint_qp_max_velocity_step),
+        local_waypoint_qp_max_acceleration_step=float(args.local_waypoint_qp_max_acceleration_step),
+        local_waypoint_qp_maxiter=int(args.local_waypoint_qp_maxiter),
         lambda_s=float(args.guidance_lambda_s),
         rho=float(args.guidance_rho),
         ddim_eta=float(args.guidance_ddim_eta),
@@ -941,13 +1004,19 @@ def predict_surface_cbf_qp_guided_outputs(
             num_inference_steps=args.candidate_inference_steps,
             scheduler_step_kwargs={"eta": float(args.guidance_ddim_eta)},
         )
+    guided_joint_trajectory = result.get("guided_joint_trajectory")
+    if guided_joint_trajectory is not None:
+        guided_joint_trajectory = _resample_joint_trajectory_to_steps(
+            guided_joint_trajectory,
+            int(candidate_validator.validator.cfg.target_steps),
+        )
     return {
         "pred_action_window": result["action"][0].detach().cpu().numpy().astype(np.float32),
         "pred_action_horizon": result["action_pred"][0].detach().cpu().numpy().astype(np.float32),
     }, {
         "planning_result": planning_result,
         "guidance_log": result.get("guidance_log", {}),
-        "guided_joint_trajectory": result.get("guided_joint_trajectory"),
+        "guided_joint_trajectory": guided_joint_trajectory,
         "guided_control_points_normalized": result.get("guided_control_points_normalized"),
         "guidance_candidates": result.get("guidance_candidates", []),
     }

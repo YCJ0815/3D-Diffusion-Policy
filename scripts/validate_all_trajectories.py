@@ -65,10 +65,32 @@ def _format_qp_skip_reason(reason: str | None) -> str:
         "deep_penetration_unrepairable": "candidate is too deeply in collision for local SCP-QP repair",
         "safe_candidate_no_repair": "candidate clearance is already above the repair trigger",
         "solver_failure": "SCP-QP solver failed before certificate",
+        "local_waypoint_qp_not_applicable": "local waypoint QP was not applicable for this certificate failure",
+        "no_local_collision_windows": "no local collision window was found from certificate failures",
+        "no_local_waypoint_constraints": "no valid local waypoint constraints were built",
+        "local_waypoint_solver_failure": "local waypoint QP solver failed",
+        "local_waypoint_certificate_failure": "local waypoint QP did not pass the re-certificate",
         "non_finite_h_min_before": "pre-guidance minimum margin is non-finite",
         "unknown_skip_condition": "unknown guidance skip condition",
     }
     return reason_map.get(reason, str(reason))
+
+
+def _resample_joint_trajectory_to_steps(joint_trajectory: np.ndarray, num_steps: int) -> np.ndarray:
+    joint_trajectory = np.asarray(joint_trajectory, dtype=np.float32)
+    if joint_trajectory.ndim != 2:
+        raise ValueError(f"joint_trajectory must be rank-2 [T, J], got {joint_trajectory.shape}")
+    if joint_trajectory.shape[0] == int(num_steps):
+        return joint_trajectory.astype(np.float32)
+    if joint_trajectory.shape[0] <= 1:
+        return np.repeat(joint_trajectory.astype(np.float32), int(num_steps), axis=0)
+    source_axis = np.linspace(0.0, 1.0, joint_trajectory.shape[0], dtype=np.float64)
+    target_axis = np.linspace(0.0, 1.0, int(num_steps), dtype=np.float64)
+    resampled = np.stack(
+        [np.interp(target_axis, source_axis, joint_trajectory[:, joint_index]) for joint_index in range(joint_trajectory.shape[1])],
+        axis=1,
+    )
+    return resampled.astype(np.float32)
 
 
 def _summarize_qp_status_from_selection(selection: dict[str, object]) -> dict[str, object]:
@@ -123,6 +145,7 @@ def _summarize_qp_status_from_selection(selection: dict[str, object]) -> dict[st
         "guidance_selected_candidate_passes_succeeded": int(
             guidance_log.get("selected_candidate_passes_succeeded", 0) or 0
         ),
+        "guidance_final_success_source": str(guidance_log.get("final_success_source", "failure") or "failure"),
         "guidance_repair_attempt_count": int(guidance_log.get("repair_attempt_count", 0) or 0),
         "guidance_repair_attempted_indices": list(guidance_log.get("repair_attempted_candidate_indices", []) or []),
     }
@@ -306,6 +329,7 @@ def _build_validation_status_lines(
         f"{qp_summary['guidance_selected_candidate_pass_count']} "
         f"QP={qp_summary['guidance_num_qp_success']}/{qp_summary['guidance_num_qp_called']} "
         f"repair={qp_summary['guidance_repair_attempt_count']} "
+        f"final={qp_summary['guidance_final_success_source']} "
         f"selected_candidate={int(selection.get('selected_candidate_idx', 0))}"
     )
     return [progress_line, status_line]
@@ -1221,6 +1245,16 @@ def _predict_surface_cbf_qp_guided(
         delta_max_pass2=float(args.guidance_delta_max_pass2),
         d_trigger_pass2_offset=float(args.guidance_d_trigger_pass2_offset),
         margin_buffer=float(args.guidance_margin_buffer),
+        enable_local_waypoint_qp_after_certificate=bool(args.enable_local_waypoint_qp_after_certificate),
+        local_waypoint_qp_window_radius=int(args.local_waypoint_qp_window_radius),
+        local_waypoint_qp_max_collision_segments=int(args.local_waypoint_qp_max_collision_segments),
+        local_waypoint_qp_min_clearance_trigger=float(args.local_waypoint_qp_min_clearance_trigger),
+        local_waypoint_qp_target_buffer=float(args.local_waypoint_qp_target_buffer),
+        local_waypoint_qp_lambda_s=float(args.local_waypoint_qp_lambda_s),
+        local_waypoint_qp_delta_max=float(args.local_waypoint_qp_delta_max),
+        local_waypoint_qp_max_velocity_step=float(args.local_waypoint_qp_max_velocity_step),
+        local_waypoint_qp_max_acceleration_step=float(args.local_waypoint_qp_max_acceleration_step),
+        local_waypoint_qp_maxiter=int(args.local_waypoint_qp_maxiter),
         lambda_s=float(args.guidance_lambda_s),
         rho=float(args.guidance_rho),
         ddim_eta=float(args.guidance_ddim_eta),
@@ -1256,6 +1290,12 @@ def _predict_surface_cbf_qp_guided(
         start_joint_normalized=start_joint_normalized,
         end_joint_normalized=end_joint_normalized,
     )
+    guided_joint_trajectory = result.get("guided_joint_trajectory")
+    if guided_joint_trajectory is not None:
+        selected_result["joint_trajectory"] = _resample_joint_trajectory_to_steps(
+            np.asarray(guided_joint_trajectory, dtype=np.float32),
+            int(pyb_cfg.target_steps),
+        )
     selected_score_details = validator.score_candidate(
         workpiece_id=workpiece_id,
         normalized_control_points=selected_result["normalized_control_points"],
@@ -1285,6 +1325,7 @@ def _predict_surface_cbf_qp_guided(
         "guidance_candidate_count": int(guidance_log.get("num_candidates_total", len(result.get("guidance_candidates", []))) or 0),
         "guidance_repair_attempt_count": int(guidance_log.get("repair_attempt_count", 0) or 0),
         "guidance_repair_attempted_indices": list(guidance_log.get("repair_attempted_candidate_indices", []) or []),
+        "final_success_source": str(guidance_log.get("final_success_source", "failure") or "failure"),
     }
 
 
@@ -1821,6 +1862,7 @@ def main() -> None:
                 "guidance_candidate_count": selection.get("guidance_candidate_count"),
                 "guidance_repair_attempt_count": int(selection.get("guidance_repair_attempt_count", 0) or 0),
                 "guidance_repair_attempted_indices": list(selection.get("guidance_repair_attempted_indices", []) or []),
+                "final_success_source": str(selection.get("final_success_source", "failure") or "failure"),
                 "singularity": singularity_summary,
             }
             traj_entry.update(_summarize_qp_status_from_selection(selection))
@@ -1913,6 +1955,16 @@ def main() -> None:
             "guidance_delta_max_pass2": float(args.guidance_delta_max_pass2),
             "guidance_d_trigger_pass2_offset": float(args.guidance_d_trigger_pass2_offset),
             "guidance_margin_buffer": float(args.guidance_margin_buffer),
+            "enable_local_waypoint_qp_after_certificate": bool(args.enable_local_waypoint_qp_after_certificate),
+            "local_waypoint_qp_window_radius": int(args.local_waypoint_qp_window_radius),
+            "local_waypoint_qp_max_collision_segments": int(args.local_waypoint_qp_max_collision_segments),
+            "local_waypoint_qp_min_clearance_trigger": float(args.local_waypoint_qp_min_clearance_trigger),
+            "local_waypoint_qp_target_buffer": float(args.local_waypoint_qp_target_buffer),
+            "local_waypoint_qp_lambda_s": float(args.local_waypoint_qp_lambda_s),
+            "local_waypoint_qp_delta_max": float(args.local_waypoint_qp_delta_max),
+            "local_waypoint_qp_max_velocity_step": float(args.local_waypoint_qp_max_velocity_step),
+            "local_waypoint_qp_max_acceleration_step": float(args.local_waypoint_qp_max_acceleration_step),
+            "local_waypoint_qp_maxiter": int(args.local_waypoint_qp_maxiter),
             "guidance_lambda_s": float(args.guidance_lambda_s),
             "guidance_rho": float(args.guidance_rho),
             "guidance_ddim_eta": float(args.guidance_ddim_eta),
