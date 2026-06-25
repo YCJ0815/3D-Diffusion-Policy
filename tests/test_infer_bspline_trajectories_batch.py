@@ -140,15 +140,22 @@ class InferBsplineTrajectoriesBatchTests(unittest.TestCase):
                 "--trust-region-end",
                 "0.05",
                 "--blend-weights",
-                "0.25",
+                "0.1",
+                "0.2",
+                "0.3",
+                "0.4",
                 "0.5",
-                "0.75",
+                "0.6",
+                "0.7",
+                "0.8",
+                "0.9",
+                "1.0",
                 "--repair-score-weights",
                 "1.0",
                 "10.0",
                 "1.0",
                 "--guidance-steps",
-                "3",
+                "10",
                 "--guidance-max-risk-segments",
                 "3",
                 "--guidance-window-radius",
@@ -215,9 +222,9 @@ class InferBsplineTrajectoriesBatchTests(unittest.TestCase):
         self.assertEqual(args.guidance_safe_distance, 0.05)
         self.assertEqual(args.trust_region_start, 0.015)
         self.assertEqual(args.trust_region_end, 0.05)
-        self.assertEqual(args.blend_weights, [0.25, 0.5, 0.75])
+        self.assertEqual(args.blend_weights, [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0])
         self.assertEqual(args.repair_score_weights, [1.0, 10.0, 1.0])
-        self.assertEqual(args.guidance_steps, 3)
+        self.assertEqual(args.guidance_steps, 10)
         self.assertEqual(args.guidance_max_risk_segments, 3)
         self.assertEqual(args.guidance_window_radius, 2)
         self.assertEqual(args.guidance_points_per_segment, 2)

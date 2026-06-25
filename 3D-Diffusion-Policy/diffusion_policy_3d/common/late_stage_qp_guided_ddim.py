@@ -34,7 +34,7 @@ from diffusion_policy_3d.common.surface_cbf_qp_guidance import (
 class LateStageQPGuidedDDIMConfig:
     enabled: bool = True
     num_candidates: int = 32
-    guidance_steps: int = 3
+    guidance_steps: int = 10
     guidance_timesteps: tuple[int, ...] = ()
     qp_candidates: int = 4
     qp_inner_scp_rounds: int = 2
@@ -43,7 +43,7 @@ class LateStageQPGuidedDDIMConfig:
     guidance_safe_distance: float = 0.05
     trust_region_start: float = 0.015
     trust_region_end: float = 0.05
-    blend_weights: tuple[float, ...] = (0.25, 0.5, 0.75)
+    blend_weights: tuple[float, ...] = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0)
     repair_score_weights: tuple[float, float, float] = (1.0, 10.0, 1.0)
     ddim_eta: float = 0.0
     skip_final_certification: bool = False
