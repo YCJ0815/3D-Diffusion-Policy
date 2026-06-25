@@ -116,19 +116,15 @@ class InferBsplineTrajectoriesBatchTests(unittest.TestCase):
                 "--planner-mode",
                 "qp_guided_diffusion",
                 "--qp-candidates",
-                "2",
-                "--guidance-timesteps",
-                "10",
-                "5",
-                "1",
+                "4",
                 "--qp-inner-scp-rounds",
-                "1",
+                "2",
                 "--coarse-check-steps",
-                "16",
+                "32",
                 "--guidance-pen-link-points",
-                "24",
+                "80",
                 "--guidance-wrist3-points",
-                "8",
+                "16",
                 "--final-post-qp-candidates",
                 "1",
                 "--final-backup-candidates",
@@ -162,7 +158,7 @@ class InferBsplineTrajectoriesBatchTests(unittest.TestCase):
                 "--guidance-min-constraints-per-segment",
                 "4",
                 "--guidance-active-constraints",
-                "8",
+                "24",
                 "--guidance-scp-iterations",
                 "2",
                 "--guidance-delta-max-total",
@@ -206,12 +202,12 @@ class InferBsplineTrajectoriesBatchTests(unittest.TestCase):
         self.assertEqual(args.cspace_feature_dir, "/tmp/cspace")
         self.assertTrue(args.enable_surface_cbf_qp_guidance)
         self.assertEqual(args.planner_mode, "qp_guided_diffusion")
-        self.assertEqual(args.qp_candidates, 2)
-        self.assertEqual(args.guidance_timesteps, [10, 5, 1])
-        self.assertEqual(args.qp_inner_scp_rounds, 1)
-        self.assertEqual(args.coarse_check_steps, 16)
-        self.assertEqual(args.guidance_pen_link_points, 24)
-        self.assertEqual(args.guidance_wrist3_points, 8)
+        self.assertEqual(args.qp_candidates, 4)
+        self.assertFalse(hasattr(args, "guidance_timesteps"))
+        self.assertEqual(args.qp_inner_scp_rounds, 2)
+        self.assertEqual(args.coarse_check_steps, 32)
+        self.assertEqual(args.guidance_pen_link_points, 80)
+        self.assertEqual(args.guidance_wrist3_points, 16)
         self.assertEqual(args.final_post_qp_candidates, 1)
         self.assertEqual(args.final_backup_candidates, 1)
         self.assertEqual(args.final_post_qp_rounds, 2)
@@ -226,7 +222,7 @@ class InferBsplineTrajectoriesBatchTests(unittest.TestCase):
         self.assertEqual(args.guidance_window_radius, 2)
         self.assertEqual(args.guidance_points_per_segment, 2)
         self.assertEqual(args.guidance_min_constraints_per_segment, 4)
-        self.assertEqual(args.guidance_active_constraints, 8)
+        self.assertEqual(args.guidance_active_constraints, 24)
         self.assertEqual(args.guidance_scp_iterations, 2)
         self.assertEqual(args.guidance_delta_max_total, 0.05)
         self.assertEqual(args.guidance_delta_max_pass1, 0.025)

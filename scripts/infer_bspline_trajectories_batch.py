@@ -405,9 +405,10 @@ def validate_args(args) -> None:
         raise ValueError(f"qp-inner-scp-rounds must be positive, got {args.qp_inner_scp_rounds}")
     if args.coarse_check_steps <= 1:
         raise ValueError(f"coarse-check-steps must be greater than 1, got {args.coarse_check_steps}")
-    if not args.guidance_timesteps or any(int(v) <= 0 for v in args.guidance_timesteps):
+    guidance_timesteps = list(args.guidance_timesteps or [])
+    if guidance_timesteps and any(int(v) <= 0 for v in guidance_timesteps):
         raise ValueError(f"guidance-timesteps must contain positive integers, got {args.guidance_timesteps}")
-    if args.candidate_inference_steps is not None and max(int(v) for v in args.guidance_timesteps) > int(args.candidate_inference_steps):
+    if guidance_timesteps and args.candidate_inference_steps is not None and max(int(v) for v in guidance_timesteps) > int(args.candidate_inference_steps):
         raise ValueError(
             "guidance-timesteps cannot exceed candidate-inference-steps, "
             f"got {args.guidance_timesteps} vs {args.candidate_inference_steps}"
@@ -424,10 +425,11 @@ def validate_args(args) -> None:
         raise ValueError("trust-region-start/end must be positive")
     if args.trust_region_start > args.trust_region_end:
         raise ValueError("trust-region-start must be <= trust-region-end")
-    if len(args.blend_weights) != len(args.guidance_timesteps):
+    expected_blend_count = len(guidance_timesteps) if guidance_timesteps else int(args.guidance_steps)
+    if len(args.blend_weights) != expected_blend_count:
         raise ValueError(
-            "blend-weights length must match guidance-timesteps, "
-            f"got {len(args.blend_weights)} vs {len(args.guidance_timesteps)}"
+            "blend-weights length must match explicit guidance-timesteps, or guidance-steps when timesteps are empty, "
+            f"got {len(args.blend_weights)} vs {expected_blend_count}"
         )
     if len(args.repair_score_weights) != 3:
         raise ValueError("repair-score-weights must contain exactly 3 values")
@@ -1140,7 +1142,7 @@ def predict_late_stage_qp_guided_outputs(
         enabled=True,
         num_candidates=int(args.num_candidates),
         guidance_steps=int(args.guidance_steps),
-        guidance_timesteps=tuple(int(v) for v in args.guidance_timesteps),
+        guidance_timesteps=tuple(int(v) for v in (args.guidance_timesteps or [])),
         qp_candidates=int(args.qp_candidates),
         qp_inner_scp_rounds=int(args.qp_inner_scp_rounds),
         coarse_check_steps=int(args.coarse_check_steps),

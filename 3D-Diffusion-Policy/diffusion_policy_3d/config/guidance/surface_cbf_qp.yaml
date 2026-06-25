@@ -5,12 +5,12 @@ surface_cbf_qp_guidance:
   candidate_inference_steps: null
 
   qp_guided_diffusion:
-    guidance_timesteps: [10, 5, 1]
-    qp_candidates: 2
-    qp_inner_scp_rounds: 1
-    coarse_check_steps: 16
-    guidance_pen_link_points: 24
-    guidance_wrist3_points: 8
+    guidance_timesteps: []
+    qp_candidates: 4
+    qp_inner_scp_rounds: 2
+    coarse_check_steps: 32
+    guidance_pen_link_points: 80
+    guidance_wrist3_points: 16
     final_post_qp_candidates: 1
     final_backup_candidates: 1
     final_post_qp_rounds: 2
@@ -23,8 +23,8 @@ surface_cbf_qp_guidance:
 
   pybullet:
     robot_surface_points_per_link:
-      pen_link: 24
-      wrist_3_link: 8
+      pen_link: 80
+      wrist_3_link: 16
 
   runner:
     guidance_steps: 3
@@ -32,9 +32,9 @@ surface_cbf_qp_guidance:
     window_radius: 5
     points_per_segment: 5
     min_constraints_per_segment: 6
-    active_constraints: 8
+    active_constraints: 24
     check_steps: 64
-    cert_steps: 64
+    cert_steps: 256
     cert_swept_intermediate: 3
     d_safe: 0.005
     d_trigger: 0.005

@@ -19,6 +19,7 @@ from diffusion_policy_3d.common.surface_cbf_qp_guidance import (
     SurfaceCBFQPGuidanceRunner,
     _build_basis,
     _filter_scheduler_step_kwargs,
+    build_segment_window_cbf_constraints_torch,
     build_risk_segments,
     compute_path_length,
     compute_scp_pass_trigger,
@@ -34,10 +35,10 @@ class LateStageQPGuidedDDIMConfig:
     enabled: bool = True
     num_candidates: int = 32
     guidance_steps: int = 3
-    guidance_timesteps: tuple[int, ...] = (10, 5, 1)
-    qp_candidates: int = 2
-    qp_inner_scp_rounds: int = 1
-    coarse_check_steps: int = 16
+    guidance_timesteps: tuple[int, ...] = ()
+    qp_candidates: int = 4
+    qp_inner_scp_rounds: int = 2
+    coarse_check_steps: int = 32
     guidance_trigger_distance: float = 0.06
     guidance_safe_distance: float = 0.05
     trust_region_start: float = 0.015
@@ -216,6 +217,180 @@ class LateStageQPGuidedDDIMRunner:
             **metrics,
         }
 
+    def _evaluate_residuals_batched_torch(
+        self,
+        *,
+        residuals: np.ndarray,
+        q_start_normalized: np.ndarray,
+        q_goal_normalized: np.ndarray,
+        delta_w_mean: np.ndarray,
+        delta_w_std: np.ndarray,
+        num_control_points: int,
+        check_basis: np.ndarray,
+    ) -> list[dict[str, Any]] | None:
+        if not self.environment.torch_available():
+            return None
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        residuals_np = np.asarray(residuals, dtype=np.float32)
+        if residuals_np.ndim != 3:
+            return None
+        batch_size, free_count, dof = residuals_np.shape
+        expected_free_count = int(num_control_points) - 2 * FIXED_CONTROL_POINTS_PER_SIDE
+        if free_count != expected_free_count:
+            return None
+
+        try:
+            residuals_t = torch.as_tensor(residuals_np, device=device, dtype=torch.float32)
+            q_start_t = torch.as_tensor(np.asarray(q_start_normalized, dtype=np.float32).reshape(-1), device=device)
+            q_goal_t = torch.as_tensor(np.asarray(q_goal_normalized, dtype=np.float32).reshape(-1), device=device)
+            mean_t = torch.as_tensor(np.asarray(delta_w_mean, dtype=np.float32).reshape(1, free_count, dof), device=device)
+            std_t = torch.as_tensor(np.asarray(delta_w_std, dtype=np.float32).reshape(1, free_count, dof), device=device)
+            controls = torch.empty((batch_size, int(num_control_points), dof), device=device, dtype=torch.float32)
+            controls[:, :FIXED_CONTROL_POINTS_PER_SIDE] = q_start_t.view(1, 1, dof)
+            controls[:, -FIXED_CONTROL_POINTS_PER_SIDE:] = q_goal_t.view(1, 1, dof)
+            interp = torch.linspace(0.0, 1.0, free_count + 2, device=device, dtype=torch.float32)[1:-1]
+            base_free = (1.0 - interp[:, None]) * q_start_t[None, :] + interp[:, None] * q_goal_t[None, :]
+            controls[:, FIXED_CONTROL_POINTS_PER_SIDE:-FIXED_CONTROL_POINTS_PER_SIDE] = (
+                base_free[None, :, :] + residuals_t * std_t + mean_t
+            )
+
+            basis_t = torch.as_tensor(np.asarray(check_basis, dtype=np.float32), device=device)
+            q_check_norm_t = torch.einsum("tc,bcj->btj", basis_t, controls)
+            q_check_actual_t = self.environment.normalized_to_actual_torch(q_check_norm_t)
+            world_points_t = self.environment.surface_world_points_torch(q_check_actual_t)
+            sdf_values_t = self.environment.query_sdf_torch(world_points_t)
+            finite_t = torch.isfinite(sdf_values_t)
+            safe_for_min = torch.where(finite_t, sdf_values_t, torch.full_like(sdf_values_t, torch.inf))
+            min_sdf_t = torch.amin(safe_for_min.reshape(batch_size, -1), dim=1)
+            min_sdf_t = torch.where(torch.isfinite(min_sdf_t), min_sdf_t, torch.full_like(min_sdf_t, torch.nan))
+            penetration_t = torch.where(finite_t & (sdf_values_t < 0.0), -sdf_values_t, torch.zeros_like(sdf_values_t))
+            num_pen_t = torch.sum(finite_t & (sdf_values_t < 0.0), dim=(1, 2))
+            max_pen_t = torch.amax(penetration_t.reshape(batch_size, -1), dim=1)
+            collision_risk_t = torch.sum(
+                torch.where(
+                    finite_t,
+                    torch.clamp(float(self.scp_config.d_trigger) - sdf_values_t, min=0.0),
+                    torch.zeros_like(sdf_values_t),
+                ),
+                dim=(1, 2),
+            )
+        except (RuntimeError, ValueError, IndexError):
+            return None
+
+        controls_np = controls.detach().cpu().numpy().astype(np.float32)
+        q_actual_np = q_check_actual_t.detach().cpu().numpy().astype(np.float32)
+        sdf_np = sdf_values_t.detach().cpu().numpy().astype(np.float32)
+        min_sdf_np = min_sdf_t.detach().cpu().numpy()
+        num_pen_np = num_pen_t.detach().cpu().numpy()
+        max_pen_np = max_pen_t.detach().cpu().numpy()
+        collision_risk_np = collision_risk_t.detach().cpu().numpy()
+        results: list[dict[str, Any]] = []
+        for candidate_index in range(batch_size):
+            sdf_result = {"all_sdf_values": sdf_np[candidate_index], "sdf_values_by_link": {}}
+            risk_summary = summarize_sdf_risk(
+                sdf_result=sdf_result,
+                d_safe=float(self.scp_config.d_safe),
+                d_trigger=float(self.scp_config.d_trigger),
+            )
+            results.append(
+                {
+                    "control_points": controls_np[candidate_index],
+                    "joint_trajectory": q_actual_np[candidate_index],
+                    "sdf_result": sdf_result,
+                    "risk_summary": risk_summary,
+                    "min_sdf": float(min_sdf_np[candidate_index]),
+                    "num_penetration": int(num_pen_np[candidate_index]),
+                    "max_penetration_depth": float(max_pen_np[candidate_index]),
+                    "collision_risk": float(collision_risk_np[candidate_index]),
+                    "batched_torch_eval": True,
+                }
+            )
+        return results
+
+    def _build_scp_pass_detail_torch(
+        self,
+        *,
+        pass_index: int,
+        state: dict[str, Any],
+        check_basis: np.ndarray,
+        d_trigger: float,
+    ) -> dict[str, Any]:
+        risk_segments = list(state["risk_segments"])
+        selected_segments = risk_segments[: int(self.scp_config.max_risk_segments)]
+        constraints, selected_segment_summaries, selected_window_timesteps = build_segment_window_cbf_constraints_torch(
+            segments=selected_segments,
+            sdf_result=state["sdf_result"],
+            check_basis=check_basis,
+            q_check_norm=state["q_check_norm"],
+            environment=self.environment,
+            d_trigger=float(d_trigger),
+            points_per_segment=int(self.scp_config.points_per_segment),
+            min_constraints_per_segment=int(self.scp_config.min_constraints_per_segment),
+            window_radius=int(self.scp_config.window_radius),
+            max_active=int(self.scp_config.active_constraints),
+        ) if selected_segments else ([], [], [])
+        return {
+            "pass_index": int(pass_index + 1),
+            "d_trigger": float(d_trigger),
+            "risk_segments_raw": risk_segments,
+            "risk_segment_count_total": int(len(risk_segments)),
+            "risk_segment_count_selected": int(len(selected_segment_summaries)),
+            "selected_segments": selected_segment_summaries,
+            "selected_window_timesteps": [int(v) for v in selected_window_timesteps],
+            "selected_constraint_count": int(len(constraints)),
+            "active_constraints": constraints,
+            "solver_success": False,
+            "solver_message": None,
+            "total_slack": math.nan,
+            "skip_reason": None,
+            "control_points_updated": False,
+            "post_min_clearance": math.nan,
+        }
+
+    def _evaluate_control_points_torch(
+        self,
+        *,
+        control_points: np.ndarray,
+        check_basis: np.ndarray,
+        d_trigger: float,
+    ) -> dict[str, Any] | None:
+        if not self.environment.torch_available():
+            return None
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        try:
+            control_points_np = np.asarray(control_points, dtype=np.float32)
+            basis_t = torch.as_tensor(np.asarray(check_basis, dtype=np.float32), device=device)
+            control_t = torch.as_tensor(control_points_np, device=device, dtype=torch.float32)
+            q_check_norm_t = basis_t @ control_t
+            q_check_actual_t = self.environment.normalized_to_actual_torch(q_check_norm_t)
+            world_points_t = self.environment.surface_world_points_torch(q_check_actual_t)
+            sdf_values_t = self.environment.query_sdf_torch(world_points_t)
+        except (RuntimeError, ValueError, IndexError):
+            return None
+        q_check_norm = q_check_norm_t.detach().cpu().numpy().astype(np.float32)
+        q_check_actual = q_check_actual_t.detach().cpu().numpy().astype(np.float32)
+        sdf_result = {
+            "all_sdf_values": sdf_values_t.detach().cpu().numpy().astype(np.float32),
+            "sdf_values_by_link": {},
+        }
+        risk_summary = summarize_sdf_risk(
+            sdf_result=sdf_result,
+            d_safe=float(self.scp_config.d_safe),
+            d_trigger=float(d_trigger),
+        )
+        risk_segments = build_risk_segments(
+            sdf_result=sdf_result,
+            d_trigger=float(d_trigger),
+        )
+        return {
+            "q_check_norm": q_check_norm,
+            "q_check_actual": q_check_actual,
+            "sdf_result": sdf_result,
+            "risk_summary": risk_summary,
+            "risk_segments": risk_segments,
+            "batched_torch_eval": True,
+        }
+
     def _probe_candidate(
         self,
         *,
@@ -225,7 +400,11 @@ class LateStageQPGuidedDDIMRunner:
         free_slice: slice,
         trust_region: float,
     ) -> dict[str, Any]:
-        state = self.runner._evaluate_candidate_state(
+        state = self._evaluate_control_points_torch(
+            control_points=control_points,
+            check_basis=check_basis,
+            d_trigger=float(self.scp_config.d_trigger),
+        ) or self.runner._evaluate_candidate_state(
             control_points=control_points,
             check_basis=check_basis,
             d_trigger=float(self.scp_config.d_trigger),
@@ -235,7 +414,7 @@ class LateStageQPGuidedDDIMRunner:
             return {"status": "safe_noop", "repair_cost": 0.0, "slack_sum": 0.0, "delta_norm": 0.0}
         if np.isfinite(min_clearance) and min_clearance < -float(self.scp_config.eps_deep):
             return {"status": "deep_unrepairable", "repair_cost": math.inf, "slack_sum": math.inf, "delta_norm": 0.0}
-        pass_detail = self.runner._build_scp_pass_detail(
+        pass_detail = self._build_scp_pass_detail_torch(
             pass_index=0,
             state=state,
             check_basis=check_basis,
@@ -284,7 +463,11 @@ class LateStageQPGuidedDDIMRunner:
                 pass_index=pass_index,
                 pass2_offset=float(self.scp_config.d_trigger_pass2_offset),
             )
-            state = self.runner._evaluate_candidate_state(
+            state = self._evaluate_control_points_torch(
+                control_points=current,
+                check_basis=check_basis,
+                d_trigger=pass_trigger,
+            ) or self.runner._evaluate_candidate_state(
                 control_points=current,
                 check_basis=check_basis,
                 d_trigger=pass_trigger,
@@ -293,7 +476,7 @@ class LateStageQPGuidedDDIMRunner:
                 return {"success": False, "status": "non_finite_margin", "control_points": original, "slack_sum": total_slack, "delta_norm": 0.0}
             if not build_risk_segments(sdf_result=state["sdf_result"], d_trigger=pass_trigger):
                 return {"success": True, "status": status, "control_points": current, "slack_sum": total_slack, "delta_norm": float(np.linalg.norm(current - original))}
-            pass_detail = self.runner._build_scp_pass_detail(
+            pass_detail = self._build_scp_pass_detail_torch(
                 pass_index=pass_index,
                 state=state,
                 check_basis=check_basis,
@@ -355,43 +538,51 @@ class LateStageQPGuidedDDIMRunner:
             trust_region = (1.0 - alpha) * float(self.config.trust_region_start) + alpha * float(self.config.trust_region_end)
         weights = tuple(float(v) for v in self.config.repair_score_weights)
 
+        batched_eval = self._evaluate_residuals_batched_torch(
+            residuals=x0_candidates,
+            q_start_normalized=q_start_normalized,
+            q_goal_normalized=q_goal_normalized,
+            delta_w_mean=delta_w_mean,
+            delta_w_std=delta_w_std,
+            num_control_points=num_control_points,
+            check_basis=check_basis,
+        )
         infos: list[dict[str, Any]] = []
         for candidate_index, residual in enumerate(x0_candidates):
-            eval_result = self._evaluate_residual(
-                residual=residual,
-                q_start_normalized=q_start_normalized,
-                q_goal_normalized=q_goal_normalized,
-                delta_w_mean=delta_w_mean,
-                delta_w_std=delta_w_std,
-                num_control_points=num_control_points,
-                check_basis=check_basis,
-            )
-            probe = self._probe_candidate(
-                control_points=eval_result["control_points"],
-                check_basis=check_basis,
-                limit_basis=limit_basis,
-                free_slice=free_slice,
-                trust_region=trust_region,
+            eval_result = (
+                batched_eval[candidate_index]
+                if batched_eval is not None
+                else self._evaluate_residual(
+                    residual=residual,
+                    q_start_normalized=q_start_normalized,
+                    q_goal_normalized=q_goal_normalized,
+                    delta_w_mean=delta_w_mean,
+                    delta_w_std=delta_w_std,
+                    num_control_points=num_control_points,
+                    check_basis=check_basis,
+                )
             )
             collision_risk = float(eval_result["collision_risk"])
-            repair_cost = float(probe["repair_cost"])
-            slack_sum = float(probe["slack_sum"])
+            max_penetration_depth = float(eval_result["max_penetration_depth"])
+            repair_cost = float(collision_risk)
+            slack_sum = float(max(0.0, max_penetration_depth) * max(1, int(eval_result["num_penetration"])))
             repairability_score = weights[0] * repair_cost + weights[1] * slack_sum + weights[2] * collision_risk
             infos.append({
                 "candidate_index": int(candidate_index),
                 "control_points": eval_result["control_points"],
                 "normalized_free_residual": np.asarray(residual, dtype=np.float32),
-                "probe_status": str(probe["status"]),
+                "probe_status": "batched_torch_screen" if batched_eval is not None else "cpu_screen",
                 "repair_cost": repair_cost,
                 "slack_sum": slack_sum,
                 "min_sdf": float(eval_result["min_sdf"]),
                 "num_penetration": int(eval_result["num_penetration"]),
-                "max_penetration_depth": float(eval_result["max_penetration_depth"]),
+                "max_penetration_depth": max_penetration_depth,
                 "collision_risk": collision_risk,
                 "repairability_score": float(repairability_score),
                 "trust_region": float(trust_region),
-                "qp_status": str(probe["status"]),
-                "qp_delta_norm": float(probe.get("delta_norm", 0.0)),
+                "qp_status": "not_selected",
+                "qp_delta_norm": 0.0,
+                "batched_torch_eval": bool(batched_eval is not None),
             })
 
         order = sorted(
@@ -407,7 +598,24 @@ class LateStageQPGuidedDDIMRunner:
         blend = blend_values[min(int(guidance_step_index), len(blend_values) - 1)] if blend_values else 1.0
         for candidate_index in selected:
             info = infos[candidate_index]
-            if str(info["probe_status"]) in {"safe_noop", "deep_unrepairable"}:
+            probe = self._probe_candidate(
+                control_points=np.asarray(info["control_points"], dtype=np.float32),
+                check_basis=check_basis,
+                limit_basis=limit_basis,
+                free_slice=free_slice,
+                trust_region=trust_region,
+            )
+            info["probe_status"] = str(probe["status"])
+            info["qp_status"] = str(probe["status"])
+            info["repair_cost"] = float(probe["repair_cost"])
+            info["slack_sum"] = float(probe["slack_sum"])
+            info["qp_delta_norm"] = float(probe.get("delta_norm", 0.0))
+            info["repairability_score"] = float(
+                weights[0] * float(info["repair_cost"])
+                + weights[1] * float(info["slack_sum"])
+                + weights[2] * float(info["collision_risk"])
+            )
+            if str(probe["status"]) in {"safe_noop", "deep_unrepairable"}:
                 continue
             repair = self._repair_control_points(
                 control_points=np.asarray(info["control_points"], dtype=np.float32),

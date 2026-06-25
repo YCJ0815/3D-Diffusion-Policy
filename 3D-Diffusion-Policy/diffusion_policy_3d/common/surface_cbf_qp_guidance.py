@@ -10,6 +10,11 @@ import warnings
 import numpy as np
 from scipy.optimize import Bounds, LinearConstraint, minimize
 
+try:
+    import torch
+except ModuleNotFoundError:  # pragma: no cover - optional runtime acceleration
+    torch = None
+
 from diffusion_policy_3d.common.bspline import (
     FIXED_CONTROL_POINTS_PER_SIDE,
     build_bspline_basis_matrix,
@@ -175,6 +180,7 @@ class PyBulletSurfaceEnvironmentAdapter:
             points_per_link_override=surface_points_per_link_override,
         )
         self._surface_samples = self._build_surface_sample_index()
+        self._torch_cache: dict[str, Any] = {}
 
     @property
     def surface_samples(self) -> list[dict[str, Any]]:
@@ -226,6 +232,269 @@ class PyBulletSurfaceEnvironmentAdapter:
 
     def joint_scale(self) -> np.ndarray:
         return ((self.joint_upper_limits - self.joint_lower_limits) * 0.5).astype(np.float32)
+
+    def torch_available(self) -> bool:
+        return torch is not None
+
+    def _torch_tensor(self, value, *, device, dtype=None):
+        if torch is None:
+            raise RuntimeError("torch is not available")
+        return torch.as_tensor(value, device=device, dtype=dtype or torch.float32)
+
+    def _torch_geometry_cache(self, *, device):
+        if torch is None:
+            raise RuntimeError("torch is not available")
+        cache_key = str(device)
+        if cache_key in self._torch_cache:
+            return self._torch_cache[cache_key]
+
+        link_names = []
+        link_indices = []
+        local_points = []
+        for link_index, points in self.robot_surface_points_by_link.items():
+            link_name = self.link_index_to_name.get(int(link_index), str(link_index))
+            if link_name not in {"wrist_3_link", "pen_link"}:
+                continue
+            pts = np.asarray(points, dtype=np.float32)
+            if pts.size == 0:
+                continue
+            link_names.extend([link_name] * int(pts.shape[0]))
+            link_indices.extend([int(link_index)] * int(pts.shape[0]))
+            local_points.append(pts)
+        if not local_points:
+            raise ValueError("Torch surface guidance found no wrist_3_link/pen_link surface points.")
+
+        all_local_points = np.concatenate(local_points, axis=0).astype(np.float32)
+        link_is_pen = np.asarray([name == "pen_link" for name in link_names], dtype=np.bool_)
+        sdf_grid = self.load_sdf_grid()
+        cache = {
+            "local_points": self._torch_tensor(all_local_points, device=device),
+            "link_is_pen": torch.as_tensor(link_is_pen, device=device, dtype=torch.bool),
+            "link_names": link_names,
+            "link_indices": link_indices,
+            "sdf": self._torch_tensor(sdf_grid.sdf, device=device),
+            "x_axis": self._torch_tensor(sdf_grid.x, device=device),
+            "y_axis": self._torch_tensor(sdf_grid.y, device=device),
+            "z_axis": self._torch_tensor(sdf_grid.z, device=device),
+            "out_of_bounds_value_m": sdf_grid.out_of_bounds_value_m,
+            "joint_lower": self._torch_tensor(self.joint_lower_limits, device=device),
+            "joint_upper": self._torch_tensor(self.joint_upper_limits, device=device),
+        }
+        self._torch_cache[cache_key] = cache
+        return cache
+
+    @staticmethod
+    def _torch_rpy_matrix(rpy, *, device, dtype):
+        roll, pitch, yaw = [torch.as_tensor(float(v), device=device, dtype=dtype) for v in rpy]
+        cr, sr = torch.cos(roll), torch.sin(roll)
+        cp, sp = torch.cos(pitch), torch.sin(pitch)
+        cy, sy = torch.cos(yaw), torch.sin(yaw)
+        rx = torch.stack([
+            torch.stack([torch.ones_like(cr), torch.zeros_like(cr), torch.zeros_like(cr)]),
+            torch.stack([torch.zeros_like(cr), cr, -sr]),
+            torch.stack([torch.zeros_like(cr), sr, cr]),
+        ])
+        ry = torch.stack([
+            torch.stack([cp, torch.zeros_like(cp), sp]),
+            torch.stack([torch.zeros_like(cp), torch.ones_like(cp), torch.zeros_like(cp)]),
+            torch.stack([-sp, torch.zeros_like(cp), cp]),
+        ])
+        rz = torch.stack([
+            torch.stack([cy, -sy, torch.zeros_like(cy)]),
+            torch.stack([sy, cy, torch.zeros_like(cy)]),
+            torch.stack([torch.zeros_like(cy), torch.zeros_like(cy), torch.ones_like(cy)]),
+        ])
+        return rz @ ry @ rx
+
+    @staticmethod
+    def _torch_axis_angle_matrix(axis, angle):
+        axis = axis / torch.clamp(torch.linalg.norm(axis), min=1.0e-8)
+        x, y, z = axis
+        zero = torch.zeros_like(angle)
+        k = torch.stack([
+            torch.stack([zero, -z.expand_as(angle), y.expand_as(angle)], dim=-1),
+            torch.stack([z.expand_as(angle), zero, -x.expand_as(angle)], dim=-1),
+            torch.stack([-y.expand_as(angle), x.expand_as(angle), zero], dim=-1),
+        ], dim=-2)
+        eye = torch.eye(3, device=angle.device, dtype=angle.dtype).expand(angle.shape + (3, 3))
+        return eye + torch.sin(angle)[..., None, None] * k + (1.0 - torch.cos(angle))[..., None, None] * (k @ k)
+
+    @staticmethod
+    def _torch_make_transform(rotation, translation):
+        batch_shape = rotation.shape[:-2]
+        transform = torch.eye(4, device=rotation.device, dtype=rotation.dtype).expand(batch_shape + (4, 4)).clone()
+        transform[..., :3, :3] = rotation
+        transform[..., :3, 3] = translation
+        return transform
+
+    def _torch_origin_transform(self, xyz, rpy, *, batch_shape, device, dtype):
+        rotation = self._torch_rpy_matrix(rpy, device=device, dtype=dtype).expand(batch_shape + (3, 3))
+        translation = torch.as_tensor(xyz, device=device, dtype=dtype).expand(batch_shape + (3,))
+        return self._torch_make_transform(rotation, translation)
+
+    def normalized_to_actual_torch(self, q_normalized):
+        cache = self._torch_geometry_cache(device=q_normalized.device)
+        lower = cache["joint_lower"].to(dtype=q_normalized.dtype)
+        upper = cache["joint_upper"].to(dtype=q_normalized.dtype)
+        return lower + (q_normalized + 1.0) * 0.5 * (upper - lower)
+
+    def _torch_fk_transforms(self, q_flat):
+        if torch is None:
+            raise RuntimeError("torch is not available")
+        q_flat = torch.as_tensor(q_flat, device=q_flat.device, dtype=torch.float32)
+        batch_shape = q_flat.shape[:-1]
+        device, dtype = q_flat.device, q_flat.dtype
+        joint_specs = [
+            ((0.0, 0.0, 0.163), (0.0, 0.0, 0.0), (0.0, 0.0, 1.0)),
+            ((0.0, 0.138, 0.0), (0.0, 1.57079632679, 0.0), (0.0, 1.0, 0.0)),
+            ((0.0, -0.131, 0.425), (0.0, 0.0, 0.0), (0.0, 1.0, 0.0)),
+            ((0.0, 0.0, 0.392), (0.0, 1.57079632679, 0.0), (0.0, 1.0, 0.0)),
+            ((0.0, 0.127, 0.0), (0.0, 0.0, 0.0), (0.0, 0.0, 1.0)),
+            ((0.0, 0.0, 0.1), (0.0, 0.0, 0.0), (0.0, 1.0, 0.0)),
+        ]
+        transform = torch.eye(4, device=device, dtype=dtype).expand(batch_shape + (4, 4)).clone()
+        joint_origins = []
+        joint_axes_world = []
+        for joint_index, (xyz, rpy, axis_tuple) in enumerate(joint_specs):
+            origin = self._torch_origin_transform(xyz, rpy, batch_shape=batch_shape, device=device, dtype=dtype)
+            joint_frame = transform @ origin
+            axis = torch.as_tensor(axis_tuple, device=device, dtype=dtype)
+            joint_origins.append(joint_frame[..., :3, 3])
+            joint_axes_world.append(joint_frame[..., :3, :3] @ axis)
+            rotation = self._torch_axis_angle_matrix(axis, q_flat[..., joint_index])
+            joint_tf = self._torch_make_transform(rotation, torch.zeros(batch_shape + (3,), device=device, dtype=dtype))
+            transform = transform @ origin @ joint_tf
+        wrist3_tf = transform
+        pen_fixed = self._torch_origin_transform(
+            (0.0, 0.1, 0.0),
+            (0.0, 1.5708, 1.5708),
+            batch_shape=batch_shape,
+            device=device,
+            dtype=dtype,
+        )
+        pen_tf = wrist3_tf @ pen_fixed
+        return {
+            "wrist3_tf": wrist3_tf,
+            "pen_tf": pen_tf,
+            "joint_origins": torch.stack(joint_origins, dim=-2),
+            "joint_axes_world": torch.stack(joint_axes_world, dim=-2),
+        }
+
+    def surface_world_points_torch(self, q_actual):
+        if torch is None:
+            raise RuntimeError("torch is not available")
+        q_actual = torch.as_tensor(q_actual, device=q_actual.device, dtype=torch.float32)
+        original_shape = q_actual.shape[:-1]
+        q_flat = q_actual.reshape(-1, q_actual.shape[-1])
+        device, dtype = q_flat.device, q_flat.dtype
+        cache = self._torch_geometry_cache(device=device)
+        fk = self._torch_fk_transforms(q_flat)
+        wrist3_tf = fk["wrist3_tf"]
+        pen_tf = fk["pen_tf"]
+
+        local_points = cache["local_points"].to(dtype=dtype)
+        link_is_pen = cache["link_is_pen"]
+        ones = torch.ones((local_points.shape[0], 1), device=device, dtype=dtype)
+        local_h = torch.cat([local_points, ones], dim=-1).T
+        wrist_points = (wrist3_tf @ local_h)[..., :3, :]
+        pen_points = (pen_tf @ local_h)[..., :3, :]
+        world = torch.where(link_is_pen.view(1, 1, -1), pen_points, wrist_points).transpose(-1, -2)
+        return world.reshape(original_shape + (local_points.shape[0], 3))
+
+    def surface_points_jacobian_torch(self, q_actual, flat_indices):
+        if torch is None:
+            raise RuntimeError("torch is not available")
+        q_actual = torch.as_tensor(q_actual, device=q_actual.device, dtype=torch.float32)
+        flat_indices = torch.as_tensor(flat_indices, device=q_actual.device, dtype=torch.long).reshape(-1)
+        q_flat = q_actual.reshape(-1, q_actual.shape[-1])
+        if q_flat.shape[0] != flat_indices.shape[0]:
+            raise ValueError(
+                "q_actual and flat_indices must have the same leading size, "
+                f"got {q_flat.shape[0]} and {flat_indices.shape[0]}"
+            )
+        device, dtype = q_flat.device, q_flat.dtype
+        cache = self._torch_geometry_cache(device=device)
+        local_points = cache["local_points"].to(dtype=dtype)[flat_indices]
+        link_is_pen = cache["link_is_pen"][flat_indices]
+        fk = self._torch_fk_transforms(q_flat)
+        ones = torch.ones((local_points.shape[0], 1), device=device, dtype=dtype)
+        local_h = torch.cat([local_points, ones], dim=-1).unsqueeze(-1)
+        wrist_points = (fk["wrist3_tf"] @ local_h)[..., :3, 0]
+        pen_points = (fk["pen_tf"] @ local_h)[..., :3, 0]
+        world_points = torch.where(link_is_pen[:, None], pen_points, wrist_points)
+        joint_origins = fk["joint_origins"]
+        joint_axes = fk["joint_axes_world"]
+        jacobian = torch.cross(
+            joint_axes,
+            world_points[:, None, :] - joint_origins,
+            dim=-1,
+        )
+        return world_points, jacobian
+
+    def sdf_gradient_torch(self, points_world):
+        points_world = torch.as_tensor(points_world, device=points_world.device, dtype=torch.float32)
+        cache = self._torch_geometry_cache(device=points_world.device)
+        x_axis = cache["x_axis"]
+        y_axis = cache["y_axis"]
+        z_axis = cache["z_axis"]
+        eps = torch.stack([
+            torch.clamp((x_axis[-1] - x_axis[0]) / max(int(x_axis.numel()) - 1, 1), min=1.0e-5),
+            torch.clamp((y_axis[-1] - y_axis[0]) / max(int(y_axis.numel()) - 1, 1), min=1.0e-5),
+            torch.clamp((z_axis[-1] - z_axis[0]) / max(int(z_axis.numel()) - 1, 1), min=1.0e-5),
+        ]).to(device=points_world.device, dtype=points_world.dtype)
+        basis = torch.eye(3, device=points_world.device, dtype=points_world.dtype)
+        grads = []
+        for axis_index in range(3):
+            offset = basis[axis_index] * eps[axis_index]
+            f_pos = self.query_sdf_torch(points_world + offset)
+            f_neg = self.query_sdf_torch(points_world - offset)
+            grads.append((f_pos - f_neg) / (2.0 * eps[axis_index]))
+        return torch.stack(grads, dim=-1)
+
+    @staticmethod
+    def _torch_axis_query(axis, values):
+        idx = torch.searchsorted(axis, values.contiguous(), right=False)
+        idx0 = torch.clamp(idx - 1, min=0, max=axis.numel() - 2)
+        idx1 = idx0 + 1
+        denom = torch.clamp(axis[idx1] - axis[idx0], min=1.0e-8)
+        t = torch.clamp((values - axis[idx0]) / denom, 0.0, 1.0)
+        return idx0, idx1, t
+
+    def query_sdf_torch(self, points_world):
+        cache = self._torch_geometry_cache(device=points_world.device)
+        points = points_world.reshape(-1, 3).to(dtype=torch.float32)
+        x, y, z = cache["x_axis"], cache["y_axis"], cache["z_axis"]
+        sdf = cache["sdf"]
+        valid = (
+            (points[:, 0] >= x[0]) & (points[:, 0] <= x[-1]) &
+            (points[:, 1] >= y[0]) & (points[:, 1] <= y[-1]) &
+            (points[:, 2] >= z[0]) & (points[:, 2] <= z[-1])
+        )
+        if cache["out_of_bounds_value_m"] is None:
+            values = torch.full((points.shape[0],), torch.nan, device=points.device, dtype=points.dtype)
+        else:
+            values = torch.full((points.shape[0],), float(cache["out_of_bounds_value_m"]), device=points.device, dtype=points.dtype)
+        if torch.any(valid):
+            vp = points[valid]
+            ix0, ix1, tx = self._torch_axis_query(x, vp[:, 0])
+            iy0, iy1, ty = self._torch_axis_query(y, vp[:, 1])
+            iz0, iz1, tz = self._torch_axis_query(z, vp[:, 2])
+            c000 = sdf[ix0, iy0, iz0]
+            c100 = sdf[ix1, iy0, iz0]
+            c010 = sdf[ix0, iy1, iz0]
+            c110 = sdf[ix1, iy1, iz0]
+            c001 = sdf[ix0, iy0, iz1]
+            c101 = sdf[ix1, iy0, iz1]
+            c011 = sdf[ix0, iy1, iz1]
+            c111 = sdf[ix1, iy1, iz1]
+            c00 = c000 * (1.0 - tx) + c100 * tx
+            c10 = c010 * (1.0 - tx) + c110 * tx
+            c01 = c001 * (1.0 - tx) + c101 * tx
+            c11 = c011 * (1.0 - tx) + c111 * tx
+            c0 = c00 * (1.0 - ty) + c10 * ty
+            c1 = c01 * (1.0 - ty) + c11 * ty
+            values[valid] = c0 * (1.0 - tz) + c1 * tz
+        return values.reshape(points_world.shape[:-1])
 
     def normalized_to_actual(self, q_normalized: np.ndarray) -> np.ndarray:
         q_normalized = np.asarray(q_normalized, dtype=np.float32)
@@ -750,6 +1019,156 @@ def build_segment_window_cbf_constraints(
 
     all_constraints.sort(key=lambda item: (int(item["segment_index"]), float(item["h_value"]), int(item["t_index"])))
     return all_constraints[: int(max_active)], selected_segments, sorted(set(int(v) for v in selected_timesteps))
+
+
+def build_segment_window_cbf_constraints_torch(
+    *,
+    segments: Sequence[dict[str, Any]],
+    sdf_result: dict[str, Any],
+    check_basis: np.ndarray,
+    q_check_norm: np.ndarray,
+    environment: PyBulletSurfaceEnvironmentAdapter,
+    d_trigger: float,
+    points_per_segment: int,
+    min_constraints_per_segment: int,
+    window_radius: int,
+    max_active: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[int]]:
+    if torch is None or not environment.torch_available():
+        return build_segment_window_cbf_constraints(
+            segments=segments,
+            sdf_result=sdf_result,
+            check_basis=check_basis,
+            q_check_norm=q_check_norm,
+            environment=environment,
+            d_trigger=d_trigger,
+            points_per_segment=points_per_segment,
+            min_constraints_per_segment=min_constraints_per_segment,
+            window_radius=window_radius,
+            max_active=max_active,
+        )
+
+    all_sdf = np.asarray(sdf_result.get("all_sdf_values", np.empty((0, 0), dtype=np.float32)), dtype=np.float32)
+    if all_sdf.size == 0 or all_sdf.ndim != 2 or not segments:
+        return [], [], []
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    selected_segments: list[dict[str, Any]] = []
+    selected_timesteps: list[int] = []
+    selected_pairs: list[tuple[int, int, int]] = []
+    pair_segments: list[int] = []
+
+    for segment in segments:
+        window_timesteps = _build_segment_window(
+            segment,
+            horizon=all_sdf.shape[0],
+            window_radius=window_radius,
+        )
+        anchor_timesteps = select_segment_window_timesteps(
+            sdf_result=sdf_result,
+            segment=segment,
+            points_per_segment=points_per_segment,
+            window_radius=window_radius,
+        )
+        if not anchor_timesteps:
+            continue
+        segment_pairs: list[tuple[float, int, int]] = []
+        candidate_timesteps = list(anchor_timesteps)
+        if len(candidate_timesteps) < int(min_constraints_per_segment):
+            candidate_timesteps = sorted(set(candidate_timesteps + window_timesteps))
+        for timestep in candidate_timesteps:
+            step_sdf = np.asarray(all_sdf[timestep], dtype=np.float32).reshape(-1)
+            finite_indices = np.flatnonzero(np.isfinite(step_sdf))
+            if finite_indices.size == 0:
+                continue
+            ordered_indices = finite_indices[np.argsort(step_sdf[finite_indices])]
+            take_count = max(1, int(points_per_segment))
+            if len(segment_pairs) < int(min_constraints_per_segment):
+                take_count = max(take_count, int(min_constraints_per_segment) - len(segment_pairs))
+            for flat_index in ordered_indices[:take_count]:
+                segment_pairs.append((float(step_sdf[int(flat_index)]), int(timestep), int(flat_index)))
+        deduped_pairs: list[tuple[float, int, int]] = []
+        seen_keys: set[tuple[int, int]] = set()
+        for h_value, timestep, flat_index in sorted(segment_pairs, key=lambda item: (item[0], item[1], item[2])):
+            key = (int(timestep), int(flat_index))
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            deduped_pairs.append((float(h_value), int(timestep), int(flat_index)))
+            if len(deduped_pairs) >= max(int(min_constraints_per_segment), int(points_per_segment)):
+                break
+        if not deduped_pairs:
+            continue
+        selected_segments.append(
+            {
+                "segment_index": int(segment["segment_index"]),
+                "start_timestep": int(segment["start_timestep"]),
+                "end_timestep": int(segment["end_timestep"]),
+                "peak_timestep": int(segment["peak_timestep"]),
+                "risk_score": float(segment["risk_score"]),
+                "window_timesteps": [int(v) for v in window_timesteps],
+                "anchor_timesteps": [int(v) for v in anchor_timesteps],
+                "constraint_count": int(len(deduped_pairs)),
+            }
+        )
+        selected_timesteps.extend(window_timesteps)
+        for h_value, timestep, flat_index in deduped_pairs:
+            selected_pairs.append((int(timestep), int(flat_index), int(len(selected_segments) - 1)))
+            pair_segments.append(int(segment["segment_index"]))
+
+    if not selected_pairs:
+        return [], selected_segments, sorted(set(int(v) for v in selected_timesteps))
+
+    selected_pairs = selected_pairs[: int(max_active)]
+    pair_segments = pair_segments[: int(max_active)]
+    timesteps_np = np.asarray([pair[0] for pair in selected_pairs], dtype=np.int64)
+    flat_indices_np = np.asarray([pair[1] for pair in selected_pairs], dtype=np.int64)
+    q_norm_np = np.asarray(q_check_norm, dtype=np.float32)[timesteps_np]
+    try:
+        q_norm_t = torch.as_tensor(q_norm_np, device=device, dtype=torch.float32)
+        q_actual_t = environment.normalized_to_actual_torch(q_norm_t)
+        flat_indices_t = torch.as_tensor(flat_indices_np, device=device, dtype=torch.long)
+        world_points_t, jacobian_t = environment.surface_points_jacobian_torch(q_actual_t, flat_indices_t)
+        grad_t = environment.sdf_gradient_torch(world_points_t)
+        g_actual_t = torch.sum(jacobian_t * grad_t[:, None, :], dim=-1)
+        g_actual_np = g_actual_t.detach().cpu().numpy().astype(np.float32)
+    except (RuntimeError, ValueError, IndexError):
+        return build_segment_window_cbf_constraints(
+            segments=segments,
+            sdf_result=sdf_result,
+            check_basis=check_basis,
+            q_check_norm=q_check_norm,
+            environment=environment,
+            d_trigger=d_trigger,
+            points_per_segment=points_per_segment,
+            min_constraints_per_segment=min_constraints_per_segment,
+            window_radius=window_radius,
+            max_active=max_active,
+        )
+
+    constraints: list[dict[str, Any]] = []
+    for row_index, (timestep, flat_index, selected_segment_index) in enumerate(selected_pairs):
+        sample_info = _flat_index_to_surface_sample(environment.surface_samples, int(flat_index))
+        if sample_info is None:
+            continue
+        constraints.append(
+            {
+                "segment_index": int(pair_segments[row_index]),
+                "t_index": int(timestep),
+                "h_value": float(all_sdf[int(timestep), int(flat_index)]),
+                "basis_row": np.asarray(check_basis[int(timestep)], dtype=np.float32),
+                "g_actual": np.asarray(g_actual_np[row_index], dtype=np.float32),
+                "link_index": int(sample_info["link_index"]),
+                "point_index": int(sample_info["point_index"]),
+                "linearization_backend": "torch",
+            }
+        )
+        selected_segments[int(selected_segment_index)]["constraint_count"] = int(
+            selected_segments[int(selected_segment_index)]["constraint_count"]
+        )
+
+    constraints.sort(key=lambda item: (int(item["segment_index"]), float(item["h_value"]), int(item["t_index"])))
+    return constraints[: int(max_active)], selected_segments, sorted(set(int(v) for v in selected_timesteps))
 
 
 def build_collision_windows_from_clearance(
