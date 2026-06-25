@@ -1162,6 +1162,61 @@ def predict_late_stage_qp_guided_outputs(
     }
 
 
+def select_late_stage_topk_residuals_for_post_qp(
+    *,
+    guidance_payload: dict,
+    top_k: int,
+) -> tuple[list[np.ndarray], list[int]]:
+    final_candidates = list(guidance_payload.get("guidance_candidates", []) or [])
+    final_by_index = {
+        int(candidate_info.get("candidate_index", -1)): candidate_info
+        for candidate_info in final_candidates
+    }
+    guidance_log = dict(guidance_payload.get("guidance_log", {}) or {})
+    last_step_infos: list[dict[str, object]] = []
+    for step_info in reversed(list(guidance_log.get("guidance_step_infos", []) or [])):
+        candidate_infos = list(step_info.get("candidate_infos", []) or [])
+        if candidate_infos:
+            last_step_infos = candidate_infos
+            break
+
+    if last_step_infos:
+        ordered_indices = [
+            int(info.get("candidate_index", -1))
+            for info in sorted(
+                last_step_infos,
+                key=lambda info: (
+                    float("inf")
+                    if not np.isfinite(float(info.get("repairability_score", float("inf"))))
+                    else float(info.get("repairability_score", float("inf"))),
+                    int(info.get("candidate_index", -1)),
+                ),
+            )
+        ]
+    else:
+        ordered_indices = [
+            int(candidate_info.get("candidate_index", -1))
+            for candidate_info in final_candidates
+        ]
+
+    selected_residuals: list[np.ndarray] = []
+    selected_indices: list[int] = []
+    for candidate_index in ordered_indices:
+        if candidate_index not in final_by_index:
+            continue
+        residual = np.asarray(
+            final_by_index[candidate_index].get("normalized_free_residual", np.empty((0, 0))),
+            dtype=np.float32,
+        )
+        if residual.size == 0:
+            continue
+        selected_residuals.append(residual)
+        selected_indices.append(int(candidate_index))
+        if len(selected_residuals) >= int(top_k):
+            break
+    return selected_residuals, selected_indices
+
+
 def predict_qp_guided_diffusion_then_post_qp_outputs(
     *,
     npz_path: pathlib.Path,
@@ -1192,12 +1247,10 @@ def predict_qp_guided_diffusion_then_post_qp_outputs(
         workpiece_id=workpiece_id,
         generator=generator,
     )
-    candidate_infos = list(guidance_payload.get("guidance_candidates", []) or [])
-    candidate_residuals = [
-        np.asarray(candidate_info.get("normalized_free_residual"), dtype=np.float32)
-        for candidate_info in candidate_infos
-        if np.asarray(candidate_info.get("normalized_free_residual", np.empty((0, 0))), dtype=np.float32).size > 0
-    ]
+    candidate_residuals, selected_late_stage_indices = select_late_stage_topk_residuals_for_post_qp(
+        guidance_payload=guidance_payload,
+        top_k=max(1, int(args.qp_candidates)),
+    )
     if not candidate_residuals:
         return guided_outputs, guidance_payload
 
@@ -1290,6 +1343,8 @@ def predict_qp_guided_diffusion_then_post_qp_outputs(
             "planner_mode": "qp_guided_diffusion_post_qp",
             "late_stage_guidance_log": dict(guidance_payload.get("guidance_log", {}) or {}),
             "late_stage_planning_success": bool(guidance_payload.get("planning_success", False)),
+            "combined_post_qp_candidate_indices": [int(v) for v in selected_late_stage_indices],
+            "combined_post_qp_candidate_count": int(len(candidate_residuals)),
         },
         "guided_joint_trajectory": guided_joint_trajectory,
         "guided_control_points_normalized": post_result.best_control_points_normalized,
