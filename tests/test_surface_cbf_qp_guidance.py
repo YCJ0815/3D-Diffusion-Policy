@@ -45,12 +45,12 @@ class SurfaceCBFQPGuidanceHelperTests(unittest.TestCase):
         if LateStageQPGuidedDDIMConfig is None:
             self.skipTest("torch is not installed in this test environment")
         config = LateStageQPGuidedDDIMConfig()
-        self.assertEqual(config.guidance_steps, 10)
+        self.assertEqual(config.guidance_steps, 3)
         self.assertEqual(config.guidance_timesteps, ())
         self.assertEqual(config.qp_candidates, 4)
         self.assertEqual(config.qp_inner_scp_rounds, 2)
         self.assertEqual(config.coarse_check_steps, 32)
-        self.assertEqual(config.blend_weights, (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0))
+        self.assertEqual(config.blend_weights, (0.25, 0.5, 0.75))
         self.assertEqual(config.repair_score_weights, (1.0, 10.0, 1.0))
 
     def test_ddim_x0_override_step_uses_override_in_previous_sample(self):
