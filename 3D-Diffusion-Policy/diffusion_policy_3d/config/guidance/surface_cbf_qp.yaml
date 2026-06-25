@@ -11,8 +11,8 @@ surface_cbf_qp_guidance:
     coarse_check_steps: 32
     guidance_pen_link_points: 80
     guidance_wrist3_points: 16
-    final_post_qp_candidates: 1
-    final_backup_candidates: 1
+    final_post_qp_candidates: 4
+    final_backup_candidates: 4
     final_post_qp_rounds: 2
     guidance_trigger_distance: 0.06
     guidance_safe_distance: 0.05

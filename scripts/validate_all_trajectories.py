@@ -2022,12 +2022,14 @@ def main() -> None:
         raise ValueError(f"qp-inner-scp-rounds must be positive, got {args.qp_inner_scp_rounds}")
     if args.coarse_check_steps <= 1:
         raise ValueError(f"coarse-check-steps must be greater than 1, got {args.coarse_check_steps}")
+    planner_mode = str(getattr(args, "planner_mode", "baseline"))
+    uses_late_stage_guidance = planner_mode in {"qp_guided_diffusion", "qp_guided_diffusion_post_qp"}
     guidance_timesteps = list(args.guidance_timesteps or [])
-    if guidance_timesteps and any(int(v) <= 0 for v in guidance_timesteps):
+    if uses_late_stage_guidance and guidance_timesteps and any(int(v) <= 0 for v in guidance_timesteps):
         raise ValueError(f"guidance-timesteps must contain positive integers, got {args.guidance_timesteps}")
     if int(args.num_inference_steps) <= 0:
         raise ValueError(f"num-inference-steps must be positive, got {args.num_inference_steps}")
-    if guidance_timesteps and max(int(v) for v in guidance_timesteps) > int(args.num_inference_steps):
+    if uses_late_stage_guidance and guidance_timesteps and max(int(v) for v in guidance_timesteps) > int(args.num_inference_steps):
         raise ValueError(
             "guidance-timesteps cannot exceed num-inference-steps, "
             f"got {args.guidance_timesteps} vs {args.num_inference_steps}"
@@ -2045,7 +2047,7 @@ def main() -> None:
     if args.trust_region_start > args.trust_region_end:
         raise ValueError("trust-region-start must be <= trust-region-end")
     expected_blend_count = len(guidance_timesteps) if guidance_timesteps else int(args.guidance_steps)
-    if len(args.blend_weights) != expected_blend_count:
+    if uses_late_stage_guidance and len(args.blend_weights) != expected_blend_count:
         raise ValueError(
             "blend-weights length must match explicit guidance-timesteps, or guidance-steps when timesteps are empty, "
             f"got {len(args.blend_weights)} vs {expected_blend_count}"
