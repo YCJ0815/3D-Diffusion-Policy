@@ -33,7 +33,11 @@ from guidance_config import (
 )
 
 
-QP_GUIDED_SURFACE_POINTS_PER_LINK = {"pen_link": 80, "wrist_3_link": 16}
+def qp_guided_surface_points_per_link(args) -> dict[str, int]:
+    return {
+        "pen_link": int(args.guidance_pen_link_points),
+        "wrist_3_link": int(args.guidance_wrist3_points),
+    }
 
 
 def _format_qp_skip_reason(reason: str | None) -> str:
@@ -1074,7 +1078,7 @@ def predict_late_stage_qp_guided_outputs(
         workpiece_id=workpiece_id,
         joint_lower_limits=planning_result.joint_lower_limits,
         joint_upper_limits=planning_result.joint_upper_limits,
-        surface_points_per_link_override=QP_GUIDED_SURFACE_POINTS_PER_LINK,
+        surface_points_per_link_override=qp_guided_surface_points_per_link(args),
     )
     scp_config = SurfaceCBFQPGuidanceConfig(
         enabled=True,
@@ -1120,6 +1124,7 @@ def predict_late_stage_qp_guided_outputs(
         enabled=True,
         num_candidates=int(args.num_candidates),
         guidance_steps=int(args.guidance_steps),
+        guidance_timesteps=tuple(int(v) for v in args.guidance_timesteps),
         qp_candidates=int(args.qp_candidates),
         qp_inner_scp_rounds=int(args.qp_inner_scp_rounds),
         coarse_check_steps=int(args.coarse_check_steps),
@@ -1253,7 +1258,7 @@ def predict_qp_guided_diffusion_then_post_qp_outputs(
     )
     candidate_residuals, selected_late_stage_indices = select_late_stage_topk_residuals_for_post_qp(
         guidance_payload=guidance_payload,
-        top_k=max(1, int(args.qp_candidates)),
+        top_k=max(1, int(args.final_post_qp_candidates) + int(args.final_backup_candidates)),
     )
     if not candidate_residuals:
         return guided_outputs, guidance_payload
@@ -1268,7 +1273,7 @@ def predict_qp_guided_diffusion_then_post_qp_outputs(
         workpiece_id=workpiece_id,
         joint_lower_limits=planning_result.joint_lower_limits,
         joint_upper_limits=planning_result.joint_upper_limits,
-        surface_points_per_link_override=QP_GUIDED_SURFACE_POINTS_PER_LINK,
+        surface_points_per_link_override=qp_guided_surface_points_per_link(args),
     )
     guidance_config = SurfaceCBFQPGuidanceConfig(
         enabled=True,
@@ -1287,7 +1292,7 @@ def predict_qp_guided_diffusion_then_post_qp_outputs(
         d_cert=float(args.guidance_d_cert),
         eps_deep=float(args.guidance_eps_deep),
         delta_max=float(args.guidance_delta_max),
-        scp_iterations=int(args.guidance_scp_iterations),
+        scp_iterations=int(args.final_post_qp_rounds),
         delta_max_total=float(args.guidance_delta_max_total),
         delta_max_pass1=float(args.guidance_delta_max_pass1),
         delta_max_pass2=float(args.guidance_delta_max_pass2),

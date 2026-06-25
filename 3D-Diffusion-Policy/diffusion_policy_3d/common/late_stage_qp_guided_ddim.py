@@ -34,9 +34,10 @@ class LateStageQPGuidedDDIMConfig:
     enabled: bool = True
     num_candidates: int = 32
     guidance_steps: int = 3
-    qp_candidates: int = 4
-    qp_inner_scp_rounds: int = 2
-    coarse_check_steps: int = 32
+    guidance_timesteps: tuple[int, ...] = (10, 5, 1)
+    qp_candidates: int = 2
+    qp_inner_scp_rounds: int = 1
+    coarse_check_steps: int = 16
     guidance_trigger_distance: float = 0.06
     guidance_safe_distance: float = 0.05
     trust_region_start: float = 0.015
@@ -569,16 +570,27 @@ def sample_late_stage_qp_guided_ddim(
     guidance_step_infos: list[dict[str, Any]] = []
     diffusion_time = 0.0
     guided_qp_time = 0.0
-    guidance_steps = min(int(guidance_runner.config.guidance_steps), len(timesteps))
+    configured_guidance_timesteps = tuple(
+        int(v)
+        for v in getattr(guidance_runner.config, "guidance_timesteps", ())
+        if int(v) > 0
+    )
+    guidance_remaining_steps = tuple(
+        sorted(set(configured_guidance_timesteps), reverse=True)
+    ) or tuple(range(min(int(guidance_runner.config.guidance_steps), len(timesteps)), 0, -1))
+    guidance_step_lookup = {
+        int(remaining_step): int(index)
+        for index, remaining_step in enumerate(guidance_remaining_steps)
+    }
     for step_index, timestep in enumerate(timesteps):
         noisy[cond_mask] = cond_data[cond_mask]
         model_start = time.perf_counter()
         model_output = policy.model(sample=noisy, timestep=timestep, local_cond=local_cond, global_cond=global_cond)
         diffusion_time += time.perf_counter() - model_start
         tail_index = len(timesteps) - step_index
-        if tail_index <= guidance_steps:
+        if int(tail_index) in guidance_step_lookup:
             x0_hat = predict_x0_from_model_output(scheduler, noisy, model_output, timestep)
-            guidance_index = guidance_steps - tail_index
+            guidance_index = guidance_step_lookup[int(tail_index)]
             guided_np, candidate_infos, timing = guidance_runner.guide_x0_candidates(
                 x0_candidates=x0_hat.detach().cpu().numpy(),
                 guidance_step_index=int(guidance_index),

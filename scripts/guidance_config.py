@@ -24,9 +24,15 @@ GUIDANCE_CONFIG_FALLBACKS: dict[str, Any] = {
     "enable_surface_cbf_qp_guidance": False,
     "num_candidates": 32,
     "candidate_inference_steps": None,
-    "qp_candidates": 4,
-    "qp_inner_scp_rounds": 2,
-    "coarse_check_steps": 32,
+    "qp_candidates": 2,
+    "guidance_timesteps": [10, 5, 1],
+    "qp_inner_scp_rounds": 1,
+    "coarse_check_steps": 16,
+    "guidance_pen_link_points": 24,
+    "guidance_wrist3_points": 8,
+    "final_post_qp_candidates": 1,
+    "final_backup_candidates": 1,
+    "final_post_qp_rounds": 2,
     "guidance_trigger_distance": 0.06,
     "guidance_safe_distance": 0.05,
     "trust_region_start": 0.015,
@@ -38,9 +44,9 @@ GUIDANCE_CONFIG_FALLBACKS: dict[str, Any] = {
     "guidance_window_radius": 2,
     "guidance_points_per_segment": 2,
     "guidance_min_constraints_per_segment": 4,
-    "guidance_active_constraints": 24,
+    "guidance_active_constraints": 8,
     "guidance_check_steps": 64,
-    "guidance_cert_steps": 256,
+    "guidance_cert_steps": 64,
     "guidance_cert_swept_intermediate": 3,
     "guidance_d_safe": 0.03,
     "guidance_d_trigger": 0.06,
@@ -79,8 +85,14 @@ GUIDANCE_CONFIG_KEY_PATHS: dict[str, tuple[str, ...]] = {
     "num_candidates": ("surface_cbf_qp_guidance", "num_candidates"),
     "candidate_inference_steps": ("surface_cbf_qp_guidance", "candidate_inference_steps"),
     "qp_candidates": ("surface_cbf_qp_guidance", "qp_guided_diffusion", "qp_candidates"),
+    "guidance_timesteps": ("surface_cbf_qp_guidance", "qp_guided_diffusion", "guidance_timesteps"),
     "qp_inner_scp_rounds": ("surface_cbf_qp_guidance", "qp_guided_diffusion", "qp_inner_scp_rounds"),
     "coarse_check_steps": ("surface_cbf_qp_guidance", "qp_guided_diffusion", "coarse_check_steps"),
+    "guidance_pen_link_points": ("surface_cbf_qp_guidance", "qp_guided_diffusion", "guidance_pen_link_points"),
+    "guidance_wrist3_points": ("surface_cbf_qp_guidance", "qp_guided_diffusion", "guidance_wrist3_points"),
+    "final_post_qp_candidates": ("surface_cbf_qp_guidance", "qp_guided_diffusion", "final_post_qp_candidates"),
+    "final_backup_candidates": ("surface_cbf_qp_guidance", "qp_guided_diffusion", "final_backup_candidates"),
+    "final_post_qp_rounds": ("surface_cbf_qp_guidance", "qp_guided_diffusion", "final_post_qp_rounds"),
     "guidance_trigger_distance": ("surface_cbf_qp_guidance", "qp_guided_diffusion", "guidance_trigger_distance"),
     "guidance_safe_distance": ("surface_cbf_qp_guidance", "qp_guided_diffusion", "guidance_safe_distance"),
     "trust_region_start": ("surface_cbf_qp_guidance", "qp_guided_diffusion", "trust_region_start"),
@@ -139,7 +151,13 @@ GUIDANCE_PARAMETER_GROUPS: dict[str, tuple[str, ...]] = {
         "guidance_steps",
         "guidance_ddim_eta",
         "qp_candidates",
+        "guidance_timesteps",
         "blend_weights",
+        "guidance_pen_link_points",
+        "guidance_wrist3_points",
+        "final_post_qp_candidates",
+        "final_backup_candidates",
+        "final_post_qp_rounds",
     ),
     "cbf_thresholds": (
         "guidance_d_safe",
@@ -250,8 +268,14 @@ def add_surface_cbf_qp_guidance_parser_args(
             help="Optional override for diffusion inference steps during candidate or guided sampling.",
         )
     parser.add_argument("--qp-candidates", type=int, default=argparse.SUPPRESS)
+    parser.add_argument("--guidance-timesteps", type=int, nargs="+", default=argparse.SUPPRESS)
     parser.add_argument("--qp-inner-scp-rounds", type=int, default=argparse.SUPPRESS)
     parser.add_argument("--coarse-check-steps", type=int, default=argparse.SUPPRESS)
+    parser.add_argument("--guidance-pen-link-points", type=int, default=argparse.SUPPRESS)
+    parser.add_argument("--guidance-wrist3-points", type=int, default=argparse.SUPPRESS)
+    parser.add_argument("--final-post-qp-candidates", type=int, default=argparse.SUPPRESS)
+    parser.add_argument("--final-backup-candidates", type=int, default=argparse.SUPPRESS)
+    parser.add_argument("--final-post-qp-rounds", type=int, default=argparse.SUPPRESS)
     parser.add_argument("--guidance-trigger-distance", type=float, default=argparse.SUPPRESS)
     parser.add_argument("--guidance-safe-distance", type=float, default=argparse.SUPPRESS)
     parser.add_argument("--trust-region-start", type=float, default=argparse.SUPPRESS)
@@ -364,8 +388,14 @@ def apply_surface_cbf_qp_guidance_config(
         "planner_mode",
         "enable_surface_cbf_qp_guidance",
         "qp_candidates",
+        "guidance_timesteps",
         "qp_inner_scp_rounds",
         "coarse_check_steps",
+        "guidance_pen_link_points",
+        "guidance_wrist3_points",
+        "final_post_qp_candidates",
+        "final_backup_candidates",
+        "final_post_qp_rounds",
         "guidance_trigger_distance",
         "guidance_safe_distance",
         "trust_region_start",
@@ -445,8 +475,14 @@ def build_surface_cbf_qp_parameter_summary(
         "planner_mode",
         "enable_surface_cbf_qp_guidance",
         "qp_candidates",
+        "guidance_timesteps",
         "qp_inner_scp_rounds",
         "coarse_check_steps",
+        "guidance_pen_link_points",
+        "guidance_wrist3_points",
+        "final_post_qp_candidates",
+        "final_backup_candidates",
+        "final_post_qp_rounds",
         "guidance_trigger_distance",
         "guidance_safe_distance",
         "trust_region_start",

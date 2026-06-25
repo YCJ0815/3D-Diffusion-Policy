@@ -53,7 +53,11 @@ from guidance_config import (  # noqa: E402
 )
 
 
-QP_GUIDED_SURFACE_POINTS_PER_LINK = {"pen_link": 80, "wrist_3_link": 16}
+def _qp_guided_surface_points_per_link(args) -> dict[str, int]:
+    return {
+        "pen_link": int(args.guidance_pen_link_points),
+        "wrist_3_link": int(args.guidance_wrist3_points),
+    }
 
 
 def _format_qp_skip_reason(reason: str | None) -> str:
@@ -406,6 +410,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Limit validation episodes (for smoke tests).",
     )
     parser.add_argument(
+        "--random-sample-episodes",
+        type=int,
+        default=None,
+        help=(
+            "Randomly sample this many validation episodes after job-type and "
+            "trajopt-success filtering. Use with --random-sample-seed for reproducibility."
+        ),
+    )
+    parser.add_argument(
+        "--random-sample-seed",
+        type=int,
+        default=42,
+        help="Seed for --random-sample-episodes.",
+    )
+    parser.add_argument(
         "--output-dir",
         type=str,
         default=None,
@@ -423,6 +442,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Number of output trajectory steps for B-spline reconstruction. "
              "Auto-detected from checkpoint config when omitted.",
+    )
+    parser.add_argument(
+        "--num-inference-steps",
+        type=int,
+        default=100,
+        help="DDIM denoising steps for validation inference.",
     )
     parser.add_argument(
         "--val-ratio",
@@ -1385,7 +1410,7 @@ def _predict_late_stage_qp_guided_diffusion(
         workpiece_id=int(workpiece_id),
         joint_lower_limits=np.asarray(validator.joint_lower_limits, dtype=np.float32),
         joint_upper_limits=np.asarray(validator.joint_upper_limits, dtype=np.float32),
-        surface_points_per_link_override=QP_GUIDED_SURFACE_POINTS_PER_LINK,
+        surface_points_per_link_override=_qp_guided_surface_points_per_link(args),
     )
     scp_config = SurfaceCBFQPGuidanceConfig(
         enabled=True,
@@ -1430,6 +1455,7 @@ def _predict_late_stage_qp_guided_diffusion(
         enabled=True,
         num_candidates=int(num_candidates),
         guidance_steps=int(args.guidance_steps),
+        guidance_timesteps=tuple(int(v) for v in args.guidance_timesteps),
         qp_candidates=int(args.qp_candidates),
         qp_inner_scp_rounds=int(args.qp_inner_scp_rounds),
         coarse_check_steps=int(args.coarse_check_steps),
@@ -1600,7 +1626,7 @@ def _predict_qp_guided_diffusion_then_post_qp(
     )
     candidate_residuals, selected_late_stage_indices = _select_late_stage_topk_residuals_for_post_qp(
         late_stage_selection=late_stage_selection,
-        top_k=max(1, int(args.qp_candidates)),
+        top_k=max(1, int(args.final_post_qp_candidates) + int(args.final_backup_candidates)),
     )
     if not candidate_residuals:
         late_stage_selection["planner_mode"] = "qp_guided_diffusion_post_qp"
@@ -1615,7 +1641,7 @@ def _predict_qp_guided_diffusion_then_post_qp(
         workpiece_id=int(workpiece_id),
         joint_lower_limits=np.asarray(validator.joint_lower_limits, dtype=np.float32),
         joint_upper_limits=np.asarray(validator.joint_upper_limits, dtype=np.float32),
-        surface_points_per_link_override=QP_GUIDED_SURFACE_POINTS_PER_LINK,
+        surface_points_per_link_override=_qp_guided_surface_points_per_link(args),
     )
     guidance_config = SurfaceCBFQPGuidanceConfig(
         enabled=True,
@@ -1634,7 +1660,7 @@ def _predict_qp_guided_diffusion_then_post_qp(
         d_cert=float(args.guidance_d_cert),
         eps_deep=float(args.guidance_eps_deep),
         delta_max=float(args.guidance_delta_max),
-        scp_iterations=int(args.guidance_scp_iterations),
+        scp_iterations=int(args.final_post_qp_rounds),
         delta_max_total=float(args.guidance_delta_max_total),
         delta_max_pass1=float(args.guidance_delta_max_pass1),
         delta_max_pass2=float(args.guidance_delta_max_pass2),
@@ -1924,14 +1950,31 @@ def main() -> None:
         raise ValueError(f"qp-inner-scp-rounds must be positive, got {args.qp_inner_scp_rounds}")
     if args.coarse_check_steps <= 1:
         raise ValueError(f"coarse-check-steps must be greater than 1, got {args.coarse_check_steps}")
+    if not args.guidance_timesteps or any(int(v) <= 0 for v in args.guidance_timesteps):
+        raise ValueError(f"guidance-timesteps must contain positive integers, got {args.guidance_timesteps}")
+    if int(args.num_inference_steps) <= 0:
+        raise ValueError(f"num-inference-steps must be positive, got {args.num_inference_steps}")
+    if max(int(v) for v in args.guidance_timesteps) > int(args.num_inference_steps):
+        raise ValueError(
+            "guidance-timesteps cannot exceed num-inference-steps, "
+            f"got {args.guidance_timesteps} vs {args.num_inference_steps}"
+        )
+    if args.guidance_pen_link_points <= 0 or args.guidance_wrist3_points <= 0:
+        raise ValueError("guidance-pen-link-points and guidance-wrist3-points must be positive")
+    if args.final_post_qp_candidates <= 0:
+        raise ValueError(f"final-post-qp-candidates must be positive, got {args.final_post_qp_candidates}")
+    if args.final_backup_candidates < 0:
+        raise ValueError(f"final-backup-candidates must be non-negative, got {args.final_backup_candidates}")
+    if args.final_post_qp_rounds <= 0:
+        raise ValueError(f"final-post-qp-rounds must be positive, got {args.final_post_qp_rounds}")
     if args.trust_region_start <= 0.0 or args.trust_region_end <= 0.0:
         raise ValueError("trust-region-start/end must be positive")
     if args.trust_region_start > args.trust_region_end:
         raise ValueError("trust-region-start must be <= trust-region-end")
-    if len(args.blend_weights) != args.guidance_steps:
+    if len(args.blend_weights) != len(args.guidance_timesteps):
         raise ValueError(
-            "blend-weights length must match guidance-steps, "
-            f"got {len(args.blend_weights)} vs {args.guidance_steps}"
+            "blend-weights length must match guidance-timesteps, "
+            f"got {len(args.blend_weights)} vs {len(args.guidance_timesteps)}"
         )
     if len(args.repair_score_weights) != 3:
         raise ValueError("repair-score-weights must contain exactly 3 values")
@@ -2044,6 +2087,7 @@ def main() -> None:
         simple_jobs_root=args.simple_jobs_root,
         target_steps=resolved_target_steps,
     )
+    pyb_cfg.inference_num_steps = int(args.num_inference_steps)
     if args.trajopt_success_only and args.trajopt_success_results_dir:
         trajopt_success_flags, trajopt_success_source = _resolve_trajopt_success_flags_from_results_json(
             replay_buffer=replay_buffer,
@@ -2121,6 +2165,25 @@ def main() -> None:
         print(
             "  trajopt_success_only=true -> filtered validation episodes: "
             f"{len(val_episode_indices)} / {before_trajopt_filter}"
+        )
+
+    if args.random_sample_episodes is not None:
+        if int(args.random_sample_episodes) <= 0:
+            raise ValueError(
+                f"--random-sample-episodes must be positive, got {args.random_sample_episodes}"
+            )
+        before_random_sample = len(val_episode_indices)
+        sample_count = min(int(args.random_sample_episodes), before_random_sample)
+        rng = np.random.default_rng(int(args.random_sample_seed))
+        if sample_count < before_random_sample:
+            selected_positions = np.sort(
+                rng.choice(before_random_sample, size=sample_count, replace=False)
+            )
+            val_episode_indices = np.asarray(val_episode_indices[selected_positions], dtype=np.int64)
+        print(
+            "  random_sample_episodes=true -> sampled validation episodes: "
+            f"{len(val_episode_indices)} / {before_random_sample} "
+            f"(seed={int(args.random_sample_seed)})"
         )
 
     if args.max_episodes is not None and args.max_episodes < len(val_episode_indices):
@@ -2421,6 +2484,8 @@ def main() -> None:
             "candidate_selection": str(pyb_cfg.candidate_selection),
             "inference_num_steps": pyb_cfg.inference_num_steps,
             "measure_inference_time": bool(args.measure_inference_time),
+            "random_sample_episodes": args.random_sample_episodes,
+            "random_sample_seed": int(args.random_sample_seed),
             "regular_jobs_only": bool(args.regular_jobs_only),
             "trajopt_success_only": bool(args.trajopt_success_only),
             "trajopt_success_key": args.trajopt_success_key,
@@ -2431,9 +2496,15 @@ def main() -> None:
             "single_episode_mode": args.single_episode_index is not None,
             "single_episode_validation_offset": args.single_episode_index,
             "guidance_steps": int(args.guidance_steps),
+            "guidance_timesteps": [int(v) for v in args.guidance_timesteps],
             "qp_candidates": int(args.qp_candidates),
             "qp_inner_scp_rounds": int(args.qp_inner_scp_rounds),
             "coarse_check_steps": int(args.coarse_check_steps),
+            "guidance_pen_link_points": int(args.guidance_pen_link_points),
+            "guidance_wrist3_points": int(args.guidance_wrist3_points),
+            "final_post_qp_candidates": int(args.final_post_qp_candidates),
+            "final_backup_candidates": int(args.final_backup_candidates),
+            "final_post_qp_rounds": int(args.final_post_qp_rounds),
             "guidance_trigger_distance": float(args.guidance_trigger_distance),
             "guidance_safe_distance": float(args.guidance_safe_distance),
             "trust_region_start": float(args.trust_region_start),
