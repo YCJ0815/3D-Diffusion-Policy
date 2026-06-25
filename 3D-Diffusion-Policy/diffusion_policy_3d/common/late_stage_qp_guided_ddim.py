@@ -45,6 +45,7 @@ class LateStageQPGuidedDDIMConfig:
     blend_weights: tuple[float, ...] = (0.25, 0.5, 0.75)
     repair_score_weights: tuple[float, float, float] = (1.0, 10.0, 1.0)
     ddim_eta: float = 0.0
+    skip_final_certification: bool = False
     scp_config: SurfaceCBFQPGuidanceConfig = field(default_factory=SurfaceCBFQPGuidanceConfig)
 
 
@@ -621,15 +622,38 @@ def sample_late_stage_qp_guided_ddim(
             noisy = scheduler.step(model_output, timestep, noisy, eta=eta, **step_kwargs).prev_sample
         noisy[cond_mask] = cond_data[cond_mask]
     final_x0 = noisy.detach().cpu().numpy().astype(np.float32)
-    result = guidance_runner.finalize_candidates(
-        x0_candidates=final_x0,
-        q_start_normalized=np.asarray(q_start_normalized, dtype=np.float32),
-        q_goal_normalized=np.asarray(q_goal_normalized, dtype=np.float32),
-        delta_w_mean=np.asarray(delta_w_mean, dtype=np.float32),
-        delta_w_std=np.asarray(delta_w_std, dtype=np.float32),
-        num_control_points=int(num_control_points),
-        spline_degree=int(spline_degree),
-    )
+    if bool(getattr(guidance_runner.config, "skip_final_certification", False)):
+        candidate_infos = [
+            {
+                "candidate_index": int(candidate_index),
+                "normalized_free_residual": np.asarray(residual, dtype=np.float32),
+            }
+            for candidate_index, residual in enumerate(final_x0)
+        ]
+        result = LateStageQPGuidedDDIMResult(
+            best_index=0,
+            best_normalized_free_residual=np.asarray(final_x0[0], dtype=np.float32),
+            best_control_points_normalized=np.empty((0, 0), dtype=np.float32),
+            best_joint_trajectory=np.empty((0, 0), dtype=np.float32),
+            planning_success=False,
+            candidate_infos=candidate_infos,
+            log={
+                "planner_mode": "qp_guided_diffusion",
+                "planning_success": False,
+                "selected_candidate_index": -1,
+                "final_certification_skipped": True,
+            },
+        )
+    else:
+        result = guidance_runner.finalize_candidates(
+            x0_candidates=final_x0,
+            q_start_normalized=np.asarray(q_start_normalized, dtype=np.float32),
+            q_goal_normalized=np.asarray(q_goal_normalized, dtype=np.float32),
+            delta_w_mean=np.asarray(delta_w_mean, dtype=np.float32),
+            delta_w_std=np.asarray(delta_w_std, dtype=np.float32),
+            num_control_points=int(num_control_points),
+            spline_degree=int(spline_degree),
+        )
     log = dict(result.log)
     log.update({
         "planner_mode": "qp_guided_diffusion",

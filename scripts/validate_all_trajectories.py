@@ -1377,6 +1377,7 @@ def _predict_late_stage_qp_guided_diffusion(
     batch_start: int = 0,
     num_candidates_override: Optional[int] = None,
     measure_inference_time: bool = False,
+    skip_final_certification: bool = False,
 ) -> dict[str, object]:
     from diffusion_policy_3d.common.late_stage_qp_guided_ddim import (
         LateStageQPGuidedDDIMConfig,
@@ -1466,6 +1467,7 @@ def _predict_late_stage_qp_guided_diffusion(
         blend_weights=tuple(float(v) for v in args.blend_weights),
         repair_score_weights=tuple(float(v) for v in args.repair_score_weights),
         ddim_eta=float(args.guidance_ddim_eta),
+        skip_final_certification=bool(skip_final_certification),
         scp_config=scp_config,
     )
     guidance_runner = LateStageQPGuidedDDIMRunner(config=guidance_config, environment=environment)
@@ -1623,6 +1625,7 @@ def _predict_qp_guided_diffusion_then_post_qp(
         batch_start=batch_start,
         num_candidates_override=num_candidates_override,
         measure_inference_time=measure_inference_time,
+        skip_final_certification=True,
     )
     candidate_residuals, selected_late_stage_indices = _select_late_stage_topk_residuals_for_post_qp(
         late_stage_selection=late_stage_selection,

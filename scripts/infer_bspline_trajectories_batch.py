@@ -405,14 +405,29 @@ def validate_args(args) -> None:
         raise ValueError(f"qp-inner-scp-rounds must be positive, got {args.qp_inner_scp_rounds}")
     if args.coarse_check_steps <= 1:
         raise ValueError(f"coarse-check-steps must be greater than 1, got {args.coarse_check_steps}")
+    if not args.guidance_timesteps or any(int(v) <= 0 for v in args.guidance_timesteps):
+        raise ValueError(f"guidance-timesteps must contain positive integers, got {args.guidance_timesteps}")
+    if args.candidate_inference_steps is not None and max(int(v) for v in args.guidance_timesteps) > int(args.candidate_inference_steps):
+        raise ValueError(
+            "guidance-timesteps cannot exceed candidate-inference-steps, "
+            f"got {args.guidance_timesteps} vs {args.candidate_inference_steps}"
+        )
+    if args.guidance_pen_link_points <= 0 or args.guidance_wrist3_points <= 0:
+        raise ValueError("guidance-pen-link-points and guidance-wrist3-points must be positive")
+    if args.final_post_qp_candidates <= 0:
+        raise ValueError(f"final-post-qp-candidates must be positive, got {args.final_post_qp_candidates}")
+    if args.final_backup_candidates < 0:
+        raise ValueError(f"final-backup-candidates must be non-negative, got {args.final_backup_candidates}")
+    if args.final_post_qp_rounds <= 0:
+        raise ValueError(f"final-post-qp-rounds must be positive, got {args.final_post_qp_rounds}")
     if args.trust_region_start <= 0.0 or args.trust_region_end <= 0.0:
         raise ValueError("trust-region-start/end must be positive")
     if args.trust_region_start > args.trust_region_end:
         raise ValueError("trust-region-start must be <= trust-region-end")
-    if len(args.blend_weights) != args.guidance_steps:
+    if len(args.blend_weights) != len(args.guidance_timesteps):
         raise ValueError(
-            "blend-weights length must match guidance-steps, "
-            f"got {len(args.blend_weights)} vs {args.guidance_steps}"
+            "blend-weights length must match guidance-timesteps, "
+            f"got {len(args.blend_weights)} vs {len(args.guidance_timesteps)}"
         )
     if len(args.repair_score_weights) != 3:
         raise ValueError("repair-score-weights must contain exactly 3 values")
@@ -1057,6 +1072,7 @@ def predict_late_stage_qp_guided_outputs(
     candidate_validator: CandidateValidatorWrapper,
     workpiece_id: int,
     generator=None,
+    skip_final_certification: bool = False,
 ) -> tuple[dict[str, np.ndarray], dict]:
     from diffusion_policy_3d.common.input_data import load_bspline_planning_input_data
     from diffusion_policy_3d.common.late_stage_qp_guided_ddim import (
@@ -1135,6 +1151,7 @@ def predict_late_stage_qp_guided_outputs(
         blend_weights=tuple(float(v) for v in args.blend_weights),
         repair_score_weights=tuple(float(v) for v in args.repair_score_weights),
         ddim_eta=float(args.guidance_ddim_eta),
+        skip_final_certification=bool(skip_final_certification),
         scp_config=scp_config,
     )
     guidance_runner = LateStageQPGuidedDDIMRunner(config=guidance_config, environment=environment)
@@ -1255,6 +1272,7 @@ def predict_qp_guided_diffusion_then_post_qp_outputs(
         candidate_validator=candidate_validator,
         workpiece_id=workpiece_id,
         generator=generator,
+        skip_final_certification=True,
     )
     candidate_residuals, selected_late_stage_indices = select_late_stage_topk_residuals_for_post_qp(
         guidance_payload=guidance_payload,
