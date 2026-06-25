@@ -40,6 +40,54 @@ def qp_guided_surface_points_per_link(args) -> dict[str, int]:
     }
 
 
+def _print_runtime_device_report(
+    *,
+    prefix: str,
+    requested_device,
+    policy,
+    obs_dict: dict | None = None,
+    planner_mode: str | None = None,
+    late_stage_geometry_backend: str | None = None,
+) -> None:
+    param_device = "no-parameters"
+    try:
+        first_param = next(policy.parameters())
+        param_device = str(first_param.device)
+    except StopIteration:
+        pass
+    obs_devices = sorted(
+        {
+            str(value.device)
+            for value in (obs_dict or {}).values()
+            if isinstance(value, torch.Tensor)
+        }
+    )
+    print(f"[{prefix}] requested_device={requested_device}")
+    print(
+        f"[{prefix}] torch.cuda.is_available={torch.cuda.is_available()} "
+        f"cuda.device_count={torch.cuda.device_count()}"
+    )
+    if torch.cuda.is_available():
+        print(
+            f"[{prefix}] torch.cuda.current_device={torch.cuda.current_device()} "
+            f"torch.cuda.device_name={torch.cuda.get_device_name(torch.cuda.current_device())}"
+        )
+    print(
+        f"[{prefix}] policy_parameter_device={param_device} "
+        f"policy_on_requested_device={param_device == str(requested_device)}"
+    )
+    if obs_dict is not None:
+        print(
+            f"[{prefix}] obs_tensor_devices={obs_devices} "
+            f"obs_on_requested_device={all(device == str(requested_device) for device in obs_devices)}"
+        )
+    if planner_mode is not None:
+        print(f"[{prefix}] planner_mode={planner_mode}")
+    if late_stage_geometry_backend is not None:
+        print(f"[{prefix}] late_stage_qp_geometry_backend={late_stage_geometry_backend}")
+        print(f"[{prefix}] final_qp_solver_backend=cpu")
+
+
 def _format_qp_skip_reason(reason: str | None) -> str:
     reason_map = {
         None: "unknown",
@@ -1157,6 +1205,21 @@ def predict_late_stage_qp_guided_outputs(
         scp_config=scp_config,
     )
     guidance_runner = LateStageQPGuidedDDIMRunner(config=guidance_config, environment=environment)
+    if not getattr(predict_late_stage_qp_guided_outputs, "_printed_device_report", False):
+        late_stage_geometry_backend = (
+            "cuda"
+            if environment.torch_available() and torch.cuda.is_available()
+            else ("cpu" if environment.torch_available() else "disabled")
+        )
+        _print_runtime_device_report(
+            prefix="runtime-device",
+            requested_device=policy.device if hasattr(policy, "device") else next(policy.parameters()).device,
+            policy=policy,
+            obs_dict=obs_dict,
+            planner_mode="qp_guided_diffusion",
+            late_stage_geometry_backend=late_stage_geometry_backend,
+        )
+        predict_late_stage_qp_guided_outputs._printed_device_report = True
     with torch.no_grad():
         result = policy.sample_with_late_stage_qp_guided_diffusion(
             obs_dict,
@@ -1630,6 +1693,15 @@ def run_mode_inference(
         args=args,
         cspace_feature_provider=cspace_feature_provider,
     )
+    if not getattr(process_sample, "_printed_device_report", False):
+        _print_runtime_device_report(
+            prefix="runtime-device",
+            requested_device=device,
+            policy=policy,
+            obs_dict=obs_dict,
+            planner_mode=str(getattr(args, "planner_mode", "baseline")),
+        )
+        process_sample._printed_device_report = True
     output_dir = build_summary_output_dir(base_output_dir=base_output_dir, mode=mode, compare_mode=compare_mode)
     workpiece_id = prepared_workpiece_id
     candidate_scores: list[dict] | None = None
