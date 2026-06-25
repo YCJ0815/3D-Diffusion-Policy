@@ -169,6 +169,11 @@ class LateStageQPGuidedDDIMRunner:
         self.scp_config.enable_local_waypoint_qp_after_certificate = False
         self.runner = SurfaceCBFQPGuidanceRunner(config=self.scp_config, environment=environment)
 
+    @staticmethod
+    def _passes_positive_clearance_certificate(cert_result: dict[str, Any]) -> bool:
+        min_clearance = float(cert_result.get("min_clearance", math.nan))
+        return bool(np.isfinite(min_clearance) and min_clearance > 0.0)
+
     def _evaluate_residual(
         self,
         *,
@@ -454,7 +459,8 @@ class LateStageQPGuidedDDIMRunner:
             recovered = False
             final_cert = cert
             joint_trajectory = np.asarray(cert["joint_trajectory"], dtype=np.float32)
-            if not bool(cert["success"]):
+            cert_positive = self._passes_positive_clearance_certificate(cert)
+            if not cert_positive:
                 waypoint_start = time.perf_counter()
                 wp = self.runner._try_local_waypoint_qp(cert_result=cert, log=GuidanceLog())
                 waypoint_time += time.perf_counter() - waypoint_start
@@ -462,14 +468,15 @@ class LateStageQPGuidedDDIMRunner:
                     recovered = True
                     final_cert = wp["recert_result"]
                     joint_trajectory = np.asarray(wp["joint_trajectory"], dtype=np.float32)
+            final_positive = self._passes_positive_clearance_certificate(final_cert)
             info = {
                 "candidate_index": int(candidate_index),
                 "normalized_free_residual": np.asarray(residual, dtype=np.float32),
                 "control_points_normalized": control_points.astype(np.float32),
                 "joint_trajectory": joint_trajectory.astype(np.float32),
-                "certified_before_waypoint_qp": bool(cert["success"]),
+                "certified_before_waypoint_qp": bool(cert_positive),
                 "recovered_by_waypoint_qp": bool(recovered),
-                "planning_success": bool(final_cert["success"]),
+                "planning_success": bool(final_positive),
                 "min_clearance": float(final_cert["min_clearance"]),
                 "h_min_final": float(final_cert["h_min_final"]),
                 "path_length": compute_path_length(joint_trajectory),
@@ -501,6 +508,7 @@ class LateStageQPGuidedDDIMRunner:
                     "certification_time": float(certification_time - waypoint_time),
                     "waypoint_fallback_time": float(waypoint_time),
                     "selected_candidate_index": -1,
+                    "certificate_rule": "min_sdf_gt_0",
                 },
             )
         return LateStageQPGuidedDDIMResult(
@@ -519,6 +527,7 @@ class LateStageQPGuidedDDIMRunner:
                 "recovered_by_waypoint_qp": bool(best_info["recovered_by_waypoint_qp"]),
                 "selected_candidate_index": int(best_info["candidate_index"]),
                 "min_clearance": float(best_info["min_clearance"]),
+                "certificate_rule": "min_sdf_gt_0",
             },
         )
 
