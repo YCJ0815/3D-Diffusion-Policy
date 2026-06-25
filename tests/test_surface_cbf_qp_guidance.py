@@ -4,11 +4,21 @@ import unittest
 
 import numpy as np
 
-
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[1]
 PACKAGE_ROOT = PROJECT_ROOT / "3D-Diffusion-Policy"
 if str(PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_ROOT))
+
+try:
+    import torch
+    from diffusion_policy_3d.common.late_stage_qp_guided_ddim import (
+        DDIMX0OverrideStepper,
+        LateStageQPGuidedDDIMConfig,
+    )
+except ModuleNotFoundError:
+    torch = None
+    DDIMX0OverrideStepper = None
+    LateStageQPGuidedDDIMConfig = None
 
 
 from diffusion_policy_3d.common.surface_cbf_qp_guidance import (
@@ -31,6 +41,57 @@ from diffusion_policy_3d.common.surface_cbf_qp_guidance import (
 
 
 class SurfaceCBFQPGuidanceHelperTests(unittest.TestCase):
+    def test_late_stage_guided_config_defaults_match_requested_tail_guidance(self):
+        if LateStageQPGuidedDDIMConfig is None:
+            self.skipTest("torch is not installed in this test environment")
+        config = LateStageQPGuidedDDIMConfig()
+        self.assertEqual(config.guidance_steps, 3)
+        self.assertEqual(config.qp_candidates, 4)
+        self.assertEqual(config.qp_inner_scp_rounds, 2)
+        self.assertEqual(config.coarse_check_steps, 32)
+        self.assertEqual(config.blend_weights, (0.25, 0.5, 0.75))
+        self.assertEqual(config.repair_score_weights, (1.0, 10.0, 1.0))
+
+    def test_ddim_x0_override_step_uses_override_in_previous_sample(self):
+        if torch is None or DDIMX0OverrideStepper is None:
+            self.skipTest("torch is not installed in this test environment")
+        class FakeScheduler:
+            def __init__(self):
+                self.num_inference_steps = 2
+                self.alphas_cumprod = torch.tensor([0.8, 0.6, 0.4, 0.2], dtype=torch.float32)
+                self.final_alpha_cumprod = torch.tensor(1.0, dtype=torch.float32)
+                self.config = type(
+                    "Config",
+                    (),
+                    {
+                        "num_train_timesteps": 4,
+                        "prediction_type": "sample",
+                        "clip_sample": False,
+                    },
+                )()
+
+            def _get_variance(self, timestep, prev_timestep):
+                _ = timestep, prev_timestep
+                return torch.tensor(0.0, dtype=torch.float32)
+
+        scheduler = FakeScheduler()
+        stepper = DDIMX0OverrideStepper(scheduler)
+        sample = torch.tensor([[0.6, -0.2]], dtype=torch.float32)
+        model_output = torch.tensor([[0.1, 0.1]], dtype=torch.float32)
+        override = torch.tensor([[0.3, -0.4]], dtype=torch.float32)
+        previous = stepper.step_with_x0_override(
+            model_output,
+            3,
+            sample,
+            pred_original_sample_override=override,
+            eta=0.0,
+        )
+        alpha_t = scheduler.alphas_cumprod[3]
+        alpha_prev = scheduler.alphas_cumprod[1]
+        eps = (sample - torch.sqrt(alpha_t) * override) / torch.sqrt(1.0 - alpha_t)
+        expected = torch.sqrt(alpha_prev) * override + torch.sqrt(1.0 - alpha_prev) * eps
+        torch.testing.assert_close(previous, expected)
+
     def test_classify_candidate_repair_distinguishes_deep_repair_and_safe(self):
         self.assertEqual(
             classify_candidate_repair(min_clearance=-0.04, d_trigger=0.05, eps_deep=0.03),

@@ -113,8 +113,32 @@ class InferBsplineTrajectoriesBatchTests(unittest.TestCase):
                 "--cspace-feature-dir",
                 "/tmp/cspace",
                 "--enable-surface-cbf-qp-guidance",
+                "--planner-mode",
+                "qp_guided_diffusion",
+                "--qp-candidates",
+                "4",
+                "--qp-inner-scp-rounds",
+                "2",
+                "--coarse-check-steps",
+                "32",
+                "--guidance-trigger-distance",
+                "0.06",
+                "--guidance-safe-distance",
+                "0.05",
+                "--trust-region-start",
+                "0.015",
+                "--trust-region-end",
+                "0.05",
+                "--blend-weights",
+                "0.25",
+                "0.5",
+                "0.75",
+                "--repair-score-weights",
+                "1.0",
+                "10.0",
+                "1.0",
                 "--guidance-steps",
-                "5",
+                "3",
                 "--guidance-max-risk-segments",
                 "3",
                 "--guidance-window-radius",
@@ -167,7 +191,17 @@ class InferBsplineTrajectoriesBatchTests(unittest.TestCase):
         self.assertEqual(args.candidate_seed, 7)
         self.assertEqual(args.cspace_feature_dir, "/tmp/cspace")
         self.assertTrue(args.enable_surface_cbf_qp_guidance)
-        self.assertEqual(args.guidance_steps, 5)
+        self.assertEqual(args.planner_mode, "qp_guided_diffusion")
+        self.assertEqual(args.qp_candidates, 4)
+        self.assertEqual(args.qp_inner_scp_rounds, 2)
+        self.assertEqual(args.coarse_check_steps, 32)
+        self.assertEqual(args.guidance_trigger_distance, 0.06)
+        self.assertEqual(args.guidance_safe_distance, 0.05)
+        self.assertEqual(args.trust_region_start, 0.015)
+        self.assertEqual(args.trust_region_end, 0.05)
+        self.assertEqual(args.blend_weights, [0.25, 0.5, 0.75])
+        self.assertEqual(args.repair_score_weights, [1.0, 10.0, 1.0])
+        self.assertEqual(args.guidance_steps, 3)
         self.assertEqual(args.guidance_max_risk_segments, 3)
         self.assertEqual(args.guidance_window_radius, 2)
         self.assertEqual(args.guidance_points_per_segment, 2)

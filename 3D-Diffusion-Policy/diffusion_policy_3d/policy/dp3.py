@@ -22,6 +22,7 @@ from diffusion_policy_3d.model.diffusion.differentiable_trajectory_loss import (
 from diffusion_policy_3d.common.pytorch_util import dict_apply
 from diffusion_policy_3d.common.model_util import print_params
 from diffusion_policy_3d.common.surface_cbf_qp_guidance import SamplingContext, guided_policy_sample
+from diffusion_policy_3d.common.late_stage_qp_guided_ddim import sample_late_stage_qp_guided_ddim
 from diffusion_policy_3d.model.vision.pointnet_extractor import DP3Encoder
 
 class DP3(BasePolicy):
@@ -345,6 +346,61 @@ class DP3(BasePolicy):
             'guidance_candidates': guidance_result.candidate_infos,
             'guided_control_points_normalized': guidance_result.best_control_points_normalized,
             'guided_joint_trajectory': guidance_result.best_joint_trajectory,
+        }
+
+    def sample_with_late_stage_qp_guided_diffusion(
+        self,
+        obs_dict: Dict[str, torch.Tensor],
+        *,
+        q_start_normalized,
+        q_goal_normalized,
+        delta_w_mean,
+        delta_w_std,
+        num_control_points: int,
+        spline_degree: int,
+        guidance_runner,
+        generator=None,
+        num_inference_steps=None,
+        scheduler_step_kwargs=None,
+    ) -> Dict[str, torch.Tensor]:
+        sampling_context, meta = self._build_inference_sampling_context(obs_dict)
+        if int(meta["batch_size"]) != 1:
+            raise ValueError(
+                "late-stage QP-guided diffusion currently expects batch_size=1, "
+                f"got {meta['batch_size']}"
+            )
+        scheduler_kwargs = dict(self.kwargs)
+        scheduler_kwargs.update(scheduler_step_kwargs or {})
+        guidance_result = sample_late_stage_qp_guided_ddim(
+            policy=self,
+            context=sampling_context,
+            q_start_normalized=q_start_normalized,
+            q_goal_normalized=q_goal_normalized,
+            delta_w_mean=delta_w_mean,
+            delta_w_std=delta_w_std,
+            num_control_points=int(num_control_points),
+            spline_degree=int(spline_degree),
+            guidance_runner=guidance_runner,
+            generator=generator,
+            num_inference_steps=num_inference_steps,
+            scheduler_step_kwargs=scheduler_kwargs,
+        )
+        naction_pred = torch.from_numpy(guidance_result.best_normalized_free_residual).to(
+            device=self.device,
+            dtype=self.dtype,
+        ).unsqueeze(0)
+        action_pred = self.normalizer['action'].unnormalize(naction_pred)
+        start = int(meta["obs_steps"]) - 1
+        end = start + self.n_action_steps
+        action = action_pred[:, start:end]
+        return {
+            'action': action,
+            'action_pred': action_pred,
+            'guidance_log': guidance_result.log,
+            'guidance_candidates': guidance_result.candidate_infos,
+            'guided_control_points_normalized': guidance_result.best_control_points_normalized,
+            'guided_joint_trajectory': guidance_result.best_joint_trajectory,
+            'planning_success': guidance_result.planning_success,
         }
 
 

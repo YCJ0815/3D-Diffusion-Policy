@@ -1,7 +1,19 @@
 surface_cbf_qp_guidance:
+  planner_mode: baseline
   enabled: false
   num_candidates: 32
   candidate_inference_steps: null
+
+  qp_guided_diffusion:
+    qp_candidates: 4
+    qp_inner_scp_rounds: 2
+    coarse_check_steps: 32
+    guidance_trigger_distance: 0.06
+    guidance_safe_distance: 0.05
+    trust_region_start: 0.015
+    trust_region_end: 0.05
+    blend_weights: [0.25, 0.5, 0.75]
+    repair_score_weights: [1.0, 10.0, 1.0]
 
   pybullet:
     robot_surface_points_per_link:
@@ -15,8 +27,8 @@ surface_cbf_qp_guidance:
     points_per_segment: 5
     min_constraints_per_segment: 6
     active_constraints: 32
-    check_steps: 32
-    cert_steps: 64
+    check_steps: 64
+    cert_steps: 128
     cert_swept_intermediate: 3
     d_safe: 0.005
     d_trigger: 0.005
@@ -29,16 +41,6 @@ surface_cbf_qp_guidance:
     delta_max_pass2: 0.025
     d_trigger_pass2_offset: 0.005
     margin_buffer: 0.005
-    enable_local_waypoint_qp_after_certificate: true
-    local_waypoint_qp_window_radius: 2
-    local_waypoint_qp_max_collision_segments: 2
-    local_waypoint_qp_min_clearance_trigger: -0.01
-    local_waypoint_qp_target_buffer: 0.005
-    local_waypoint_qp_lambda_s: 0.25
-    local_waypoint_qp_delta_max: 0.02
-    local_waypoint_qp_max_velocity_step: 0.2
-    local_waypoint_qp_max_acceleration_step: 0.4
-    local_waypoint_qp_maxiter: 100
     lambda_s: 0.25
     rho: 1.0e5
     ddim_eta: 0.0

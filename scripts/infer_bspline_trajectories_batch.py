@@ -392,6 +392,23 @@ def validate_args(args) -> None:
         )
     if args.guidance_steps <= 0:
         raise ValueError(f"guidance-steps must be positive, got {args.guidance_steps}")
+    if args.qp_candidates <= 0:
+        raise ValueError(f"qp-candidates must be positive, got {args.qp_candidates}")
+    if args.qp_inner_scp_rounds <= 0:
+        raise ValueError(f"qp-inner-scp-rounds must be positive, got {args.qp_inner_scp_rounds}")
+    if args.coarse_check_steps <= 1:
+        raise ValueError(f"coarse-check-steps must be greater than 1, got {args.coarse_check_steps}")
+    if args.trust_region_start <= 0.0 or args.trust_region_end <= 0.0:
+        raise ValueError("trust-region-start/end must be positive")
+    if args.trust_region_start > args.trust_region_end:
+        raise ValueError("trust-region-start must be <= trust-region-end")
+    if len(args.blend_weights) != args.guidance_steps:
+        raise ValueError(
+            "blend-weights length must match guidance-steps, "
+            f"got {len(args.blend_weights)} vs {args.guidance_steps}"
+        )
+    if len(args.repair_score_weights) != 3:
+        raise ValueError("repair-score-weights must contain exactly 3 values")
     if args.guidance_max_risk_segments <= 0:
         raise ValueError(
             "guidance-max-risk-segments must be positive, "
@@ -885,7 +902,7 @@ class CandidateValidatorWrapper:
 
 
 def build_candidate_validator(args) -> CandidateValidatorWrapper | None:
-    needs_guidance_validator = bool(args.enable_surface_cbf_qp_guidance)
+    needs_guidance_validator = str(getattr(args, "planner_mode", "baseline")) in {"post_qp", "qp_guided_diffusion"}
     needs_candidate_validator = (
         resolve_sampling_mode(args) in {"candidate", "compare"}
         and args.candidate_selection != "first"
@@ -1015,6 +1032,129 @@ def predict_surface_cbf_qp_guided_outputs(
         "pred_action_horizon": result["action_pred"][0].detach().cpu().numpy().astype(np.float32),
     }, {
         "planning_result": planning_result,
+        "guidance_log": result.get("guidance_log", {}),
+        "guided_joint_trajectory": guided_joint_trajectory,
+        "guided_control_points_normalized": result.get("guided_control_points_normalized"),
+        "guidance_candidates": result.get("guidance_candidates", []),
+    }
+
+
+def predict_late_stage_qp_guided_outputs(
+    *,
+    npz_path: pathlib.Path,
+    obs_dict: dict,
+    policy,
+    args,
+    stats_mean: np.ndarray,
+    stats_std: np.ndarray,
+    candidate_validator: CandidateValidatorWrapper,
+    workpiece_id: int,
+    generator=None,
+) -> tuple[dict[str, np.ndarray], dict]:
+    from diffusion_policy_3d.common.input_data import load_bspline_planning_input_data
+    from diffusion_policy_3d.common.late_stage_qp_guided_ddim import (
+        LateStageQPGuidedDDIMConfig,
+        LateStageQPGuidedDDIMRunner,
+    )
+    from diffusion_policy_3d.common.surface_cbf_qp_guidance import (
+        PyBulletSurfaceEnvironmentAdapter,
+        SurfaceCBFQPGuidanceConfig,
+    )
+
+    planning_result = load_bspline_planning_input_data(
+        npz_path=str(npz_path),
+        norm=args.norm_m,
+        urdf_path=args.urdf_path,
+    )
+    environment = PyBulletSurfaceEnvironmentAdapter(
+        validator=candidate_validator.validator,
+        workpiece_id=workpiece_id,
+        joint_lower_limits=planning_result.joint_lower_limits,
+        joint_upper_limits=planning_result.joint_upper_limits,
+    )
+    scp_config = SurfaceCBFQPGuidanceConfig(
+        enabled=True,
+        num_candidates=int(args.num_candidates),
+        guidance_steps=int(args.guidance_steps),
+        max_risk_segments=int(args.guidance_max_risk_segments),
+        window_radius=int(args.guidance_window_radius),
+        points_per_segment=int(args.guidance_points_per_segment),
+        min_constraints_per_segment=int(args.guidance_min_constraints_per_segment),
+        active_constraints=int(args.guidance_active_constraints),
+        check_steps=int(args.coarse_check_steps),
+        cert_steps=int(args.guidance_cert_steps),
+        cert_swept_intermediate=int(args.guidance_cert_swept_intermediate),
+        d_safe=float(args.guidance_safe_distance),
+        d_trigger=float(args.guidance_trigger_distance),
+        d_cert=float(args.guidance_d_cert),
+        eps_deep=float(args.guidance_eps_deep),
+        delta_max=float(args.guidance_delta_max),
+        scp_iterations=int(args.qp_inner_scp_rounds),
+        delta_max_total=float(args.trust_region_end),
+        delta_max_pass1=float(args.trust_region_start),
+        delta_max_pass2=float(args.trust_region_end),
+        d_trigger_pass2_offset=float(args.guidance_d_trigger_pass2_offset),
+        margin_buffer=float(args.guidance_margin_buffer),
+        enable_local_waypoint_qp_after_certificate=bool(args.enable_local_waypoint_qp_after_certificate),
+        local_waypoint_qp_window_radius=int(args.local_waypoint_qp_window_radius),
+        local_waypoint_qp_max_collision_segments=int(args.local_waypoint_qp_max_collision_segments),
+        local_waypoint_qp_min_clearance_trigger=float(args.local_waypoint_qp_min_clearance_trigger),
+        local_waypoint_qp_target_buffer=float(args.local_waypoint_qp_target_buffer),
+        local_waypoint_qp_lambda_s=float(args.local_waypoint_qp_lambda_s),
+        local_waypoint_qp_delta_max=float(args.local_waypoint_qp_delta_max),
+        local_waypoint_qp_max_velocity_step=float(args.local_waypoint_qp_max_velocity_step),
+        local_waypoint_qp_max_acceleration_step=float(args.local_waypoint_qp_max_acceleration_step),
+        local_waypoint_qp_maxiter=int(args.local_waypoint_qp_maxiter),
+        lambda_s=float(args.guidance_lambda_s),
+        rho=float(args.guidance_rho),
+        ddim_eta=float(args.guidance_ddim_eta),
+        joint_limit_steps=int(args.guidance_joint_limit_steps),
+        guidance_targets=tuple(float(v) for v in args.guidance_targets),
+        fallback_to_terminal_cbf=False,
+    )
+    guidance_config = LateStageQPGuidedDDIMConfig(
+        enabled=True,
+        num_candidates=int(args.num_candidates),
+        guidance_steps=int(args.guidance_steps),
+        qp_candidates=int(args.qp_candidates),
+        qp_inner_scp_rounds=int(args.qp_inner_scp_rounds),
+        coarse_check_steps=int(args.coarse_check_steps),
+        guidance_trigger_distance=float(args.guidance_trigger_distance),
+        guidance_safe_distance=float(args.guidance_safe_distance),
+        trust_region_start=float(args.trust_region_start),
+        trust_region_end=float(args.trust_region_end),
+        blend_weights=tuple(float(v) for v in args.blend_weights),
+        repair_score_weights=tuple(float(v) for v in args.repair_score_weights),
+        ddim_eta=float(args.guidance_ddim_eta),
+        scp_config=scp_config,
+    )
+    guidance_runner = LateStageQPGuidedDDIMRunner(config=guidance_config, environment=environment)
+    with torch.no_grad():
+        result = policy.sample_with_late_stage_qp_guided_diffusion(
+            obs_dict,
+            q_start_normalized=planning_result.first_joint_angles_normalized,
+            q_goal_normalized=planning_result.last_joint_angles_normalized,
+            delta_w_mean=stats_mean,
+            delta_w_std=stats_std,
+            num_control_points=int(args.num_control_points),
+            spline_degree=int(args.spline_degree),
+            guidance_runner=guidance_runner,
+            generator=generator,
+            num_inference_steps=args.candidate_inference_steps,
+            scheduler_step_kwargs={"eta": float(args.guidance_ddim_eta)},
+        )
+    guided_joint_trajectory = result.get("guided_joint_trajectory")
+    if guided_joint_trajectory is not None and np.asarray(guided_joint_trajectory).size > 0:
+        guided_joint_trajectory = _resample_joint_trajectory_to_steps(
+            guided_joint_trajectory,
+            int(candidate_validator.validator.cfg.target_steps),
+        )
+    return {
+        "pred_action_window": result["action"][0].detach().cpu().numpy().astype(np.float32),
+        "pred_action_horizon": result["action_pred"][0].detach().cpu().numpy().astype(np.float32),
+    }, {
+        "planning_result": planning_result,
+        "planning_success": bool(result.get("planning_success", False)),
         "guidance_log": result.get("guidance_log", {}),
         "guided_joint_trajectory": guided_joint_trajectory,
         "guided_control_points_normalized": result.get("guided_control_points_normalized"),
@@ -1272,8 +1412,9 @@ def run_mode_inference(
     selected_score: dict | None = None
     guidance_payload: dict | None = None
 
+    planner_mode = str(getattr(args, "planner_mode", "baseline"))
     if mode == "baseline":
-        if args.enable_surface_cbf_qp_guidance and not compare_mode:
+        if planner_mode == "post_qp" and not compare_mode:
             if candidate_validator is None:
                 raise ValueError(
                     "surface CBF-QP guidance requires a PyBullet candidate validator / geometry backend"
@@ -1308,6 +1449,48 @@ def run_mode_inference(
                 workpiece_id=workpiece_id,
                 artifact=artifact,
             )
+        elif planner_mode == "qp_guided_diffusion" and not compare_mode:
+            if candidate_validator is None:
+                raise ValueError(
+                    "qp_guided_diffusion requires a PyBullet candidate validator / geometry backend"
+                )
+            workpiece_id = resolve_workpiece_id_from_npz(
+                npz_path=npz_path,
+                input_dirs=input_dirs,
+                simple_workpiece_id_offset=args.simple_workpiece_id_offset,
+            )
+            guided_outputs, guidance_payload = predict_late_stage_qp_guided_outputs(
+                npz_path=npz_path,
+                obs_dict=obs_dict,
+                policy=policy,
+                args=args,
+                stats_mean=stats_mean,
+                stats_std=stats_std,
+                candidate_validator=candidate_validator,
+                workpiece_id=workpiece_id,
+            )
+            artifact = reconstruct_prediction_artifacts(
+                npz_path=npz_path,
+                pred_action_window=guided_outputs["pred_action_window"],
+                pred_action_horizon=guided_outputs["pred_action_horizon"],
+                args=args,
+                stats_mean=stats_mean,
+                stats_std=stats_std,
+            )
+            if guidance_payload.get("guided_joint_trajectory") is not None:
+                artifact["pred_joint_horizon"] = np.asarray(
+                    guidance_payload["guided_joint_trajectory"], dtype=np.float32
+                )
+            artifact["candidate_index"] = int(guidance_payload.get("guidance_log", {}).get("selected_candidate_index", -1) or -1)
+            artifact["candidate_seed"] = None
+            if bool(guidance_payload.get("planning_success", False)):
+                selected_score = score_artifact_if_possible(
+                    candidate_validator=candidate_validator,
+                    workpiece_id=workpiece_id,
+                    artifact=artifact,
+                )
+            else:
+                selected_score = None
         else:
             predicted = predict_action_outputs(policy=policy, obs_dict=obs_dict)
             artifact = reconstruct_prediction_artifacts(
@@ -1367,9 +1550,12 @@ def run_mode_inference(
         "stl_path": str(stl_path),
         "stats_path": str(args.stats_path),
         "mode": mode,
+        "planner_mode": planner_mode,
         "sampling_mode": resolve_sampling_mode(args),
         "candidate_pool_enabled": bool(mode == "candidate"),
-        "surface_cbf_qp_guidance_enabled": bool(mode == "baseline" and args.enable_surface_cbf_qp_guidance and not compare_mode),
+        "surface_cbf_qp_guidance_enabled": bool(mode == "baseline" and planner_mode == "post_qp" and not compare_mode),
+        "late_stage_qp_guided_diffusion_enabled": bool(mode == "baseline" and planner_mode == "qp_guided_diffusion" and not compare_mode),
+        "planning_success": bool(True if guidance_payload is None else guidance_payload.get("planning_success", True)),
         "sample_index": int(sample_index),
         "sample_source": str(args.sample_source),
         "sample_seed": int(args.sample_seed),
@@ -1384,7 +1570,7 @@ def run_mode_inference(
         "num_control_points": int(args.num_control_points),
         "spline_degree": int(args.spline_degree),
         "candidate_selection": str(args.candidate_selection if mode == "candidate" else "baseline_single"),
-        "num_candidates": int(args.num_candidates if (mode == "candidate" or args.enable_surface_cbf_qp_guidance) else 1),
+        "num_candidates": int(args.num_candidates if (mode == "candidate" or planner_mode in {"post_qp", "qp_guided_diffusion"}) else 1),
         "selected_candidate_index": int(artifact.get("candidate_index", 0)),
         "selected_candidate_seed": artifact.get("candidate_seed"),
     }
@@ -1396,6 +1582,29 @@ def run_mode_inference(
     if guidance_payload is not None:
         metadata["surface_cbf_qp_guidance"] = guidance_payload.get("guidance_log", {})
         metadata["guidance_candidate_count"] = len(guidance_payload.get("guidance_candidates", []))
+        guidance_log = dict(guidance_payload.get("guidance_log", {}) or {})
+        for key in (
+            "num_candidates_guided",
+            "repairability_score",
+            "qp_status",
+            "qp_slack_sum",
+            "qp_delta_norm",
+            "guidance_steps_applied",
+            "min_clearance",
+            "min_sdf",
+            "num_penetration",
+            "max_penetration_depth",
+            "certified_before_waypoint_qp",
+            "recovered_by_waypoint_qp",
+            "selected_candidate_index",
+            "diffusion_time",
+            "guided_qp_time",
+            "certification_time",
+            "waypoint_fallback_time",
+            "total_planning_time",
+        ):
+            if key in guidance_log:
+                metadata[key] = guidance_log[key]
     if selected_score is not None:
         metadata["selected_candidate_score_key"] = [
             float(selected_score["has_pen"]),
@@ -1411,7 +1620,7 @@ def run_mode_inference(
         summarize_qp_status(
             mode=mode,
             compare_mode=compare_mode,
-            guidance_enabled=bool(args.enable_surface_cbf_qp_guidance),
+            guidance_enabled=bool(planner_mode == "post_qp"),
             guidance_payload=guidance_payload,
         )
     )
@@ -1557,12 +1766,13 @@ def main() -> None:
         "sample_count": int(len(sampled_npz_files)),
         "sample_seed": int(args.sample_seed),
         "sampling_mode": effective_mode,
+        "planner_mode": str(args.planner_mode),
         "val_split_enabled": val_split_enabled,
         "val_ratio": float(args.val_ratio) if val_split_enabled else None,
         "val_split_seed": int(args.val_split_seed) if val_split_enabled else None,
         "candidate_pool_enabled": bool(effective_mode in {"candidate", "compare"}),
         "candidate_selection": str(args.candidate_selection),
-        "num_candidates": int(args.num_candidates if effective_mode in {"candidate", "compare"} else 1),
+        "num_candidates": int(args.num_candidates if effective_mode in {"candidate", "compare"} or str(args.planner_mode) in {"post_qp", "qp_guided_diffusion"} else 1),
         "candidate_seed": int(args.candidate_seed),
         "cspace_feature_dir": args.cspace_feature_dir,
         "uses_cspace_feature": bool(cspace_feature_provider is not None),

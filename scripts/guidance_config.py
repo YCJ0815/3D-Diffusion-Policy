@@ -20,10 +20,20 @@ DEFAULT_SURFACE_CBF_QP_GUIDANCE_CONFIG_PATH = (
 
 
 GUIDANCE_CONFIG_FALLBACKS: dict[str, Any] = {
+    "planner_mode": "baseline",
     "enable_surface_cbf_qp_guidance": False,
     "num_candidates": 32,
     "candidate_inference_steps": None,
-    "guidance_steps": 2,
+    "qp_candidates": 4,
+    "qp_inner_scp_rounds": 2,
+    "coarse_check_steps": 32,
+    "guidance_trigger_distance": 0.06,
+    "guidance_safe_distance": 0.05,
+    "trust_region_start": 0.015,
+    "trust_region_end": 0.05,
+    "blend_weights": [0.25, 0.5, 0.75],
+    "repair_score_weights": [1.0, 10.0, 1.0],
+    "guidance_steps": 3,
     "guidance_max_risk_segments": 3,
     "guidance_window_radius": 2,
     "guidance_points_per_segment": 2,
@@ -64,9 +74,19 @@ GUIDANCE_CONFIG_FALLBACKS: dict[str, Any] = {
 
 
 GUIDANCE_CONFIG_KEY_PATHS: dict[str, tuple[str, ...]] = {
+    "planner_mode": ("surface_cbf_qp_guidance", "planner_mode"),
     "enable_surface_cbf_qp_guidance": ("surface_cbf_qp_guidance", "enabled"),
     "num_candidates": ("surface_cbf_qp_guidance", "num_candidates"),
     "candidate_inference_steps": ("surface_cbf_qp_guidance", "candidate_inference_steps"),
+    "qp_candidates": ("surface_cbf_qp_guidance", "qp_guided_diffusion", "qp_candidates"),
+    "qp_inner_scp_rounds": ("surface_cbf_qp_guidance", "qp_guided_diffusion", "qp_inner_scp_rounds"),
+    "coarse_check_steps": ("surface_cbf_qp_guidance", "qp_guided_diffusion", "coarse_check_steps"),
+    "guidance_trigger_distance": ("surface_cbf_qp_guidance", "qp_guided_diffusion", "guidance_trigger_distance"),
+    "guidance_safe_distance": ("surface_cbf_qp_guidance", "qp_guided_diffusion", "guidance_safe_distance"),
+    "trust_region_start": ("surface_cbf_qp_guidance", "qp_guided_diffusion", "trust_region_start"),
+    "trust_region_end": ("surface_cbf_qp_guidance", "qp_guided_diffusion", "trust_region_end"),
+    "blend_weights": ("surface_cbf_qp_guidance", "qp_guided_diffusion", "blend_weights"),
+    "repair_score_weights": ("surface_cbf_qp_guidance", "qp_guided_diffusion", "repair_score_weights"),
     "guidance_steps": ("surface_cbf_qp_guidance", "runner", "guidance_steps"),
     "guidance_max_risk_segments": ("surface_cbf_qp_guidance", "runner", "max_risk_segments"),
     "guidance_window_radius": ("surface_cbf_qp_guidance", "runner", "window_radius"),
@@ -109,6 +129,7 @@ GUIDANCE_CONFIG_KEY_PATHS: dict[str, tuple[str, ...]] = {
 
 GUIDANCE_PARAMETER_GROUPS: dict[str, tuple[str, ...]] = {
     "switches": (
+        "planner_mode",
         "enable_surface_cbf_qp_guidance",
         "guidance_fallback_to_terminal_cbf",
     ),
@@ -117,6 +138,8 @@ GUIDANCE_PARAMETER_GROUPS: dict[str, tuple[str, ...]] = {
         "candidate_inference_steps",
         "guidance_steps",
         "guidance_ddim_eta",
+        "qp_candidates",
+        "blend_weights",
     ),
     "cbf_thresholds": (
         "guidance_d_safe",
@@ -124,8 +147,15 @@ GUIDANCE_PARAMETER_GROUPS: dict[str, tuple[str, ...]] = {
         "guidance_d_cert",
         "guidance_eps_deep",
         "guidance_targets",
+        "guidance_trigger_distance",
+        "guidance_safe_distance",
     ),
     "qp_optimization": (
+        "qp_inner_scp_rounds",
+        "coarse_check_steps",
+        "trust_region_start",
+        "trust_region_end",
+        "repair_score_weights",
         "guidance_max_risk_segments",
         "guidance_window_radius",
         "guidance_points_per_segment",
@@ -178,20 +208,30 @@ def add_surface_cbf_qp_guidance_parser_args(
             "CLI flags override values from this file."
         ),
     )
+    parser.add_argument(
+        "--planner-mode",
+        choices=("baseline", "post_qp", "qp_guided_diffusion"),
+        default=argparse.SUPPRESS,
+        help=(
+            "Planner mode: baseline keeps raw DDIM, post_qp keeps the legacy "
+            "surface CBF-QP post-processing path, qp_guided_diffusion runs the "
+            "new late-stage QP-guided DDIM sampler."
+        ),
+    )
     enabled_group = parser.add_mutually_exclusive_group()
     enabled_group.add_argument(
         "--enable-surface-cbf-qp-guidance",
         dest="enable_surface_cbf_qp_guidance",
         action="store_true",
         default=argparse.SUPPRESS,
-        help="Enable the independent late-stage surface-sample CBF-QP guided denoising path.",
+        help="Enable the legacy post-generation surface CBF-QP path; maps planner_mode=baseline to post_qp.",
     )
     enabled_group.add_argument(
         "--disable-surface-cbf-qp-guidance",
         dest="enable_surface_cbf_qp_guidance",
         action="store_false",
         default=argparse.SUPPRESS,
-        help="Disable surface-sample CBF-QP guided denoising even if the config file enables it.",
+        help="Disable the legacy post-generation surface CBF-QP path even if the config file enables it.",
     )
     if include_num_candidates:
         parser.add_argument(
@@ -207,6 +247,15 @@ def add_surface_cbf_qp_guidance_parser_args(
             default=argparse.SUPPRESS,
             help="Optional override for diffusion inference steps during candidate or guided sampling.",
         )
+    parser.add_argument("--qp-candidates", type=int, default=argparse.SUPPRESS)
+    parser.add_argument("--qp-inner-scp-rounds", type=int, default=argparse.SUPPRESS)
+    parser.add_argument("--coarse-check-steps", type=int, default=argparse.SUPPRESS)
+    parser.add_argument("--guidance-trigger-distance", type=float, default=argparse.SUPPRESS)
+    parser.add_argument("--guidance-safe-distance", type=float, default=argparse.SUPPRESS)
+    parser.add_argument("--trust-region-start", type=float, default=argparse.SUPPRESS)
+    parser.add_argument("--trust-region-end", type=float, default=argparse.SUPPRESS)
+    parser.add_argument("--blend-weights", type=float, nargs="+", default=argparse.SUPPRESS)
+    parser.add_argument("--repair-score-weights", type=float, nargs=3, default=argparse.SUPPRESS)
     parser.add_argument(
         "--guidance-steps",
         type=int,
@@ -300,6 +349,7 @@ def apply_surface_cbf_qp_guidance_config(
     include_candidate_inference_steps: bool,
 ) -> argparse.Namespace:
     config_path = pathlib.Path(args.surface_cbf_qp_guidance_config).expanduser().resolve()
+    planner_mode_was_explicit = hasattr(args, "planner_mode")
     if not config_path.is_file():
         raise FileNotFoundError(f"Surface CBF-QP guidance config not found: {config_path}")
     loaded = OmegaConf.to_container(OmegaConf.load(config_path), resolve=True)
@@ -309,7 +359,17 @@ def apply_surface_cbf_qp_guidance_config(
         )
 
     keys = [
+        "planner_mode",
         "enable_surface_cbf_qp_guidance",
+        "qp_candidates",
+        "qp_inner_scp_rounds",
+        "coarse_check_steps",
+        "guidance_trigger_distance",
+        "guidance_safe_distance",
+        "trust_region_start",
+        "trust_region_end",
+        "blend_weights",
+        "repair_score_weights",
         "guidance_steps",
         "guidance_max_risk_segments",
         "guidance_window_radius",
@@ -363,6 +423,13 @@ def apply_surface_cbf_qp_guidance_config(
         key: copy.deepcopy(getattr(args, key))
         for key in keys
     }
+    if (
+        bool(getattr(args, "enable_surface_cbf_qp_guidance", False))
+        and str(getattr(args, "planner_mode", "baseline")) == "baseline"
+        and not planner_mode_was_explicit
+    ):
+        args.planner_mode = "post_qp"
+        args.surface_cbf_qp_guidance_config_values["planner_mode"] = "post_qp"
     return args
 
 
@@ -373,7 +440,17 @@ def build_surface_cbf_qp_parameter_summary(
     include_candidate_inference_steps: bool,
 ) -> dict[str, Any]:
     included_keys = {
+        "planner_mode",
         "enable_surface_cbf_qp_guidance",
+        "qp_candidates",
+        "qp_inner_scp_rounds",
+        "coarse_check_steps",
+        "guidance_trigger_distance",
+        "guidance_safe_distance",
+        "trust_region_start",
+        "trust_region_end",
+        "blend_weights",
+        "repair_score_weights",
         "guidance_steps",
         "guidance_max_risk_segments",
         "guidance_window_radius",
