@@ -1506,6 +1506,163 @@ def _predict_late_stage_qp_guided_diffusion(
     }
 
 
+def _predict_qp_guided_diffusion_then_post_qp(
+    *,
+    policy,
+    validator,
+    pyb_cfg: PyBulletValidationConfig,
+    obs_dict: dict[str, torch.Tensor],
+    raw_obs: dict[str, np.ndarray],
+    workpiece_id: int,
+    device: torch.device,
+    args,
+    batch_start: int = 0,
+    num_candidates_override: Optional[int] = None,
+    measure_inference_time: bool = False,
+) -> dict[str, object]:
+    from diffusion_policy_3d.common.surface_cbf_qp_guidance import (
+        PyBulletSurfaceEnvironmentAdapter,
+        SurfaceCBFQPGuidanceConfig,
+        SurfaceCBFQPGuidanceRunner,
+    )
+
+    late_stage_selection = _predict_late_stage_qp_guided_diffusion(
+        policy=policy,
+        validator=validator,
+        pyb_cfg=pyb_cfg,
+        obs_dict=obs_dict,
+        raw_obs=raw_obs,
+        workpiece_id=workpiece_id,
+        device=device,
+        args=args,
+        batch_start=batch_start,
+        num_candidates_override=num_candidates_override,
+        measure_inference_time=measure_inference_time,
+    )
+    late_guidance_candidates = list(late_stage_selection.get("guidance_candidates", []) or [])
+    candidate_residuals = [
+        np.asarray(candidate_info.get("normalized_free_residual"), dtype=np.float32)
+        for candidate_info in late_guidance_candidates
+        if np.asarray(candidate_info.get("normalized_free_residual", np.empty((0, 0))), dtype=np.float32).size > 0
+    ]
+    if not candidate_residuals:
+        late_stage_selection["planner_mode"] = "qp_guided_diffusion_post_qp"
+        late_stage_selection["surface_cbf_qp_guidance_enabled"] = True
+        late_stage_selection["late_stage_qp_guided_diffusion_enabled"] = True
+        late_stage_selection["final_success_source"] = "late_stage_no_candidate_residuals"
+        return late_stage_selection
+
+    num_candidates = int(len(candidate_residuals))
+    environment = PyBulletSurfaceEnvironmentAdapter(
+        validator=validator,
+        workpiece_id=int(workpiece_id),
+        joint_lower_limits=np.asarray(validator.joint_lower_limits, dtype=np.float32),
+        joint_upper_limits=np.asarray(validator.joint_upper_limits, dtype=np.float32),
+    )
+    guidance_config = SurfaceCBFQPGuidanceConfig(
+        enabled=True,
+        num_candidates=int(num_candidates),
+        guidance_steps=int(args.guidance_steps),
+        max_risk_segments=int(args.guidance_max_risk_segments),
+        window_radius=int(args.guidance_window_radius),
+        points_per_segment=int(args.guidance_points_per_segment),
+        min_constraints_per_segment=int(args.guidance_min_constraints_per_segment),
+        active_constraints=int(args.guidance_active_constraints),
+        check_steps=int(args.guidance_check_steps),
+        cert_steps=int(args.guidance_cert_steps),
+        cert_swept_intermediate=int(args.guidance_cert_swept_intermediate),
+        d_safe=float(args.guidance_d_safe),
+        d_trigger=float(args.guidance_d_trigger),
+        d_cert=float(args.guidance_d_cert),
+        eps_deep=float(args.guidance_eps_deep),
+        delta_max=float(args.guidance_delta_max),
+        scp_iterations=int(args.guidance_scp_iterations),
+        delta_max_total=float(args.guidance_delta_max_total),
+        delta_max_pass1=float(args.guidance_delta_max_pass1),
+        delta_max_pass2=float(args.guidance_delta_max_pass2),
+        d_trigger_pass2_offset=float(args.guidance_d_trigger_pass2_offset),
+        margin_buffer=float(args.guidance_margin_buffer),
+        enable_local_waypoint_qp_after_certificate=bool(args.enable_local_waypoint_qp_after_certificate),
+        local_waypoint_qp_window_radius=int(args.local_waypoint_qp_window_radius),
+        local_waypoint_qp_max_collision_segments=int(args.local_waypoint_qp_max_collision_segments),
+        local_waypoint_qp_min_clearance_trigger=float(args.local_waypoint_qp_min_clearance_trigger),
+        local_waypoint_qp_target_buffer=float(args.local_waypoint_qp_target_buffer),
+        local_waypoint_qp_lambda_s=float(args.local_waypoint_qp_lambda_s),
+        local_waypoint_qp_delta_max=float(args.local_waypoint_qp_delta_max),
+        local_waypoint_qp_max_velocity_step=float(args.local_waypoint_qp_max_velocity_step),
+        local_waypoint_qp_max_acceleration_step=float(args.local_waypoint_qp_max_acceleration_step),
+        local_waypoint_qp_maxiter=int(args.local_waypoint_qp_maxiter),
+        lambda_s=float(args.guidance_lambda_s),
+        rho=float(args.guidance_rho),
+        ddim_eta=float(args.guidance_ddim_eta),
+        joint_limit_steps=int(args.guidance_joint_limit_steps),
+        fallback_to_terminal_cbf=False,
+    )
+    guidance_runner = SurfaceCBFQPGuidanceRunner(
+        config=guidance_config,
+        environment=environment,
+    )
+    start_joint_normalized = raw_obs["first_joint_angles_normalized"][0].astype(np.float32)
+    end_joint_normalized = raw_obs["last_joint_angles_normalized"][0].astype(np.float32)
+    post_result = guidance_runner.run(
+        candidate_residuals=np.stack(candidate_residuals, axis=0).astype(np.float32),
+        q_start_normalized=start_joint_normalized,
+        q_goal_normalized=end_joint_normalized,
+        delta_w_mean=np.asarray(validator.stats_mean, dtype=np.float32),
+        delta_w_std=np.asarray(validator.stats_std, dtype=np.float32),
+        num_control_points=int(pyb_cfg.num_control_points),
+        spline_degree=int(pyb_cfg.spline_degree),
+    )
+    selected_action_horizon = (
+        policy.normalizer["action"]
+        .unnormalize(
+            torch.from_numpy(np.asarray(post_result.best_normalized_free_residual, dtype=np.float32))
+            .to(device=policy.device, dtype=policy.dtype)
+            .unsqueeze(0)
+        )[0]
+        .detach()
+        .cpu()
+        .numpy()
+        .astype(np.float32)
+    )
+    selected_joint_trajectory = _resample_joint_trajectory_to_steps(
+        np.asarray(post_result.best_joint_trajectory, dtype=np.float32),
+        int(pyb_cfg.target_steps),
+    )
+    selected_score_details = validator.score_candidate(
+        workpiece_id=workpiece_id,
+        normalized_control_points=np.asarray(post_result.best_control_points_normalized, dtype=np.float32),
+        joint_trajectory=selected_joint_trajectory,
+    )
+    post_guidance_log = post_result.log.to_dict()
+    combined_guidance_log = dict(post_guidance_log)
+    combined_guidance_log["planner_mode"] = "qp_guided_diffusion_post_qp"
+    combined_guidance_log["late_stage_guidance_log"] = dict(late_stage_selection.get("guidance_log", {}) or {})
+    combined_guidance_log["late_stage_planning_success"] = bool(late_stage_selection.get("planning_success", False))
+    return {
+        "planner_mode": "qp_guided_diffusion_post_qp",
+        "planning_success": True,
+        "candidate_pool_enabled": False,
+        "surface_cbf_qp_guidance_enabled": True,
+        "late_stage_qp_guided_diffusion_enabled": True,
+        "selected_candidate_idx": int(post_guidance_log.get("selected_candidate_index", post_guidance_log.get("best_candidate_index", 0)) or 0),
+        "selected_candidate_seed": int(late_stage_selection.get("selected_candidate_seed", 0)),
+        "selected_action_horizon": np.asarray(selected_action_horizon, dtype=np.float32),
+        "selected_joint_trajectory": np.asarray(selected_joint_trajectory, dtype=np.float32),
+        "selected_score_details": selected_score_details,
+        "candidate_score_details": [selected_score_details],
+        "candidate_seeds": list(late_stage_selection.get("candidate_seeds", [])),
+        "num_candidates": int(num_candidates),
+        "inference_elapsed_sec": late_stage_selection.get("inference_elapsed_sec"),
+        "guidance_log": combined_guidance_log,
+        "guidance_candidates": list(post_result.candidate_infos),
+        "guidance_candidate_count": int(len(post_result.candidate_infos)),
+        "guidance_repair_attempt_count": int(post_guidance_log.get("repair_attempt_count", 0) or 0),
+        "guidance_repair_attempted_indices": list(post_guidance_log.get("repair_attempted_candidate_indices", []) or []),
+        "final_success_source": str(post_guidance_log.get("final_success_source", "failure") or "failure"),
+    }
+
+
 def _predict_select_candidate(
     *,
     policy,
@@ -1843,8 +2000,8 @@ def main() -> None:
         )
     candidate_pool_enabled = _candidate_pool_enabled(args.candidate_pool)
     planner_mode = str(args.planner_mode)
-    guidance_enabled = planner_mode == "post_qp"
-    qp_guided_diffusion_enabled = planner_mode == "qp_guided_diffusion"
+    guidance_enabled = planner_mode in {"post_qp", "qp_guided_diffusion_post_qp"}
+    qp_guided_diffusion_enabled = planner_mode in {"qp_guided_diffusion", "qp_guided_diffusion_post_qp"}
     effective_num_candidates = (
         int(args.num_candidates)
         if args.num_candidates is not None
@@ -1976,6 +2133,20 @@ def main() -> None:
                 selection["planning_success"] = True
             elif planner_mode == "qp_guided_diffusion":
                 selection = _predict_late_stage_qp_guided_diffusion(
+                    policy=policy,
+                    validator=validator,
+                    pyb_cfg=pyb_cfg,
+                    obs_dict=obs_dict,
+                    raw_obs=raw_obs,
+                    workpiece_id=wid,
+                    device=device,
+                    batch_start=idx,
+                    num_candidates_override=args.num_candidates,
+                    measure_inference_time=bool(args.measure_inference_time),
+                    args=args,
+                )
+            elif planner_mode == "qp_guided_diffusion_post_qp":
+                selection = _predict_qp_guided_diffusion_then_post_qp(
                     policy=policy,
                     validator=validator,
                     pyb_cfg=pyb_cfg,

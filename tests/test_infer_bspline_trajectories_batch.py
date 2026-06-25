@@ -224,6 +224,24 @@ class InferBsplineTrajectoriesBatchTests(unittest.TestCase):
         self.assertEqual(args.local_waypoint_qp_max_acceleration_step, 0.4)
         self.assertEqual(args.local_waypoint_qp_maxiter, 100)
 
+    def test_parser_accepts_combined_planner_mode(self):
+        parser = self.module.build_parser()
+        args = parser.parse_args(
+            [
+                "--input-dirs",
+                "/tmp/results",
+                "--checkpoint-path",
+                "/tmp/model.ckpt",
+                "--stats-path",
+                "/tmp/stats.npz",
+                "--output-root",
+                "/tmp/out",
+                "--planner-mode",
+                "qp_guided_diffusion_post_qp",
+            ]
+        )
+        self.assertEqual(args.planner_mode, "qp_guided_diffusion_post_qp")
+
     def test_policy_requires_cspace_feature_detects_cspace_checkpoint(self):
         module = self.module
 

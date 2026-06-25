@@ -210,12 +210,14 @@ def add_surface_cbf_qp_guidance_parser_args(
     )
     parser.add_argument(
         "--planner-mode",
-        choices=("baseline", "post_qp", "qp_guided_diffusion"),
+        choices=("baseline", "post_qp", "qp_guided_diffusion", "qp_guided_diffusion_post_qp"),
         default=argparse.SUPPRESS,
         help=(
             "Planner mode: baseline keeps raw DDIM, post_qp keeps the legacy "
             "surface CBF-QP post-processing path, qp_guided_diffusion runs the "
-            "new late-stage QP-guided DDIM sampler."
+            "new late-stage QP-guided DDIM sampler, and "
+            "qp_guided_diffusion_post_qp runs late-stage guided diffusion "
+            "followed by the legacy post-QP repair/certification path."
         ),
     )
     enabled_group = parser.add_mutually_exclusive_group()
