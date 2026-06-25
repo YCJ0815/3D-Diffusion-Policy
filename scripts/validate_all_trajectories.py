@@ -1310,6 +1310,7 @@ def _predict_surface_cbf_qp_guided(
         workpiece_id=int(workpiece_id),
         joint_lower_limits=np.asarray(validator.joint_lower_limits, dtype=np.float32),
         joint_upper_limits=np.asarray(validator.joint_upper_limits, dtype=np.float32),
+        surface_points_per_link_override=_qp_guided_surface_points_per_link(args),
     )
     guidance_config = SurfaceCBFQPGuidanceConfig(
         enabled=True,

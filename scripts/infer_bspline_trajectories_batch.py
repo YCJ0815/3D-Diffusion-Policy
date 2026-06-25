@@ -1036,6 +1036,7 @@ def predict_surface_cbf_qp_guided_outputs(
         workpiece_id=workpiece_id,
         joint_lower_limits=planning_result.joint_lower_limits,
         joint_upper_limits=planning_result.joint_upper_limits,
+        surface_points_per_link_override=qp_guided_surface_points_per_link(args),
     )
     guidance_config = SurfaceCBFQPGuidanceConfig(
         enabled=True,
