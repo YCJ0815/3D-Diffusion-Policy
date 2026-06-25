@@ -53,6 +53,9 @@ from guidance_config import (  # noqa: E402
 )
 
 
+QP_GUIDED_SURFACE_POINTS_PER_LINK = {"pen_link": 80, "wrist_3_link": 16}
+
+
 def _format_qp_skip_reason(reason: str | None) -> str:
     reason_map = {
         None: "unknown",
@@ -1382,6 +1385,7 @@ def _predict_late_stage_qp_guided_diffusion(
         workpiece_id=int(workpiece_id),
         joint_lower_limits=np.asarray(validator.joint_lower_limits, dtype=np.float32),
         joint_upper_limits=np.asarray(validator.joint_upper_limits, dtype=np.float32),
+        surface_points_per_link_override=QP_GUIDED_SURFACE_POINTS_PER_LINK,
     )
     scp_config = SurfaceCBFQPGuidanceConfig(
         enabled=True,
@@ -1611,6 +1615,7 @@ def _predict_qp_guided_diffusion_then_post_qp(
         workpiece_id=int(workpiece_id),
         joint_lower_limits=np.asarray(validator.joint_lower_limits, dtype=np.float32),
         joint_upper_limits=np.asarray(validator.joint_upper_limits, dtype=np.float32),
+        surface_points_per_link_override=QP_GUIDED_SURFACE_POINTS_PER_LINK,
     )
     guidance_config = SurfaceCBFQPGuidanceConfig(
         enabled=True,

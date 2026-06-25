@@ -159,6 +159,7 @@ class PyBulletSurfaceEnvironmentAdapter:
         workpiece_id: int,
         joint_lower_limits: np.ndarray,
         joint_upper_limits: np.ndarray,
+        surface_points_per_link_override: dict[str, int] | None = None,
     ):
         self.validator = validator
         self.workpiece_id = int(workpiece_id)
@@ -169,15 +170,55 @@ class PyBulletSurfaceEnvironmentAdapter:
         self.client_id = validator.client_id
         self.revolute_joint_indices = tuple(int(v) for v in validator.revolute_joint_indices)
         self.link_index_to_name = dict(validator.link_index_to_name)
-        self.robot_surface_points_by_link = {
-            int(link_index): np.asarray(points, dtype=np.float32)
-            for link_index, points in validator.robot_surface_points_by_link.items()
-        }
+        self.robot_surface_points_by_link = self._select_surface_points_by_link(
+            validator_surface_points_by_link=validator.robot_surface_points_by_link,
+            points_per_link_override=surface_points_per_link_override,
+        )
         self._surface_samples = self._build_surface_sample_index()
 
     @property
     def surface_samples(self) -> list[dict[str, Any]]:
         return self._surface_samples
+
+    def _select_surface_points_by_link(
+        self,
+        *,
+        validator_surface_points_by_link: dict[int, np.ndarray],
+        points_per_link_override: dict[str, int] | None,
+    ) -> dict[int, np.ndarray]:
+        if points_per_link_override is None:
+            return {
+                int(link_index): np.asarray(points, dtype=np.float32)
+                for link_index, points in validator_surface_points_by_link.items()
+            }
+        selected: dict[int, np.ndarray] = {}
+        link_name_to_index = {str(name): int(index) for index, name in self.link_index_to_name.items()}
+        missing_links: list[str] = []
+        for link_name, requested_count in points_per_link_override.items():
+            link_index = link_name_to_index.get(str(link_name))
+            if link_index is None or link_index not in validator_surface_points_by_link:
+                missing_links.append(str(link_name))
+                continue
+            count = int(requested_count)
+            if count <= 0:
+                continue
+            points = np.asarray(validator_surface_points_by_link[link_index], dtype=np.float32)
+            selected[link_index] = points[: min(count, points.shape[0])].astype(np.float32)
+        if missing_links:
+            available_link_names = [
+                self.link_index_to_name.get(int(link_index), str(link_index))
+                for link_index in validator_surface_points_by_link.keys()
+            ]
+            raise ValueError(
+                "Surface guidance requested robot surface links that are not available "
+                f"in the validator samples: missing={missing_links}, available={available_link_names}"
+            )
+        if not selected:
+            raise ValueError(
+                "surface_points_per_link_override did not select any robot surface samples. "
+                f"override={points_per_link_override}"
+            )
+        return selected
 
     @property
     def dof(self) -> int:
