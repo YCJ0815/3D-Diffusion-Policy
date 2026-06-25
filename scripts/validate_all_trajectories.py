@@ -500,7 +500,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--num-inference-steps",
         type=int,
-        default=100,
+        default=10,
         help="DDIM denoising steps for validation inference.",
     )
     parser.add_argument(

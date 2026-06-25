@@ -23,7 +23,7 @@ GUIDANCE_CONFIG_FALLBACKS: dict[str, Any] = {
     "planner_mode": "baseline",
     "enable_surface_cbf_qp_guidance": False,
     "num_candidates": 32,
-    "candidate_inference_steps": None,
+    "candidate_inference_steps": 10,
     "qp_candidates": 32,
     "guidance_timesteps": [],
     "qp_inner_scp_rounds": 2,

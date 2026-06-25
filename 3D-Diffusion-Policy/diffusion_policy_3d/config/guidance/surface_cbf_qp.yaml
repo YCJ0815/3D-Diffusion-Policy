@@ -2,7 +2,7 @@ surface_cbf_qp_guidance:
   planner_mode: baseline
   enabled: false
   num_candidates: 32
-  candidate_inference_steps: null
+  candidate_inference_steps: 10
 
   qp_guided_diffusion:
     guidance_timesteps: []
