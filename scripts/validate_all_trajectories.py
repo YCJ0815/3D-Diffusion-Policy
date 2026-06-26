@@ -2404,18 +2404,21 @@ def main() -> None:
                     f"  [debug] pred_action_horizon shape: {selected_action_horizon.shape}"
                 )
 
-            if not bool(selection.get("planning_success", True)) or joint_trajectory.size == 0:
+            planning_success = bool(selection.get("planning_success", True))
+            if not planning_success or joint_trajectory.size == 0:
+                failed_segment_steps = int(pyb_cfg.target_steps)
                 metric = {
                     "has_collision": True,
-                    "segment_collision_steps": 0,
-                    "segment_steps": 0,
-                    "collision_step_count": 0,
+                    "segment_collision_steps": failed_segment_steps,
+                    "segment_steps": failed_segment_steps,
+                    "collision_step_count": failed_segment_steps,
                     "collision_point_count": 0,
                     "min_sdf_distance_m": float("nan"),
                     "goal_error_m": float("nan"),
                     "goal_reached": False,
                     "success": False,
                     "pybullet_pass": False,
+                    "planning_failure_imputed_collision": True,
                 }
             else:
                 metric = validator.evaluate_trajectory(
@@ -2428,6 +2431,7 @@ def main() -> None:
                     episode_idx=int(ep_idx),
                 )
                 metric["pybullet_pass"] = not bool(metric.get("has_collision", False))
+                metric["planning_failure_imputed_collision"] = False
             start_joint_state = validator._unnormalize_joint_state(
                 raw_obs["first_joint_angles_normalized"][0]
             )
@@ -2470,6 +2474,9 @@ def main() -> None:
                 "planner_mode": str(selection.get("planner_mode", planner_mode)),
                 "planning_success": bool(selection.get("planning_success", True)),
                 "pybullet_pass": bool(metric.get("pybullet_pass", False)),
+                "planning_failure_imputed_collision": bool(
+                    metric.get("planning_failure_imputed_collision", False)
+                ),
                 "candidate_pool_enabled": bool(selection["candidate_pool_enabled"]),
                 "surface_cbf_qp_guidance_enabled": bool(selection.get("surface_cbf_qp_guidance_enabled", False)),
                 "late_stage_qp_guided_diffusion_enabled": bool(selection.get("late_stage_qp_guided_diffusion_enabled", False)),
@@ -2548,6 +2555,10 @@ def main() -> None:
     mean_min_sdf = float(np.mean(sdf_distances)) if sdf_distances else float("nan")
     sdf_valid_rate = len(sdf_distances) / total if total > 0 else 0.0
     goal_reached_count = sum(1 for t in per_traj_metrics if t["goal_reached"])
+    planning_failure_count = sum(1 for t in per_traj_metrics if not t["planning_success"])
+    planning_failure_imputed_collision_count = sum(
+        1 for t in per_traj_metrics if t["planning_failure_imputed_collision"]
+    )
     mean_goal_error = float(np.mean(goal_errors)) if goal_errors else float("nan")
     singularity_group_summary = _build_singularity_group_summary(per_traj_metrics)
 
@@ -2636,6 +2647,9 @@ def main() -> None:
             "trajectory_collision_rate": float(traj_collision_rate),
             "collision_free_trajectory_rate": float(collision_free_rate),
             "overall_segment_collision_rate": float(overall_segment_collision_rate),
+            "planning_failure_count": int(planning_failure_count),
+            "planning_failure_rate": planning_failure_count / total if total > 0 else 0.0,
+            "planning_failure_imputed_collision_count": int(planning_failure_imputed_collision_count),
             "mean_min_sdf_distance_m": float(mean_min_sdf),
             "sdf_valid_rate": float(sdf_valid_rate),
             "goal_reached_count": int(goal_reached_count),
@@ -2667,6 +2681,11 @@ def main() -> None:
         f"{int(total_segment_collision_steps)}/{int(total_segment_steps)} "
         f"({overall_segment_collision_rate * 100:.1f}%)"
     )
+    if planning_failure_count > 0:
+        print(
+            f"  Planning failures:                 {int(planning_failure_count)} "
+            f"({planning_failure_count / total * 100:.1f}%, imputed as full collision segments)"
+        )
     print(f"  Mean min SDF distance:            {mean_min_sdf:.4f} m")
     print(f"  SDF valid rate:                   {sdf_valid_rate * 100:.1f}%")
     print(
