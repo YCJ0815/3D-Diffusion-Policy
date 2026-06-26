@@ -121,6 +121,10 @@ class GuidanceLog:
     selected_candidate_post_qp1_min_clearance: float = math.nan
     selected_candidate_post_qp2_min_clearance: float = math.nan
     selected_candidate_certificate_min_clearance: float = math.nan
+    min_sdf: float = math.nan
+    min_clearance: float = math.nan
+    num_penetration: int = 0
+    max_penetration_depth: float = math.nan
     local_waypoint_qp_attempted_total: int = 0
     local_waypoint_qp_success_total: int = 0
     selected_candidate_local_waypoint_qp_attempted: bool = False
@@ -1416,6 +1420,10 @@ class SurfaceCBFQPGuidanceRunner:
         log.selected_candidate_post_qp1_min_clearance = float(selected_candidate_info.get("post_qp1_min_clearance", math.nan))
         log.selected_candidate_post_qp2_min_clearance = float(selected_candidate_info.get("post_qp2_min_clearance", math.nan))
         log.selected_candidate_certificate_min_clearance = float(selected_candidate_info.get("certificate_min_clearance", math.nan))
+        log.min_sdf = float(selected_candidate_info.get("min_sdf", math.nan))
+        log.min_clearance = float(selected_candidate_info.get("min_clearance", math.nan))
+        log.num_penetration = int(selected_candidate_info.get("num_penetration", 0))
+        log.max_penetration_depth = float(selected_candidate_info.get("max_penetration_depth", math.nan))
         log.total_time = time.perf_counter() - start_time
         return GuidanceResult(
             best_index=selected_index,
@@ -1590,6 +1598,13 @@ class SurfaceCBFQPGuidanceRunner:
                 final_success_source = "local_qp_success"
             else:
                 final_joint_trajectory = np.asarray(cert_result["joint_trajectory"], dtype=np.float32)
+        cert_sdf = np.asarray(cert_result.get("sdf_result", {}).get("all_sdf_values", np.empty((0,), dtype=np.float32)), dtype=np.float32).reshape(-1)
+        finite_cert_sdf = cert_sdf[np.isfinite(cert_sdf)]
+        candidate_info["min_sdf"] = float(np.min(finite_cert_sdf)) if finite_cert_sdf.size > 0 else math.nan
+        candidate_info["min_clearance"] = float(candidate_info["min_sdf"])
+        penetration_mask = finite_cert_sdf < 0.0
+        candidate_info["num_penetration"] = int(np.count_nonzero(penetration_mask))
+        candidate_info["max_penetration_depth"] = float(np.max(-finite_cert_sdf[penetration_mask])) if np.any(penetration_mask) else 0.0
         serialized_pass_details = [self._serialize_pass_detail(detail) for detail in pass_results]
         while len(serialized_pass_details) < int(self.config.scp_iterations):
             serialized_pass_details.append(
