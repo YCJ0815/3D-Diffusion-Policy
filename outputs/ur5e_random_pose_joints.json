@@ -1,0 +1,22 @@
+{
+  "urdf": "config/ur5e_with_pen.urdf",
+  "seed": 20260713,
+  "joint_angles_rad": {
+    "shoulder_pan_joint": -3.683179110346982,
+    "shoulder_lift_joint": 5.6917894459808664,
+    "elbow_joint": -3.06983154361364,
+    "wrist_1_joint": -5.453588931297648,
+    "wrist_2_joint": -3.730753428328312,
+    "wrist_3_joint": 0.34432362924184634
+  },
+  "joint_angles_deg": {
+    "shoulder_pan_joint": -211.03061821363139,
+    "shoulder_lift_joint": 326.1155131318087,
+    "elbow_joint": -175.88839126519227,
+    "wrist_1_joint": -312.4676289626163,
+    "wrist_2_joint": -213.75642584717494,
+    "wrist_3_joint": 19.728290742185134
+  },
+  "image": "outputs/ur5e_random_pose_transparent.png",
+  "visual_source": "URDF visual meshes (.dae from config/robot-model/meshes/ur5e/visual)"
+}

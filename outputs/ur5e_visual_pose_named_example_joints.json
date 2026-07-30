@@ -1,0 +1,45 @@
+{
+  "urdf": "config/ur5e_with_pen.urdf",
+  "joint_order": [
+    "shoulder_pan_joint",
+    "shoulder_lift_joint",
+    "elbow_joint",
+    "wrist_1_joint",
+    "wrist_2_joint",
+    "wrist_3_joint"
+  ],
+  "default_joint_angles_rad": {
+    "shoulder_pan_joint": 0.0,
+    "shoulder_lift_joint": -1.5708,
+    "elbow_joint": 1.5708,
+    "wrist_1_joint": -1.5708,
+    "wrist_2_joint": -1.5708,
+    "wrist_3_joint": 0.0
+  },
+  "default_joint_angles_deg": {
+    "shoulder_pan_joint": 0.0,
+    "shoulder_lift_joint": -90.00021045914971,
+    "elbow_joint": 90.00021045914971,
+    "wrist_1_joint": -90.00021045914971,
+    "wrist_2_joint": -90.00021045914971,
+    "wrist_3_joint": 0.0
+  },
+  "joint_angles_rad": {
+    "shoulder_pan_joint": 0.5235987755982988,
+    "shoulder_lift_joint": -1.3089969389957472,
+    "elbow_joint": 1.9198621771937625,
+    "wrist_1_joint": -2.0943951023931953,
+    "wrist_2_joint": -1.0471975511965976,
+    "wrist_3_joint": 0.3490658503988659
+  },
+  "joint_angles_deg": {
+    "shoulder_pan_joint": 29.999999999999996,
+    "shoulder_lift_joint": -75.0,
+    "elbow_joint": 110.0,
+    "wrist_1_joint": -119.99999999999999,
+    "wrist_2_joint": -59.99999999999999,
+    "wrist_3_joint": 20.0
+  },
+  "image": "outputs/ur5e_visual_pose_named_example.png",
+  "visual_source": "URDF visual meshes (.dae from config/robot-model/meshes/ur5e/visual)"
+}

@@ -9,11 +9,9 @@ task_name: ${task.name}
 shape_meta: ${task.shape_meta}
 exp_name: "debug"
 
-# horizon: 4
-horizon: 16
-n_obs_steps: 2
-# n_action_steps: 3
-n_action_steps: 8
+horizon: 10
+n_obs_steps: 1
+n_action_steps: 10
 n_latency_steps: 0
 dataset_obs_steps: ${n_obs_steps}
 keypoint_visible_rate: 1.0
@@ -76,7 +74,37 @@ policy:
     final_norm: layernorm # layernorm, none
     normal_channel: false
   trajectory_loss:
-    enabled: false
+    enabled: true
+    stats_path: /root/autodl-tmp/3D-Diffusion-Policy/data/realdex_bspline_stats_free10.npz
+    jobs_sdf_root: /root/weld-robot/data_generation/data/generated_jobs
+    simple_sdf_root: /root/weld-robot/data_generation/data/generated_jobs/simple_jobs
+    simple_workpiece_id_offset: 1000
+    job_name_template: job_{workpiece_id:03d}
+    sdf_filename: workpiece_sdf.npz
+    urdf_path: config/robot-model/ur5e_with_pen.urdf
+    urdf_package_roots: [config/robot-model]
+    num_control_points: 16
+    trajectory_steps: 16
+    link_surface_point_counts:
+      wrist_3_link: 16
+      pen_link: 80
+    link_collision_weights:
+      wrist_3_link: 0.5
+      pen_link: 10.0
+    topk: 64
+    softmin_beta: 75.0
+    d_safe: 0.03
+    sdf_collision_weight: 0.2
+    trajectory_collision_weight: 0.2
+    oob_weight: 0.05
+    oob_margin: 0.02
+    smooth_weight: 0.01
+    sdf_out_of_bounds_distance_m: 1.0
+    query_chunk_size: 262144
+    cpu_cache_size: 32
+    gpu_cache_size: 8
+    timing_enabled: true
+    timing_sync_cuda: true
 
 
 ema:
@@ -154,7 +182,7 @@ training:
     min_interpolated_steps_per_segment: 1
     goal_position_norm_m: 0.1
     goal_tolerance_m: 0.01
-    num_control_points: 12
+    num_control_points: 16
     spline_degree: 5
     target_steps: 64
     max_episodes: null

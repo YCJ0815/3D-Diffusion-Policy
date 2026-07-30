@@ -1,0 +1,76 @@
+{"kind":"deck","id":"pr/2omfv3","name":"Deck"}
+{"kind":"layout","layoutId":"9d14e9c7-ca34-4d0e-b8b2-9a6153bec1b0","name":"Master","type":"master"}
+{"kind":"layout","layoutId":"148d3354-1423-4d1d-8aea-3da04cdfa346","name":"Title Slide","type":"title"}
+{"kind":"slide","id":"sl/nb5rl3","slide":1,"title":"C-Space-Conditioned 3D Diffusion Policy","textShapes":36}
+{"kind":"textbox","id":"sh/kbuxsb61","slide":1,"name":"figure-title","text":"C-Space-Conditioned 3D Diffusion Policy","textPreview":"C-Space-Conditioned 3D Diffusion Policy","textChars":39,"textLines":1,"bbox":[60,24,980,52]}
+{"kind":"textbox","id":"sh/jalgj65g","slide":1,"name":"figure-subtitle","text":"Multi-modal observation encoding and FiLM-conditioned temporal denoising","textPreview":"Multi-modal observation encoding and FiLM-conditioned temporal denoising","textChars":72,"textLines":1,"bbox":[60,73,980,31]}
+{"kind":"textbox","id":"sh/y9cfq1ov","slide":1,"name":"tensor-notation","text":"Tensor notation: B = batch size, T = trajectory horizon","textPreview":"Tensor notation: B = batch size, T = trajectory horizon","textChars":55,"textLines":1,"bbox":[1110,46,430,34]}
+{"kind":"textbox","id":"sh/t0nypgni","slide":1,"name":"label-observation","text":"A  Observation encoder","textPreview":"A  Observation encoder","textChars":22,"textLines":1,"bbox":[60,116,500,30]}
+{"kind":"shape","id":"sh/8zexwv6x","slide":1,"name":"label-observation-rule","bbox":[60,148,500,0]}
+{"kind":"textbox","id":"sh/7y5gnq5c","slide":1,"name":"label-cspace","text":"B  C-space encoder","textPreview":"B  C-space encoder","textChars":18,"textLines":1,"bbox":[60,445,500,30]}
+{"kind":"shape","id":"sh/6xcfulor","slide":1,"name":"label-cspace-rule","bbox":[60,477,500,0]}
+{"kind":"textbox","id":"sh/94jedw7e","slide":1,"name":"label-conditioning","text":"C  Global conditioning","textPreview":"C  Global conditioning","textChars":22,"textLines":1,"bbox":[590,116,270,30]}
+{"kind":"shape","id":"sh/o3axkr6t","slide":1,"name":"label-conditioning-rule","bbox":[590,148,270,0]}
+{"kind":"textbox","id":"sh/itcz2d8f","slide":1,"name":"label-unet","text":"D  Conditional 1D U-Net","textPreview":"D  Conditional 1D U-Net","textChars":23,"textLines":1,"bbox":[890,116,650,30]}
+{"kind":"shape","id":"sh/julgbi90","slide":1,"name":"label-unet-rule","bbox":[890,148,650,0]}
+{"kind":"textbox","id":"sh/4vuh43q5","slide":1,"name":"point-cloud-input","text":"Point cloud\nB × 1024 × 3","textPreview":"Point cloud | B × 1024 × 3","textChars":24,"textLines":2,"bbox":[60,180,130,74]}
+{"kind":"textbox","id":"sh/5g3yd8rq","slide":1,"name":"pointnet-mlp","text":"PointNet MLP\n3 → 64 → 128 → 256\nLN + ReLU","textPreview":"PointNet MLP | 3 → 64 → 128 → 256 | LN + ReLU","textChars":41,"textLines":3,"bbox":[222,170,170,94]}
+{"kind":"textbox","id":"sh/6hcz6d8b","slide":1,"name":"pointnet-pool","text":"Max pool\n1024 points → 256","textPreview":"Max pool | 1024 points → 256","textChars":26,"textLines":2,"bbox":[424,180,136,74]}
+{"kind":"textbox","id":"sh/ril0fi9w","slide":1,"name":"point-projection","text":"Projection\n256 → 64 + LN","textPreview":"Projection | 256 → 64 + LN","textChars":24,"textLines":2,"bbox":[424,274,136,68]}
+{"kind":"textbox","id":"sh/sjuh8nqh","slide":1,"name":"lowdim-inputs","text":"Low-dimensional state\ngoal position: 3\ngoal direction: 6\nstart/end joints: 6 + 6","textPreview":"Low-dimensional state | goal position: 3 | goal direction: 6 | start/end joints: 6 + 6","textChars":80,"textLines":4,"bbox":[60,291,162,112]}
+{"kind":"textbox","id":"sh/tk3ihsr2","slide":1,"name":"state-mlps","text":"4 independent MLPs\ndᵢ → 32 → 32\nReLU","textPreview":"4 independent MLPs | dᵢ → 32 → 32 | ReLU","textChars":36,"textLines":3,"bbox":[254,306,160,82]}
+{"kind":"textbox","id":"sh/elwzax8n","slide":1,"name":"observation-concat","text":"Concatenate\n64 + 4 × 32 = 192\nDropout 0.1","textPreview":"Concatenate | 64 + 4 × 32 = 192 | Dropout 0.1","textChars":41,"textLines":3,"bbox":[432,352,128,66]}
+{"kind":"textbox","id":"sh/fm50j29s","slide":1,"name":"cspace-input","text":"C-space features\nB × 128 × 2","textPreview":"C-space features | B × 128 × 2","textChars":28,"textLines":2,"bbox":[60,510,142,78]}
+{"kind":"textbox","id":"sh/bq5gr250","slide":1,"name":"cspace-point-mlp","text":"Shared point MLP\n2 → 32 → 64\nLN + ReLU","textPreview":"Shared point MLP | 2 → 32 → 64 | LN + ReLU","textChars":38,"textLines":3,"bbox":[232,500,164,96]}
+{"kind":"textbox","id":"sh/apwfyxof","slide":1,"name":"cspace-pooling","text":"Mean ∥ Max\n64 + 64 = 128","textPreview":"Mean ∥ Max | 64 + 64 = 128","textChars":24,"textLines":2,"bbox":[426,510,134,78]}
+{"kind":"textbox","id":"sh/xs7ytsn6","slide":1,"name":"cspace-projection","text":"Projection\n128 → 64\nLN + ReLU","textPreview":"Projection | 128 → 64 | LN + ReLU","textChars":29,"textLines":3,"bbox":[426,615,134,82]}
+{"kind":"textbox","id":"sh/creh076l","slide":1,"name":"feature-fusion","text":"Feature fusion\n192 ∥ 64 = 256","textPreview":"Feature fusion | 192 ∥ 64 = 256","textChars":29,"textLines":2,"bbox":[620,204,210,78]}
+{"kind":"textbox","id":"sh/nm5gni54","slide":1,"name":"fusion-mlp","text":"Fusion MLP\nLinear 256 → 256\nLN + ReLU","textPreview":"Fusion MLP | Linear 256 → 256 | LN + ReLU","textChars":37,"textLines":3,"bbox":[620,311,210,88]}
+{"kind":"textbox","id":"sh/2lwfudoj","slide":1,"name":"global-condition","text":"Global condition c\nB × 256","textPreview":"Global condition c | B × 256","textChars":26,"textLines":2,"bbox":[620,428,210,74]}
+{"kind":"textbox","id":"sh/ponypsnu","slide":1,"name":"diffusion-timestep","text":"Diffusion step t\nscalar","textPreview":"Diffusion step t | scalar","textChars":23,"textLines":2,"bbox":[620,561,104,68]}
+{"kind":"textbox","id":"sh/onexwn6p","slide":1,"name":"timestep-encoder","text":"Time encoder\nSinusoidal 64\n64 → 256 → 64","textPreview":"Time encoder | Sinusoidal 64 | 64 → 256 → 64","textChars":40,"textLines":3,"bbox":[742,551,118,88]}
+{"kind":"textbox","id":"sh/filgji5s","slide":1,"name":"film-condition","text":"FiLM condition\ntime 64 ∥ c 256\nB × 320","textPreview":"FiLM condition | time 64 ∥ c 256 | B × 320","textChars":38,"textLines":3,"bbox":[678,682,172,84]}
+{"kind":"textbox","id":"sh/excfqdo7","slide":1,"name":"noisy-action","text":"Noisy trajectory xₜ\nB × 10 × 6","textPreview":"Noisy trajectory xₜ | B × 10 × 6","textChars":30,"textLines":2,"bbox":[900,196,142,76]}
+{"kind":"textbox","id":"sh/krq54fit","slide":1,"name":"unet-down-1","text":"FiLM ResBlock\n6 → 64, T = 10","textPreview":"FiLM ResBlock | 6 → 64, T = 10","textChars":28,"textLines":2,"bbox":[1070,196,150,76]}
+{"kind":"textbox","id":"sh/5szmdkze","slide":1,"name":"unet-downsample","text":"Downsample\nConv1D k3, s2\nT: 10 → 5","textPreview":"Downsample | Conv1D k3, s2 | T: 10 → 5","textChars":34,"textLines":3,"bbox":[1248,196,140,76]}
+{"kind":"textbox","id":"sh/ip832503","slide":1,"name":"unet-down-2","text":"FiLM ResBlock\n64 → 128, T = 5","textPreview":"FiLM ResBlock | 64 → 128, T = 5","textChars":29,"textLines":2,"bbox":[1416,196,136,76]}
+{"kind":"textbox","id":"sh/jqh4baho","slide":1,"name":"unet-middle","text":"Bottleneck\nFiLM ResBlock\n128 → 128, T = 5","textPreview":"Bottleneck | FiLM ResBlock | 128 → 128, T = 5","textChars":41,"textLines":3,"bbox":[1396,351,156,88]}
+{"kind":"textbox","id":"sh/sfa58zi5","slide":1,"name":"unet-skip-concat","text":"Skip concatenate\n128 ∥ 128 = 256","textPreview":"Skip concatenate | 128 ∥ 128 = 256","textChars":32,"textLines":2,"bbox":[1396,505,156,76]}
+{"kind":"textbox","id":"sh/tgjmh4zq","slide":1,"name":"unet-up-block","text":"FiLM ResBlock\n256 → 64, T = 5","textPreview":"FiLM ResBlock | 256 → 64, T = 5","textChars":29,"textLines":2,"bbox":[1218,505,150,76]}
+{"kind":"textbox","id":"sh/6d8n6p0z","slide":1,"name":"unet-upsample","text":"Upsample\nConvTranspose1D\nT: 5 → 10","textPreview":"Upsample | ConvTranspose1D | T: 5 → 10","textChars":34,"textLines":3,"bbox":[1040,505,150,76]}
+{"kind":"textbox","id":"sh/7eh4fuhk","slide":1,"name":"unet-output-head","text":"Output head\nConvBlock 64 → 64\n1 × 1 Conv: 64 → 6","textPreview":"Output head | ConvBlock 64 → 64 | 1 × 1 Conv: 64 → 6","textChars":48,"textLines":3,"bbox":[880,500,150,86]}
+{"kind":"textbox","id":"sh/8j6lwvi1","slide":1,"name":"denoised-action","text":"Denoised trajectory\nB × 10 × 6","textPreview":"Denoised trajectory | B × 10 × 6","textChars":30,"textLines":2,"bbox":[880,640,166,76]}
+{"kind":"shape","id":"sh/9kfm50z6","slide":1,"bbox":[190,217,32,0]}
+{"kind":"shape","id":"sh/1sbm1k32","slide":1,"bbox":[392,217,32,0]}
+{"kind":"shape","id":"sh/0r25szmh","slide":1,"bbox":[492,254,0,20]}
+{"kind":"shape","id":"sh/fqt4zulw","slide":1,"bbox":[222,347,32,0]}
+{"kind":"shape","id":"sh/epknqp4b","slide":1,"bbox":[414,347,18,38]}
+{"kind":"shape","id":"sh/dormxk3q","slide":1,"bbox":[492,342,4,10]}
+{"kind":"shape","id":"sh/sni5ofm5","slide":1,"bbox":[202,548,30,1]}
+{"kind":"shape","id":"sh/rm94valk","slide":1,"bbox":[396,548,30,1]}
+{"kind":"shape","id":"sh/ql0nm54f","slide":1,"bbox":[493,588,0,27]}
+{"kind":"shape","id":"sh/5krmt0nu","slide":1,"bbox":[560,243,60,142]}
+{"kind":"shape","id":"sh/4zi5kfm9","slide":1,"bbox":[560,243,60,413]}
+{"kind":"shape","id":"sh/u5wju1k7","slide":1,"bbox":[725,282,0,29]}
+{"kind":"shape","id":"sh/vqpk361c","slide":1,"bbox":[725,399,0,29]}
+{"kind":"shape","id":"sh/gry1wb2x","slide":1,"bbox":[724,595,18,0]}
+{"kind":"shape","id":"sh/hs725gji","slide":1,"bbox":[764,639,37,43]}
+{"kind":"shape","id":"sh/61wjq1kv","slide":1,"bbox":[608,502,117,222]}
+{"kind":"shape","id":"sh/725kz6lg","slide":1,"bbox":[1042,234,28,0]}
+{"kind":"shape","id":"sh/83e1sb21","slide":1,"bbox":[1220,234,28,0]}
+{"kind":"shape","id":"sh/t4n21gjm","slide":1,"bbox":[1388,234,28,0]}
+{"kind":"shape","id":"sh/yxcjmhkz","slide":1,"bbox":[1474,272,10,79]}
+{"kind":"shape","id":"sh/jylkvmlk","slide":1,"bbox":[1474,439,0,66]}
+{"kind":"shape","id":"sh/3qh87yx0","slide":1,"bbox":[1368,543,28,0]}
+{"kind":"shape","id":"sh/2p87etwf","slide":1,"bbox":[1190,543,28,0]}
+{"kind":"shape","id":"sh/pszq98v6","slide":1,"bbox":[1030,543,10,0]}
+{"kind":"shape","id":"sh/orqpg3el","slide":1,"bbox":[955,586,8,54]}
+{"kind":"shape","id":"sh/bu18bydw","slide":1,"bbox":[1484,272,92,271]}
+{"kind":"shape","id":"sh/at87itwb","slide":1,"bbox":[850,272,295,452]}
+{"kind":"shape","id":"sh/xwjqd8v2","slide":1,"bbox":[850,272,634,452]}
+{"kind":"shape","id":"sh/cva9k3eh","slide":1,"bbox":[850,439,624,285]}
+{"kind":"shape","id":"sh/ryx8zexs","slide":1,"bbox":[850,581,443,143]}
+{"kind":"textbox","id":"sh/6xo769w7","slide":1,"name":"resblock-key","text":"Conditional residual block\n[Conv1D(k=5) → GroupNorm(8) → Mish] × 2 + residual\nFiLM scale and bias are applied after the first convolution block.","textPreview":"Conditional residual block | [Conv1D(k=5) → GroupNorm(8) → Mish] × 2 + residual | FiLM scale and bias are applied after the first convolu...","textChars":144,"textLines":3,"bbox":[1060,654,492,112]}
+{"kind":"shape","id":"sh/w3m50fu5","slide":1,"name":"footer-rule","bbox":[60,820,1480,0]}
+{"kind":"textbox","id":"sh/h4vm9kvq","slide":1,"name":"footer-note","text":"Horizon = 10  •  Action dimension = 6  •  Observation steps = 1  •  All encoder features condition the denoising network globally","textPreview":"Horizon = 10  •  Action dimension = 6  •  Observation steps = 1  •  All encoder features condition the denoising network globally","textChars":129,"textLines":1,"bbox":[60,831,1480,30]}
+{"kind":"notes","id":"nt/nb5rl3","slide":1,"text":""}
