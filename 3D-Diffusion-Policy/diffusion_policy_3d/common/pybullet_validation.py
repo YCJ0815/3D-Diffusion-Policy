@@ -1272,6 +1272,8 @@ class PyBulletCollisionValidator:
         segment_collision_steps = 0
         min_sdf_distance_m = float("nan")
         final_tcp_position = None
+        previous_tcp_position = None
+        tcp_path_length_m = 0.0
         collision_events = []
         collision_link_names = set()
         for timestep, joint_state in enumerate(joint_trajectory):
@@ -1310,6 +1312,11 @@ class PyBulletCollisionValidator:
                 else:
                     min_sdf_distance_m = min(min_sdf_distance_m, step_min_sdf_distance_m)
             final_tcp_position, _ = self._get_tcp_pose()
+            if previous_tcp_position is not None:
+                tcp_path_length_m += float(
+                    np.linalg.norm(final_tcp_position - previous_tcp_position)
+                )
+            previous_tcp_position = final_tcp_position
         if final_tcp_position is None:
             raise ValueError("Empty joint trajectory is not valid for pybullet validation.")
 
@@ -1334,6 +1341,21 @@ class PyBulletCollisionValidator:
         goal_error = float(np.linalg.norm(final_tcp_position - target_world_position))
         goal_reached = goal_error <= self.cfg.goal_tolerance_m
         success = bool(not has_collision)
+        joint_differences = np.diff(joint_trajectory, axis=0)
+        joint_path_length_rad = float(
+            np.linalg.norm(joint_differences, axis=1).sum()
+        )
+        if joint_trajectory.shape[0] > 2:
+            joint_second_differences = (
+                joint_trajectory[2:]
+                - 2.0 * joint_trajectory[1:-1]
+                + joint_trajectory[:-2]
+            )
+            joint_smoothness = float(
+                np.mean(np.sum(joint_second_differences ** 2, axis=1))
+            )
+        else:
+            joint_smoothness = 0.0
         return {
             "has_collision": bool(has_collision),
             "segment_collision_steps": float(segment_collision_steps),
@@ -1343,6 +1365,9 @@ class PyBulletCollisionValidator:
             "legacy_trajectory_steps": float(legacy_trajectory_steps),
             "goal_error_m": goal_error,
             "goal_reached": bool(goal_reached),
+            "joint_path_length_rad": joint_path_length_rad,
+            "tcp_path_length_m": float(tcp_path_length_m),
+            "joint_smoothness": joint_smoothness,
             "success": success,
             "collision_link_names": sorted(collision_link_names),
             "collision_events": collision_events,

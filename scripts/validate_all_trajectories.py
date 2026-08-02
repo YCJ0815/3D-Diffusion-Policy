@@ -379,8 +379,11 @@ def _build_validation_status_lines(
         else 0.0
     )
     inference_elapsed_sec = selection.get("inference_elapsed_sec")
+    planning_time_sec = selection.get("planning_time_sec")
     inference_text = (
-        f" infer={float(inference_elapsed_sec):.3f}s"
+        f" planning_time={float(planning_time_sec):.3f}s"
+        if planning_time_sec is not None
+        else f" infer={float(inference_elapsed_sec):.3f}s"
         if inference_elapsed_sec is not None
         else ""
     )
@@ -393,6 +396,9 @@ def _build_validation_status_lines(
     status_line = (
         f"traj_collision_rate={traj_collision_rate_so_far:.3f} "
         f"step_collision_rate={step_collision_rate_so_far:.3f} "
+        f"joint_len={float(metric.get('joint_path_length_rad', float('nan'))):.3f}rad "
+        f"tcp_len={float(metric.get('tcp_path_length_m', float('nan'))):.3f}m "
+        f"smooth={float(metric.get('joint_smoothness', float('nan'))):.6f} "
         f"SCP={qp_summary['guidance_selected_candidate_passes_succeeded']}/"
         f"{qp_summary['guidance_selected_candidate_pass_count']} "
         f"QP={qp_summary['guidance_num_qp_success']}/{qp_summary['guidance_num_qp_called']} "
@@ -2297,6 +2303,10 @@ def main() -> None:
     total_segment_steps = 0
     sdf_distances = []
     goal_errors = []
+    planning_times = []
+    joint_path_lengths = []
+    tcp_path_lengths = []
+    joint_smoothness_values = []
     status_display = _ValidationStatusDisplay()
 
     print(f"\nRunning validation on {len(val_episode_indices)} episodes …")
@@ -2324,6 +2334,9 @@ def main() -> None:
                 )
                 main._printed_device_report = True
 
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            planning_start_time = time.perf_counter()
             if planner_mode == "post_qp":
                 selection = _predict_surface_cbf_qp_guided(
                     policy=policy,
@@ -2384,6 +2397,11 @@ def main() -> None:
                 )
                 selection["planner_mode"] = "baseline"
                 selection["planning_success"] = True
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            selection["planning_time_sec"] = float(
+                time.perf_counter() - planning_start_time
+            )
             joint_trajectory = np.asarray(
                 selection["selected_joint_trajectory"], dtype=np.float32
             )
@@ -2416,6 +2434,9 @@ def main() -> None:
                     "min_sdf_distance_m": float("nan"),
                     "goal_error_m": float("nan"),
                     "goal_reached": False,
+                    "joint_path_length_rad": float("nan"),
+                    "tcp_path_length_m": float("nan"),
+                    "joint_smoothness": float("nan"),
                     "success": False,
                     "pybullet_pass": False,
                     "planning_failure_imputed_collision": True,
@@ -2468,6 +2489,10 @@ def main() -> None:
                 "min_sdf_distance_m": float(metric["min_sdf_distance_m"]),
                 "goal_error_m": float(metric["goal_error_m"]),
                 "goal_reached": bool(metric["goal_reached"]),
+                "planning_time_sec": float(selection["planning_time_sec"]),
+                "joint_path_length_rad": float(metric["joint_path_length_rad"]),
+                "tcp_path_length_m": float(metric["tcp_path_length_m"]),
+                "joint_smoothness": float(metric["joint_smoothness"]),
                 "success": bool(metric["success"]),
                 "selected_candidate_idx": int(selection["selected_candidate_idx"]),
                 "selected_candidate_seed": int(selection["selected_candidate_seed"]),
@@ -2524,6 +2549,13 @@ def main() -> None:
             if not np.isnan(metric["min_sdf_distance_m"]):
                 sdf_distances.append(float(metric["min_sdf_distance_m"]))
             goal_errors.append(float(metric["goal_error_m"]))
+            planning_times.append(float(selection["planning_time_sec"]))
+            if np.isfinite(metric["joint_path_length_rad"]):
+                joint_path_lengths.append(float(metric["joint_path_length_rad"]))
+            if np.isfinite(metric["tcp_path_length_m"]):
+                tcp_path_lengths.append(float(metric["tcp_path_length_m"]))
+            if np.isfinite(metric["joint_smoothness"]):
+                joint_smoothness_values.append(float(metric["joint_smoothness"]))
 
             status_display.render(
                 _build_validation_status_lines(
@@ -2553,6 +2585,7 @@ def main() -> None:
         else 0.0
     )
     mean_min_sdf = float(np.mean(sdf_distances)) if sdf_distances else float("nan")
+    global_min_sdf = float(np.min(sdf_distances)) if sdf_distances else float("nan")
     sdf_valid_rate = len(sdf_distances) / total if total > 0 else 0.0
     goal_reached_count = sum(1 for t in per_traj_metrics if t["goal_reached"])
     planning_failure_count = sum(1 for t in per_traj_metrics if not t["planning_success"])
@@ -2560,6 +2593,20 @@ def main() -> None:
         1 for t in per_traj_metrics if t["planning_failure_imputed_collision"]
     )
     mean_goal_error = float(np.mean(goal_errors)) if goal_errors else float("nan")
+    mean_planning_time = (
+        float(np.mean(planning_times)) if planning_times else float("nan")
+    )
+    mean_joint_path_length = (
+        float(np.mean(joint_path_lengths)) if joint_path_lengths else float("nan")
+    )
+    mean_tcp_path_length = (
+        float(np.mean(tcp_path_lengths)) if tcp_path_lengths else float("nan")
+    )
+    mean_joint_smoothness = (
+        float(np.mean(joint_smoothness_values))
+        if joint_smoothness_values
+        else float("nan")
+    )
     singularity_group_summary = _build_singularity_group_summary(per_traj_metrics)
 
     output_json = output_dir / "per_trajectory_metrics.json"
@@ -2644,6 +2691,8 @@ def main() -> None:
         "summary": {
             "total_validation_episodes": int(total),
             "trajectories_with_collision": int(collision_count),
+            "overall_collision_rate": float(traj_collision_rate),
+            "segment_collision_rate": float(overall_segment_collision_rate),
             "trajectory_collision_rate": float(traj_collision_rate),
             "collision_free_trajectory_rate": float(collision_free_rate),
             "overall_segment_collision_rate": float(overall_segment_collision_rate),
@@ -2651,10 +2700,15 @@ def main() -> None:
             "planning_failure_rate": planning_failure_count / total if total > 0 else 0.0,
             "planning_failure_imputed_collision_count": int(planning_failure_imputed_collision_count),
             "mean_min_sdf_distance_m": float(mean_min_sdf),
+            "global_min_sdf_distance_m": float(global_min_sdf),
             "sdf_valid_rate": float(sdf_valid_rate),
             "goal_reached_count": int(goal_reached_count),
             "goal_reached_rate": goal_reached_count / total if total > 0 else 0.0,
             "mean_goal_error_m": float(mean_goal_error),
+            "mean_planning_time_sec": mean_planning_time,
+            "mean_joint_path_length_rad": mean_joint_path_length,
+            "mean_tcp_path_length_m": mean_tcp_path_length,
+            "mean_joint_smoothness": mean_joint_smoothness,
             "singularity_groups": singularity_group_summary,
         },
         "per_trajectory": per_traj_metrics,
@@ -2669,7 +2723,7 @@ def main() -> None:
     print("=" * 56)
     print(f"  Total validation episodes:        {int(total)}")
     print(
-        f"  Collision trajectories:           {int(collision_count)} "
+        f"  Overall collision rate (traj):    {int(collision_count)}/{int(total)} "
         f"({traj_collision_rate * 100:.1f}%)"
     )
     print(
@@ -2677,7 +2731,7 @@ def main() -> None:
         f"({collision_free_rate * 100:.1f}%)"
     )
     print(
-        f"  Overall segment collision rate:    "
+        f"  Segment collision rate:           "
         f"{int(total_segment_collision_steps)}/{int(total_segment_steps)} "
         f"({overall_segment_collision_rate * 100:.1f}%)"
     )
@@ -2687,12 +2741,17 @@ def main() -> None:
             f"({planning_failure_count / total * 100:.1f}%, imputed as full collision segments)"
         )
     print(f"  Mean min SDF distance:            {mean_min_sdf:.4f} m")
+    print(f"  Global min SDF distance:          {global_min_sdf:.4f} m")
     print(f"  SDF valid rate:                   {sdf_valid_rate * 100:.1f}%")
     print(
         f"  Goal reached:                     {goal_reached_count} "
         f"({goal_reached_count / total * 100:.1f}%)"
     )
     print(f"  Mean goal error:                  {mean_goal_error:.4f} m")
+    print(f"  Mean planning time:               {mean_planning_time:.4f} s")
+    print(f"  Mean joint path length:           {mean_joint_path_length:.4f} rad")
+    print(f"  Mean TCP path length:             {mean_tcp_path_length:.4f} m")
+    print(f"  Mean joint smoothness:            {mean_joint_smoothness:.6f}")
     print("  Singularity groups:")
     for group_name, group_metrics in singularity_group_summary.items():
         print(
