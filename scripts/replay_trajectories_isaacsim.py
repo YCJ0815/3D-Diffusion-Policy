@@ -456,7 +456,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--trajectory-markers",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Show red/green spheres at the tool start/end positions (default: enabled).",
+        help=(
+            "Show red/green TCP spheres at original trajectory samples "
+            "1 and -1 (default: enabled)."
+        ),
     )
     parser.add_argument(
         "--marker-radius-m",
@@ -477,8 +480,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--tool-link-name",
         default="tool0",
         help=(
-            "TCP USD link/prim whose world position defines the complete "
-            "trajectory endpoints (default: tool0)."
+            "TCP USD link/prim whose world position defines the trajectory "
+            "markers (default: tool0)."
         ),
     )
     parser.add_argument("--dome-light-intensity", type=float, default=900.0)
@@ -640,6 +643,11 @@ def load_trajectory(path: pathlib.Path) -> tuple[np.ndarray, list[str], int]:
         raise ValueError(
             f"invalid trajectory {path}: shape={trajectory.shape}, joints={joint_names}"
         )
+    if trajectory.shape[0] < 2:
+        raise ValueError(
+            f"trajectory must contain at least 2 samples for marker indices "
+            f"1 and -1: {path} has {trajectory.shape[0]}"
+        )
     if not np.all(np.isfinite(trajectory)):
         raise ValueError(f"trajectory contains NaN/Inf: {path}")
     return trajectory, joint_names, episode_idx
@@ -741,7 +749,7 @@ def create_endpoint_markers(
     radius: float,
     camera_offset: float,
 ) -> None:
-    """Create bright spheres centred at the complete trajectory's TCP endpoints."""
+    """Create bright spheres centred at the selected TCP marker positions."""
     from pxr import Gf, Sdf, UsdGeom, UsdShade
 
     ensure_xform(stage, "/World/TrajectoryMarkers")
@@ -1044,6 +1052,8 @@ def write_episode_metadata(
             "end_color": "green",
             "radius_m": args.marker_radius_m,
             "camera_offset_m": args.marker_camera_offset_m,
+            "start_sample_index": 1,
+            "end_sample_index": -1,
             "start_tcp_world_m": (
                 None if marker_start_position is None else list(marker_start_position)
             ),
@@ -1201,9 +1211,10 @@ def main() -> None:
         for trajectory_path in args.trajectories:
             print(f"[replay] loading trajectory: {trajectory_path}", flush=True)
             trajectory, joint_names, episode_idx = load_trajectory(trajectory_path)
-            # Endpoint markers must describe the complete, original trajectory.
-            # Keep its first/last joint configurations before frame resampling.
-            start_waypoint = trajectory[0].copy()
+            # The exported boundary samples are not the requested TCP markers.
+            # Use the second and final configurations of each episode's
+            # original trajectory, before any frame resampling.
+            start_waypoint = trajectory[1].copy()
             end_waypoint = trajectory[-1].copy()
             trajectory = resample_trajectory(trajectory, args.num_frames)
             dof_indices = resolve_dof_indices(robot, joint_names)
@@ -1227,8 +1238,9 @@ def main() -> None:
                     )
                 )
                 print(
-                    f"[markers:{episode_name}] TCP start={start_position}, "
-                    f"end={end_position}, distance={endpoint_distance:.6f} m",
+                    f"[markers:{episode_name}] TCP start[index=1]={start_position}, "
+                    f"end[index=-1]={end_position}, "
+                    f"distance={endpoint_distance:.6f} m",
                     flush=True,
                 )
                 create_endpoint_markers(
