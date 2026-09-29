@@ -458,7 +458,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=True,
         help=(
             "Show red/green TCP spheres at original trajectory samples "
-            "1 and -1 (default: enabled)."
+            "0 and -1 (default: enabled)."
         ),
     )
     parser.add_argument(
@@ -646,7 +646,7 @@ def load_trajectory(path: pathlib.Path) -> tuple[np.ndarray, list[str], int]:
     if trajectory.shape[0] < 2:
         raise ValueError(
             f"trajectory must contain at least 2 samples for marker indices "
-            f"1 and -1: {path} has {trajectory.shape[0]}"
+            f"0 and -1: {path} has {trajectory.shape[0]}"
         )
     if not np.all(np.isfinite(trajectory)):
         raise ValueError(f"trajectory contains NaN/Inf: {path}")
@@ -687,13 +687,13 @@ def orbit_camera_position(
 
 def find_tool_prim(stage: Any, robot_prim_path: str, tool_link_name: str) -> Any:
     """Find the tool prim used to derive Cartesian trajectory endpoints."""
-    from pxr import Usd
+    from pxr import Usd, UsdGeom
 
     robot_prim = stage.GetPrimAtPath(robot_prim_path)
     matches = [
         prim
         for prim in Usd.PrimRange(robot_prim)
-        if prim.GetName() == tool_link_name
+        if prim.GetName() == tool_link_name and prim.IsA(UsdGeom.Xformable)
     ]
     if not matches:
         available = sorted(
@@ -708,10 +708,9 @@ def find_tool_prim(stage: Any, robot_prim_path: str, tool_link_name: str) -> Any
             f"available prim names={available}"
         )
     if len(matches) > 1:
-        print(
-            f"[markers] multiple prims named {tool_link_name!r}; using "
-            f"{matches[0].GetPath()}",
-            flush=True,
+        raise RuntimeError(
+            f"Ambiguous TCP link {tool_link_name!r}: "
+            f"{[str(prim.GetPath()) for prim in matches]}"
         )
     return matches[0]
 
@@ -1120,7 +1119,7 @@ def write_episode_metadata(
             "end_color": "green",
             "radius_m": args.marker_radius_m,
             "camera_offset_m": args.marker_camera_offset_m,
-            "start_sample_index": 1,
+            "start_sample_index": 0,
             "end_sample_index": -1,
             "start_tcp_world_m": (
                 None if marker_start_position is None else list(marker_start_position)
@@ -1284,10 +1283,8 @@ def main() -> None:
         for trajectory_path in args.trajectories:
             print(f"[replay] loading trajectory: {trajectory_path}", flush=True)
             trajectory, joint_names, episode_idx = load_trajectory(trajectory_path)
-            # The exported boundary samples are not the requested TCP markers.
-            # Use the second and final configurations of each episode's
-            # original trajectory, before any frame resampling.
-            start_waypoint = trajectory[1].copy()
+            # Match the TCP in the first and last exported frames exactly.
+            start_waypoint = trajectory[0].copy()
             end_waypoint = trajectory[-1].copy()
             trajectory = resample_trajectory(trajectory, args.num_frames)
             dof_indices = resolve_dof_indices(robot, joint_names)
@@ -1298,12 +1295,15 @@ def main() -> None:
             )
             start_position = None
             end_position = None
+            world.pause()
             if tool_prim is not None:
                 apply_waypoint(robot, dof_indices, start_waypoint)
-                world.step(render=False)
+                sync_replay_pose(world, replay_physics_view, replay_physx)
+                verify_capture_pose(robot, dof_indices, start_waypoint)
                 start_position = prim_world_position(tool_prim)
                 apply_waypoint(robot, dof_indices, end_waypoint)
-                world.step(render=False)
+                sync_replay_pose(world, replay_physics_view, replay_physx)
+                verify_capture_pose(robot, dof_indices, end_waypoint)
                 end_position = prim_world_position(tool_prim)
                 endpoint_distance = float(
                     np.linalg.norm(
@@ -1311,7 +1311,7 @@ def main() -> None:
                     )
                 )
                 print(
-                    f"[markers:{episode_name}] TCP start[index=1]={start_position}, "
+                    f"[markers:{episode_name}] TCP start[index=0]={start_position}, "
                     f"end[index=-1]={end_position}, "
                     f"distance={endpoint_distance:.6f} m",
                     flush=True,
@@ -1370,6 +1370,26 @@ def main() -> None:
                     rgb_data = np.asarray(rgb_annotator.get_data())
                     if rgb_data.size > 0:
                         verify_capture_pose(robot, dof_indices, waypoint)
+                        if tool_prim is not None and frame_index in (0, len(trajectory) - 1):
+                            marker_name = "Start" if frame_index == 0 else "End"
+                            tcp_position = prim_world_position(tool_prim)
+                            sphere_position = prim_world_position(
+                                stage.GetPrimAtPath(f"/World/TrajectoryMarkers/{marker_name}")
+                            )
+                            distance_m = float(np.linalg.norm(
+                                np.asarray(tcp_position) - np.asarray(sphere_position)
+                            ))
+                            print(
+                                f"[endpoint-check] episode={episode_name} frame={frame_index} "
+                                f"marker={marker_name} tcp={tcp_position} "
+                                f"sphere={sphere_position} distance_mm={distance_m * 1000:.6f}",
+                                flush=True,
+                            )
+                            if args.marker_camera_offset_m == 0.0 and distance_m > 1e-4:
+                                raise RuntimeError(
+                                    f"{marker_name} sphere does not match captured TCP: "
+                                    f"{distance_m * 1000:.6f} mm"
+                                )
                         captured_rgb = rgb_data.copy()
                         if previous_rgb is not None:
                             identical = np.array_equal(previous_rgb, captured_rgb)
