@@ -1,0 +1,96 @@
+{
+  "source_metrics_json": "/Users/ycj/Desktop/Workbench/research/dual-stage-guided-diffusion-model/experiments/dp-dual/per_trajectory_metrics.json",
+  "urdf_path": "/Users/ycj/Desktop/Workbench/research/dual-stage-guided-diffusion-model/code/3D-Diffusion-Policy/config/ur5e_with_pen.urdf",
+  "joint_names": [
+    "shoulder_pan_joint",
+    "shoulder_lift_joint",
+    "elbow_joint",
+    "wrist_1_joint",
+    "wrist_2_joint",
+    "wrist_3_joint"
+  ],
+  "dt_sec": null,
+  "precision_note": "Trajectories were reconstructed from normalized control points serialized as decimal text by validate_all_trajectories.py.",
+  "episodes": [
+    {
+      "episode_idx": 26301,
+      "validation_subset_index": 485,
+      "workpiece_id": 9,
+      "selected_candidate_index": 0,
+      "shape": [
+        32,
+        6
+      ],
+      "dt_sec": null,
+      "source_joint_path_length_rad": 2.9336578845977783,
+      "reconstructed_joint_path_length_rad": 2.933684825897217,
+      "source_joint_smoothness": 0.00039429482421837747,
+      "reconstructed_joint_smoothness": 0.00039539262070320547,
+      "files": {
+        "npz": "episode_26301_trajectory.npz",
+        "csv": "episode_26301_trajectory.csv",
+        "json": "episode_26301_trajectory.json"
+      }
+    },
+    {
+      "episode_idx": 26297,
+      "validation_subset_index": 481,
+      "workpiece_id": 9,
+      "selected_candidate_index": 1,
+      "shape": [
+        32,
+        6
+      ],
+      "dt_sec": null,
+      "source_joint_path_length_rad": 2.932199001312256,
+      "reconstructed_joint_path_length_rad": 2.932224988937378,
+      "source_joint_smoothness": 0.00039599265437573195,
+      "reconstructed_joint_smoothness": 0.0003970830875914544,
+      "files": {
+        "npz": "episode_26297_trajectory.npz",
+        "csv": "episode_26297_trajectory.csv",
+        "json": "episode_26297_trajectory.json"
+      }
+    },
+    {
+      "episode_idx": 26120,
+      "validation_subset_index": 376,
+      "workpiece_id": 9,
+      "selected_candidate_index": 3,
+      "shape": [
+        32,
+        6
+      ],
+      "dt_sec": null,
+      "source_joint_path_length_rad": 1.51924467086792,
+      "reconstructed_joint_path_length_rad": 1.5193556547164917,
+      "source_joint_smoothness": 0.0004285172326490283,
+      "reconstructed_joint_smoothness": 0.0004295634862501174,
+      "files": {
+        "npz": "episode_26120_trajectory.npz",
+        "csv": "episode_26120_trajectory.csv",
+        "json": "episode_26120_trajectory.json"
+      }
+    },
+    {
+      "episode_idx": 26303,
+      "validation_subset_index": 487,
+      "workpiece_id": 9,
+      "selected_candidate_index": 2,
+      "shape": [
+        32,
+        6
+      ],
+      "dt_sec": null,
+      "source_joint_path_length_rad": 2.9509711265563965,
+      "reconstructed_joint_path_length_rad": 2.951002597808838,
+      "source_joint_smoothness": 0.0004287785559426993,
+      "reconstructed_joint_smoothness": 0.0004299597057979554,
+      "files": {
+        "npz": "episode_26303_trajectory.npz",
+        "csv": "episode_26303_trajectory.csv",
+        "json": "episode_26303_trajectory.json"
+      }
+    }
+  ]
+}
