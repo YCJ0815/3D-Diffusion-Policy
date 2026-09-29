@@ -461,8 +461,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--marker-radius-m",
         type=float,
-        default=0.04,
-        help="Radius of the trajectory endpoint spheres in metres.",
+        default=0.008,
+        help=(
+            "Radius of the trajectory endpoint spheres in metres "
+            "(default diameter: 16 mm)."
+        ),
     )
     parser.add_argument(
         "--marker-camera-offset-m",
@@ -472,8 +475,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--tool-link-name",
-        default="end_pen",
-        help="USD link/prim name whose world position defines trajectory endpoints.",
+        default="tool0",
+        help=(
+            "TCP USD link/prim whose world position defines the complete "
+            "trajectory endpoints (default: tool0)."
+        ),
     )
     parser.add_argument("--dome-light-intensity", type=float, default=900.0)
     parser.add_argument("--distant-light-intensity", type=float, default=1500.0)
@@ -735,7 +741,7 @@ def create_endpoint_markers(
     radius: float,
     camera_offset: float,
 ) -> None:
-    """Create bright camera-offset spheres for trajectory start and end."""
+    """Create bright spheres centred at the complete trajectory's TCP endpoints."""
     from pxr import Gf, Sdf, UsdGeom, UsdShade
 
     ensure_xform(stage, "/World/TrajectoryMarkers")
@@ -1012,6 +1018,8 @@ def write_episode_metadata(
     camera_position: tuple[float, float, float],
     table_top_z: float,
     table_top_z_source: str,
+    marker_start_position: tuple[float, float, float] | None,
+    marker_end_position: tuple[float, float, float] | None,
 ) -> None:
     metadata = {
         "episode_idx": episode_idx,
@@ -1036,6 +1044,12 @@ def write_episode_metadata(
             "end_color": "green",
             "radius_m": args.marker_radius_m,
             "camera_offset_m": args.marker_camera_offset_m,
+            "start_tcp_world_m": (
+                None if marker_start_position is None else list(marker_start_position)
+            ),
+            "end_tcp_world_m": (
+                None if marker_end_position is None else list(marker_end_position)
+            ),
         },
         "workpiece_stl": None if args.workpiece_stl is None else str(args.workpiece_stl),
         "workpiece_position": list(args.workpiece_position),
@@ -1187,6 +1201,10 @@ def main() -> None:
         for trajectory_path in args.trajectories:
             print(f"[replay] loading trajectory: {trajectory_path}", flush=True)
             trajectory, joint_names, episode_idx = load_trajectory(trajectory_path)
+            # Endpoint markers must describe the complete, original trajectory.
+            # Keep its first/last joint configurations before frame resampling.
+            start_waypoint = trajectory[0].copy()
+            end_waypoint = trajectory[-1].copy()
             trajectory = resample_trajectory(trajectory, args.num_frames)
             dof_indices = resolve_dof_indices(robot, joint_names)
             episode_name = (
@@ -1194,13 +1212,25 @@ def main() -> None:
                 if episode_idx >= 0
                 else trajectory_path.stem
             )
+            start_position = None
+            end_position = None
             if tool_prim is not None:
-                apply_waypoint(robot, dof_indices, trajectory[0])
+                apply_waypoint(robot, dof_indices, start_waypoint)
                 world.step(render=False)
                 start_position = prim_world_position(tool_prim)
-                apply_waypoint(robot, dof_indices, trajectory[-1])
+                apply_waypoint(robot, dof_indices, end_waypoint)
                 world.step(render=False)
                 end_position = prim_world_position(tool_prim)
+                endpoint_distance = float(
+                    np.linalg.norm(
+                        np.asarray(end_position) - np.asarray(start_position)
+                    )
+                )
+                print(
+                    f"[markers:{episode_name}] TCP start={start_position}, "
+                    f"end={end_position}, distance={endpoint_distance:.6f} m",
+                    flush=True,
+                )
                 create_endpoint_markers(
                     stage,
                     start_position=start_position,
@@ -1268,6 +1298,8 @@ def main() -> None:
                 camera_position=camera_position,
                 table_top_z=table_top_z,
                 table_top_z_source=table_top_z_source,
+                marker_start_position=start_position,
+                marker_end_position=end_position,
             )
             print(
                 f"[{episode_name}] completed: {len(frames)} PNG frames in {episode_dir}",
