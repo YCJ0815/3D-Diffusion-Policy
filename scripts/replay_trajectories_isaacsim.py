@@ -926,6 +926,15 @@ def step_replicator(rep: Any, *, rt_subframes: int) -> None:
     )
 
 
+def sync_replay_pose(world: Any, physics_view: Any, physx: Any) -> None:
+    """Publish explicitly while paused; render callbacks may skip this work."""
+    physics_view.update_articulations_kinematic()
+    # Publish link poses to both the render cache and USD. Updating DOF values
+    # alone is insufficient while the normal simulation callbacks are paused.
+    physx.update_transformations(True, True)
+    world.render()
+
+
 def verify_capture_pose(robot: Any, dof_indices: list[int], waypoint: np.ndarray) -> None:
     actual = np.asarray(robot.get_joint_positions(), dtype=np.float64).reshape(-1)[dof_indices]
     error = actual - np.asarray(waypoint, dtype=np.float64)
@@ -1210,6 +1219,12 @@ def main() -> None:
         print("[replay:init] initializing robot articulation", flush=True)
         robot = create_articulation(robot_path)
         print(f"[replay:init] articulation ready; dofs={list(robot.dof_names)}", flush=True)
+        import omni.physics.tensors as physics_tensors
+        from omni.physx import get_physx_interface
+
+        replay_physics_view = physics_tensors.create_simulation_view("numpy")
+        replay_physx = get_physx_interface()
+        print("[replay:init] explicit articulation/USD pose sync enabled", flush=True)
 
         camera_position = orbit_camera_position(
             args.camera_position, args.camera_target, args.camera_orbit_deg
@@ -1298,10 +1313,11 @@ def main() -> None:
             apply_waypoint(robot, dof_indices, trajectory[0])
             print(f"[{episode_name}] warming up renderer", flush=True)
             for _ in range(3):
-                world.render()
+                sync_replay_pose(world, replay_physics_view, replay_physx)
                 step_replicator(rep, rt_subframes=args.rt_subframes)
 
             print(f"[{episode_name}] RGB annotator ready: {png_dir}", flush=True)
+            previous_rgb = None
             for frame_index, waypoint in enumerate(trajectory):
                 apply_waypoint(robot, dof_indices, waypoint)
                 log_pose_check(
@@ -1311,7 +1327,7 @@ def main() -> None:
                 )
                 # Explicitly synchronize physics link poses to the rendering
                 # scene before capture; a joint readback alone cannot do this.
-                world.render()
+                sync_replay_pose(world, replay_physics_view, replay_physx)
                 log_pose_check(
                     robot, dof_indices, waypoint,
                     episode_name=episode_name, frame_index=frame_index,
@@ -1330,14 +1346,24 @@ def main() -> None:
                     rgb_data = np.asarray(rgb_annotator.get_data())
                     if rgb_data.size > 0:
                         verify_capture_pose(robot, dof_indices, waypoint)
-                        write_image(path=str(output_path), data=rgb_data.copy())
+                        captured_rgb = rgb_data.copy()
+                        if previous_rgb is not None:
+                            identical = np.array_equal(previous_rgb, captured_rgb)
+                            if frame_index < 2 or identical:
+                                print(
+                                    f"[image-check] episode={episode_name} "
+                                    f"frame={frame_index} identical_to_previous={identical}",
+                                    flush=True,
+                                )
+                        write_image(path=str(output_path), data=captured_rgb)
+                        previous_rgb = captured_rgb
                         break
                     print(
                         f"[{episode_name}] frame {frame_index + 1:02d} has no "
                         f"RGB data yet; retry {capture_attempt}/8",
                         flush=True,
                     )
-                    world.render()
+                    sync_replay_pose(world, replay_physics_view, replay_physx)
                 else:
                     raise RuntimeError(
                         f"RGB annotator returned no data for frame "
