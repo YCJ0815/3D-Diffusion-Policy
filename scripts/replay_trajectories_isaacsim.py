@@ -21,38 +21,269 @@ import json
 import math
 import pathlib
 import shutil
-import sys
+import struct
+import tempfile
+import xml.etree.ElementTree as ET
 from typing import Any
 
 import numpy as np
 
 
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[1]
-REPOSITORY_ROOT = PROJECT_ROOT.parents[1]
-WELD_ROBOT_SCRIPTS = REPOSITORY_ROOT / "code" / "weld-robot" / "scripts"
-if str(WELD_ROBOT_SCRIPTS) not in sys.path:
-    sys.path.insert(0, str(WELD_ROBOT_SCRIPTS))
-
-# These modules only import Isaac/Omniverse APIs inside their functions, after
-# SimulationApp has started.  Reusing them keeps URDF package URI handling and
-# STL import consistent with the repository's existing replay implementation.
-from sim_parallel_welding import (  # noqa: E402
-    ensure_xform,
-    import_stl_as_mesh,
-    load_stl_mesh,
-    move_prim_to_path,
-    set_xform_translation,
-)
-from sim_welding_arm import (  # noqa: E402
-    import_robot_from_urdf,
-    make_resolved_urdf,
-)
-
-
 DEFAULT_EPISODES = (26301, 26297, 26120, 26303)
 DEFAULT_TRAJECTORY_DIR = PROJECT_ROOT / "exported_trajectories"
 DEFAULT_URDF = PROJECT_ROOT / "config" / "robot-model" / "ur5e_with_pen.urdf"
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "isaacsim_replay_frames"
+
+
+# Keep the replay exporter self-contained.  The project is often copied to a
+# remote Isaac Sim machine without the sibling ``weld-robot`` repository that
+# originally provided these helpers.  Isaac/Omniverse modules remain lazily
+# imported so SimulationApp is still constructed before any Kit APIs are used.
+def make_resolved_urdf(source_urdf: pathlib.Path) -> pathlib.Path:
+    """Resolve package://urdf-pen mesh references in a temporary URDF."""
+    if not source_urdf.is_file():
+        raise FileNotFoundError(f"URDF file does not exist: {source_urdf}")
+
+    robot_model_dir = source_urdf.parent.resolve()
+    tree = ET.parse(source_urdf)
+    for mesh in tree.getroot().findall(".//mesh"):
+        filename = mesh.get("filename")
+        if filename and filename.startswith("package://urdf-pen/"):
+            local_path = robot_model_dir / filename.removeprefix(
+                "package://urdf-pen/"
+            )
+            mesh.set("filename", str(local_path))
+
+    temp_dir = pathlib.Path(tempfile.mkdtemp(prefix="ur5e_pen_urdf_"))
+    resolved_urdf = temp_dir / source_urdf.name
+    tree.write(resolved_urdf, encoding="utf-8", xml_declaration=True)
+    return resolved_urdf
+
+
+def enable_extension(extension_name: str) -> bool:
+    import omni.kit.app
+
+    manager = omni.kit.app.get_app().get_extension_manager()
+    extension_id = None
+    if hasattr(manager, "get_enabled_extension_id"):
+        extension_id = manager.get_enabled_extension_id(extension_name)
+    if extension_id:
+        return True
+    if hasattr(manager, "get_extension_id_by_module"):
+        extension_id = manager.get_extension_id_by_module(extension_name)
+    if not extension_id and hasattr(manager, "get_extension_id_by_name"):
+        extension_id = manager.get_extension_id_by_name(extension_name)
+    if not extension_id:
+        return False
+    manager.set_extension_enabled_immediate(extension_id, True)
+    return True
+
+
+def acquire_urdf_module() -> Any:
+    for extension_name in (
+        "isaacsim.asset.importer.urdf",
+        "omni.importer.urdf",
+        "omni.isaac.urdf",
+    ):
+        enable_extension(extension_name)
+    try:
+        from isaacsim.asset.importer.urdf import _urdf
+    except ImportError:
+        from omni.importer.urdf import _urdf
+    return _urdf
+
+
+def import_robot_from_urdf(
+    urdf_path: pathlib.Path, prim_path: str, fix_base: bool
+) -> str:
+    _urdf = acquire_urdf_module()
+    import_config = _urdf.ImportConfig()
+    options = {
+        "merge_fixed_joints": False,
+        "fix_base": fix_base,
+        "import_inertia_tensor": True,
+        "convex_decomp": False,
+        "self_collision": False,
+        "distance_scale": 1.0,
+        "make_default_prim": False,
+        "default_drive_strength": 400.0,
+        "default_position_drive_damping": 40.0,
+    }
+    for name, value in options.items():
+        setter = getattr(import_config, f"set_{name}", None)
+        if setter is not None:
+            setter(value)
+        elif hasattr(import_config, name):
+            setattr(import_config, name, value)
+
+    interface = _urdf.acquire_urdf_interface()
+    root_path, file_name = str(urdf_path.parent), urdf_path.name
+    parsed_robot = interface.parse_urdf(root_path, file_name, import_config)
+    if isinstance(parsed_robot, tuple):
+        success, parsed_robot = parsed_robot
+        if not success:
+            raise RuntimeError(f"Isaac Sim failed to parse URDF: {urdf_path}")
+    imported_path = interface.import_robot(
+        root_path, file_name, parsed_robot, import_config, prim_path
+    )
+    if isinstance(imported_path, tuple):
+        imported_path = imported_path[-1]
+    return str(imported_path or prim_path)
+
+
+def ensure_xform(stage: Any, prim_path: str) -> Any:
+    from pxr import UsdGeom
+
+    prim = stage.GetPrimAtPath(prim_path)
+    if not prim.IsValid():
+        prim = UsdGeom.Xform.Define(stage, prim_path).GetPrim()
+    return prim
+
+
+def set_xform_translation(
+    prim: Any, translation: tuple[float, float, float]
+) -> None:
+    from pxr import Gf, UsdGeom
+
+    xformable = UsdGeom.Xformable(prim)
+    xformable.ClearXformOpOrder()
+    xformable.AddTranslateOp().Set(Gf.Vec3d(*translation))
+
+
+def move_prim_to_path(stage: Any, source_path: str, target_path: str) -> str:
+    if source_path == target_path:
+        return target_path
+    if not stage.GetPrimAtPath(source_path).IsValid():
+        raise RuntimeError(f"Cannot move missing imported prim: {source_path}")
+
+    target_parent = str(pathlib.PurePosixPath(target_path).parent)
+    if target_parent != ".":
+        ensure_xform(stage, target_parent)
+    if stage.GetPrimAtPath(target_path).IsValid():
+        stage.RemovePrim(target_path)
+
+    try:
+        import omni.kit.commands
+
+        moved = omni.kit.commands.execute(
+            "MovePrim", path_from=source_path, path_to=target_path
+        )
+        if isinstance(moved, tuple):
+            moved = moved[0]
+        if moved is False:
+            raise RuntimeError("MovePrim command returned False")
+    except Exception:
+        from pxr import Sdf
+
+        root_layer = stage.GetRootLayer()
+        if not Sdf.CopySpec(root_layer, source_path, root_layer, target_path):
+            raise RuntimeError(
+                f"Failed to move imported prim from {source_path} to {target_path}"
+            )
+        stage.RemovePrim(source_path)
+
+    prim = stage.GetPrimAtPath(target_path)
+    if not prim.IsValid():
+        raise RuntimeError(f"Imported prim was not moved to: {target_path}")
+    set_xform_translation(prim, (0.0, 0.0, 0.0))
+    return target_path
+
+
+def parse_binary_stl(
+    data: bytes,
+) -> tuple[list[tuple[float, float, float]], list[int], list[int]]:
+    if len(data) < 84:
+        raise RuntimeError("Binary STL is too small")
+    triangle_count = struct.unpack_from("<I", data, 80)[0]
+    if 84 + triangle_count * 50 > len(data):
+        raise RuntimeError("Binary STL size does not match its triangle count")
+    points: list[tuple[float, float, float]] = []
+    face_counts: list[int] = []
+    face_indices: list[int] = []
+    offset = 84
+    for _ in range(triangle_count):
+        offset += 12  # normal
+        for _ in range(3):
+            points.append(struct.unpack_from("<fff", data, offset))
+            face_indices.append(len(points) - 1)
+            offset += 12
+        face_counts.append(3)
+        offset += 2
+    return points, face_counts, face_indices
+
+
+def parse_ascii_stl(
+    text: str,
+) -> tuple[list[tuple[float, float, float]], list[int], list[int]]:
+    points = []
+    for line in text.splitlines():
+        parts = line.strip().split()
+        if len(parts) == 4 and parts[0].lower() == "vertex":
+            points.append(tuple(float(value) for value in parts[1:4]))
+    if not points or len(points) % 3:
+        raise RuntimeError("ASCII STL contains no complete triangle vertices")
+    return points, [3] * (len(points) // 3), list(range(len(points)))
+
+
+def load_stl_mesh(
+    stl_path: pathlib.Path,
+) -> tuple[list[tuple[float, float, float]], list[int], list[int]]:
+    data = stl_path.read_bytes()
+    triangle_count = struct.unpack_from("<I", data, 80)[0] if len(data) >= 84 else 0
+    if len(data) == 84 + triangle_count * 50:
+        return parse_binary_stl(data)
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return parse_binary_stl(data)
+    if text.lstrip().lower().startswith("solid"):
+        return parse_ascii_stl(text)
+    return parse_binary_stl(data)
+
+
+def import_stl_as_mesh(
+    stage: Any,
+    stl_path: pathlib.Path,
+    prim_path: str,
+    scale: float,
+    z_offset: float,
+    local_offset: tuple[float, float, float],
+    debug_box: bool,
+) -> str:
+    del debug_box  # Debug geometry is intentionally omitted by this exporter.
+    from pxr import Gf, Sdf, UsdGeom, UsdShade
+
+    points, face_counts, face_indices = load_stl_mesh(stl_path)
+    scaled_points = [
+        (x * scale, y * scale, z * scale + z_offset) for x, y, z in points
+    ]
+    min_point = tuple(min(point[axis] for point in scaled_points) for axis in range(3))
+    max_point = tuple(max(point[axis] for point in scaled_points) for axis in range(3))
+
+    mesh = UsdGeom.Mesh.Define(stage, prim_path)
+    mesh.CreatePointsAttr([Gf.Vec3f(*point) for point in scaled_points])
+    mesh.CreateFaceVertexCountsAttr(face_counts)
+    mesh.CreateFaceVertexIndicesAttr(face_indices)
+    mesh.CreateSubdivisionSchemeAttr("none")
+    mesh.CreateExtentAttr([Gf.Vec3f(*min_point), Gf.Vec3f(*max_point)])
+    mesh.CreateDoubleSidedAttr(True)
+    mesh.CreateDisplayColorAttr([Gf.Vec3f(0.78, 0.62, 0.38)])
+    set_xform_translation(mesh.GetPrim(), local_offset)
+
+    material = UsdShade.Material.Define(stage, f"{prim_path}_Material")
+    shader = UsdShade.Shader.Define(
+        stage, f"{prim_path}_Material/PreviewSurface"
+    )
+    shader.CreateIdAttr("UsdPreviewSurface")
+    shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(
+        Gf.Vec3f(0.78, 0.62, 0.38)
+    )
+    shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.55)
+    shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(0.0)
+    material.CreateSurfaceOutput().ConnectToSource(shader.ConnectableAPI(), "surface")
+    UsdShade.MaterialBindingAPI(mesh.GetPrim()).Bind(material)
+    return prim_path
 
 
 def default_trajectory_paths() -> list[pathlib.Path]:
