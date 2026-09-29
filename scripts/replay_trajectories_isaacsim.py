@@ -352,6 +352,7 @@ def import_stl_as_mesh(
     scale: float,
     z_offset: float,
     local_offset: tuple[float, float, float],
+    opacity: float,
     debug_box: bool,
 ) -> str:
     del debug_box  # Debug geometry is intentionally omitted by this exporter.
@@ -372,6 +373,7 @@ def import_stl_as_mesh(
     mesh.CreateExtentAttr([Gf.Vec3f(*min_point), Gf.Vec3f(*max_point)])
     mesh.CreateDoubleSidedAttr(True)
     mesh.CreateDisplayColorAttr([Gf.Vec3f(0.78, 0.62, 0.38)])
+    mesh.CreateDisplayOpacityAttr([float(opacity)])
     set_xform_translation(mesh.GetPrim(), local_offset)
 
     material = UsdShade.Material.Define(stage, f"{prim_path}_Material")
@@ -384,6 +386,7 @@ def import_stl_as_mesh(
     )
     shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.55)
     shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(0.0)
+    shader.CreateInput("opacity", Sdf.ValueTypeNames.Float).Set(float(opacity))
     material.CreateSurfaceOutput().ConnectToSource(shader.ConnectableAPI(), "surface")
     UsdShade.MaterialBindingAPI(mesh.GetPrim()).Bind(material)
     return prim_path
@@ -449,6 +452,29 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--focus-distance-m", type=float, default=3.0)
     parser.add_argument("--near-clip-m", type=float, default=0.01)
     parser.add_argument("--far-clip-m", type=float, default=1000.0)
+    parser.add_argument(
+        "--trajectory-markers",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Show red/green spheres at the tool start/end positions (default: enabled).",
+    )
+    parser.add_argument(
+        "--marker-radius-m",
+        type=float,
+        default=0.04,
+        help="Radius of the trajectory endpoint spheres in metres.",
+    )
+    parser.add_argument(
+        "--marker-camera-offset-m",
+        type=float,
+        default=0.0,
+        help="Optional display offset toward the camera; default 0 keeps spheres at exact endpoints.",
+    )
+    parser.add_argument(
+        "--tool-link-name",
+        default="end_pen",
+        help="USD link/prim name whose world position defines trajectory endpoints.",
+    )
     parser.add_argument("--dome-light-intensity", type=float, default=900.0)
     parser.add_argument("--distant-light-intensity", type=float, default=1500.0)
     parser.add_argument(
@@ -478,6 +504,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.001,
         help="STL scale; validation loads millimetre STL data with 0.001.",
+    )
+    parser.add_argument(
+        "--workpiece-opacity",
+        type=float,
+        default=0.45,
+        help="Workpiece opacity in [0, 1]; lower values reveal endpoint markers.",
     )
     parser.add_argument(
         "--table",
@@ -553,6 +585,12 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--rt-subframes must be at least 1")
     if args.near_clip_m <= 0.0 or args.far_clip_m <= args.near_clip_m:
         raise ValueError("camera clipping range is invalid")
+    if args.marker_radius_m <= 0.0:
+        raise ValueError("--marker-radius-m must be positive")
+    if args.marker_camera_offset_m < 0.0:
+        raise ValueError("--marker-camera-offset-m cannot be negative")
+    if not 0.0 <= args.workpiece_opacity <= 1.0:
+        raise ValueError("--workpiece-opacity must be in [0, 1]")
     if any(value <= 0.0 for value in args.table_size):
         raise ValueError("both --table-size values must be positive")
     if args.table_thickness <= 0.0:
@@ -631,6 +669,108 @@ def orbit_camera_position(
     )
     result = target_array + rotated
     return tuple(float(value) for value in result)
+
+
+def find_tool_prim(stage: Any, robot_prim_path: str, tool_link_name: str) -> Any:
+    """Find the tool prim used to derive Cartesian trajectory endpoints."""
+    from pxr import Usd
+
+    robot_prim = stage.GetPrimAtPath(robot_prim_path)
+    matches = [
+        prim
+        for prim in Usd.PrimRange(robot_prim)
+        if prim.GetName() == tool_link_name
+    ]
+    if not matches:
+        available = sorted(
+            {
+                prim.GetName()
+                for prim in Usd.PrimRange(robot_prim)
+                if prim.GetName()
+            }
+        )
+        raise RuntimeError(
+            f"tool link {tool_link_name!r} was not found under {robot_prim_path}; "
+            f"available prim names={available}"
+        )
+    if len(matches) > 1:
+        print(
+            f"[markers] multiple prims named {tool_link_name!r}; using "
+            f"{matches[0].GetPath()}",
+            flush=True,
+        )
+    return matches[0]
+
+
+def prim_world_position(prim: Any) -> tuple[float, float, float]:
+    from pxr import Usd, UsdGeom
+
+    transform = UsdGeom.XformCache(Usd.TimeCode.Default()).GetLocalToWorldTransform(
+        prim
+    )
+    translation = transform.ExtractTranslation()
+    return tuple(float(translation[index]) for index in range(3))
+
+
+def marker_display_position(
+    endpoint: tuple[float, float, float],
+    camera_position: tuple[float, float, float],
+    camera_offset: float,
+) -> tuple[float, float, float]:
+    endpoint_array = np.asarray(endpoint, dtype=np.float64)
+    view_vector = np.asarray(camera_position, dtype=np.float64) - endpoint_array
+    distance = float(np.linalg.norm(view_vector))
+    if distance <= 1e-9 or camera_offset == 0.0:
+        return endpoint
+    result = endpoint_array + view_vector / distance * float(camera_offset)
+    return tuple(float(value) for value in result)
+
+
+def create_endpoint_markers(
+    stage: Any,
+    *,
+    start_position: tuple[float, float, float],
+    end_position: tuple[float, float, float],
+    camera_position: tuple[float, float, float],
+    radius: float,
+    camera_offset: float,
+) -> None:
+    """Create bright camera-offset spheres for trajectory start and end."""
+    from pxr import Gf, Sdf, UsdGeom, UsdShade
+
+    ensure_xform(stage, "/World/TrajectoryMarkers")
+    marker_specs = (
+        ("Start", start_position, Gf.Vec3f(1.0, 0.02, 0.02)),
+        ("End", end_position, Gf.Vec3f(0.02, 1.0, 0.05)),
+    )
+    for name, endpoint, color in marker_specs:
+        display_position = marker_display_position(
+            endpoint, camera_position, camera_offset
+        )
+        sphere_path = f"/World/TrajectoryMarkers/{name}"
+        sphere = UsdGeom.Sphere.Define(stage, sphere_path)
+        sphere.CreateRadiusAttr(float(radius))
+        sphere.CreateDisplayColorAttr([color])
+        set_xform_translation(sphere.GetPrim(), display_position)
+
+        material_path = f"/World/TrajectoryMarkers/{name}Material"
+        material = UsdShade.Material.Define(stage, material_path)
+        shader = UsdShade.Shader.Define(stage, f"{material_path}/PreviewSurface")
+        shader.CreateIdAttr("UsdPreviewSurface")
+        shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(color)
+        shader.CreateInput("emissiveColor", Sdf.ValueTypeNames.Color3f).Set(color)
+        shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.25)
+        shader.CreateInput("metallic", Sdf.ValueTypeNames.Float).Set(0.0)
+        material.CreateSurfaceOutput().ConnectToSource(
+            shader.ConnectableAPI(), "surface"
+        )
+        UsdShade.MaterialBindingAPI(sphere.GetPrim()).Bind(material)
+
+        print(
+            f"[markers] {name.lower()} endpoint={endpoint}, "
+            f"display_position={display_position}",
+            flush=True,
+        )
 
 
 def create_lighting(stage: Any, args: argparse.Namespace) -> None:
@@ -889,9 +1029,18 @@ def write_episode_metadata(
             "clipping_range_m": [args.near_clip_m, args.far_clip_m],
         },
         "robot_position": list(args.robot_position),
+        "trajectory_markers": {
+            "enabled": bool(args.trajectory_markers),
+            "tool_link_name": args.tool_link_name,
+            "start_color": "red",
+            "end_color": "green",
+            "radius_m": args.marker_radius_m,
+            "camera_offset_m": args.marker_camera_offset_m,
+        },
         "workpiece_stl": None if args.workpiece_stl is None else str(args.workpiece_stl),
         "workpiece_position": list(args.workpiece_position),
         "workpiece_scale": args.workpiece_scale,
+        "workpiece_opacity": args.workpiece_opacity,
         "table": {
             "enabled": bool(args.table),
             "size_xy_m": list(args.table_size),
@@ -985,6 +1134,7 @@ def main() -> None:
                 scale=float(args.workpiece_scale),
                 z_offset=0.0,
                 local_offset=tuple(float(value) for value in args.workpiece_position),
+                opacity=float(args.workpiece_opacity),
                 debug_box=False,
             )
         table_top_z, table_top_z_source = resolve_table_top_z(args)
@@ -1026,6 +1176,13 @@ def main() -> None:
             f"resolution={args.width}x{args.height}",
             flush=True,
         )
+        tool_prim = (
+            find_tool_prim(stage, "/World/UR5ePen", args.tool_link_name)
+            if args.trajectory_markers
+            else None
+        )
+        if tool_prim is not None:
+            print(f"[markers] tracking tool prim: {tool_prim.GetPath()}", flush=True)
 
         for trajectory_path in args.trajectories:
             print(f"[replay] loading trajectory: {trajectory_path}", flush=True)
@@ -1037,6 +1194,21 @@ def main() -> None:
                 if episode_idx >= 0
                 else trajectory_path.stem
             )
+            if tool_prim is not None:
+                apply_waypoint(robot, dof_indices, trajectory[0])
+                world.step(render=False)
+                start_position = prim_world_position(tool_prim)
+                apply_waypoint(robot, dof_indices, trajectory[-1])
+                world.step(render=False)
+                end_position = prim_world_position(tool_prim)
+                create_endpoint_markers(
+                    stage,
+                    start_position=start_position,
+                    end_position=end_position,
+                    camera_position=camera_position,
+                    radius=float(args.marker_radius_m),
+                    camera_offset=float(args.marker_camera_offset_m),
+                )
             episode_dir = prepare_episode_dir(
                 args.output_root / episode_name, args.overwrite
             )
