@@ -782,6 +782,8 @@ def finalize_episode_outputs(
 
 
 def import_robot(stage: Any, resolved_urdf: pathlib.Path, robot_position: list[float]) -> str:
+    from pxr import Usd, UsdPhysics
+
     requested_path = "/World/UR5ePen"
     imported_path = import_robot_from_urdf(
         resolved_urdf, requested_path, fix_base=True
@@ -796,7 +798,38 @@ def import_robot(stage: Any, resolved_urdf: pathlib.Path, robot_position: list[f
         stage.GetPrimAtPath(robot_path),
         tuple(float(value) for value in robot_position),
     )
-    return robot_path
+
+    # Isaac Sim 6.x references the generated robot USD below the requested
+    # container prim.  The articulation API can therefore live on a descendant
+    # rather than directly on /World/UR5ePen.  Resolve the authored API instead
+    # of assuming a version-specific hierarchy.
+    container_prim = stage.GetPrimAtPath(robot_path)
+    articulation_roots = [
+        prim
+        for prim in Usd.PrimRange(container_prim)
+        if prim.HasAPI(UsdPhysics.ArticulationRootAPI)
+    ]
+    if not articulation_roots:
+        descendants = [
+            f"{prim.GetPath()} ({prim.GetTypeName()})"
+            for prim in Usd.PrimRange(container_prim)
+        ]
+        raise RuntimeError(
+            "Imported robot contains no UsdPhysics.ArticulationRootAPI under "
+            f"{robot_path}. Prims: {descendants}"
+        )
+    articulation_roots.sort(key=lambda prim: len(str(prim.GetPath())))
+    articulation_path = str(articulation_roots[0].GetPath())
+    if len(articulation_roots) > 1:
+        print(
+            "[replay:init] multiple articulation roots found; using "
+            f"{articulation_path}: "
+            f"{[str(prim.GetPath()) for prim in articulation_roots]}",
+            flush=True,
+        )
+    else:
+        print(f"[replay:init] articulation root: {articulation_path}", flush=True)
+    return articulation_path
 
 
 def write_episode_metadata(
