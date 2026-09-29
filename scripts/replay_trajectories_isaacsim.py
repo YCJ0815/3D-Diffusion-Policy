@@ -943,10 +943,14 @@ def main() -> None:
             except Exception as exc:
                 print(f"[cleanup] Render product destroy failed: {exc}", flush=True)
         try:
-            simulation_app.close(wait_for_replicator=True)
+            # Isaac Sim 5.1 can crash in librtx.scenedb during full plugin
+            # teardown on some Linux/Blackwell configurations.  Replicator has
+            # already been flushed and its Hydra product destroyed above, so
+            # fast shutdown is safe here and bypasses that native teardown bug.
+            simulation_app.close(wait_for_replicator=False, skip_cleanup=True)
         except TypeError:
-            # Compatibility with older Isaac Sim releases.
-            simulation_app.close()
+            # Compatibility with Isaac Sim releases predating skip_cleanup.
+            simulation_app.close(wait_for_replicator=False)
 
 
 if __name__ == "__main__":
