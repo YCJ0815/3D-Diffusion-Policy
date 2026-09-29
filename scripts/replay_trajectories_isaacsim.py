@@ -162,6 +162,37 @@ def import_robot_from_urdf(
         )
     if not added:
         raise RuntimeError(f"Failed to reference robot USD: {generated_path}")
+
+    # Isaac Sim 6.1.0 generates a multiphysics asset but does not author a
+    # default selection for its Physics variant set.  Without selecting PhysX,
+    # only Geometry/Materials compose and the stage has no joints or
+    # ArticulationRootAPI.
+    variant_sets = robot_prim.GetVariantSets()
+    physics_variant_name = next(
+        (name for name in variant_sets.GetNames() if name.lower() == "physics"),
+        None,
+    )
+    if physics_variant_name is not None:
+        physics_variants = variant_sets.GetVariantSet(physics_variant_name)
+        variant_names = list(physics_variants.GetVariantNames())
+        physx_variant = next(
+            (name for name in variant_names if name.lower() == "physx"),
+            None,
+        )
+        if physx_variant is None:
+            raise RuntimeError(
+                f"Robot USD Physics variants do not include PhysX: {variant_names}"
+            )
+        if not physics_variants.SetVariantSelection(physx_variant):
+            raise RuntimeError(
+                f"Failed to select {physics_variant_name}={physx_variant} on {prim_path}"
+            )
+        stage.Load(prim_path)
+        print(
+            f"[replay:init] selected USD variant "
+            f"{physics_variant_name}={physx_variant}",
+            flush=True,
+        )
     print(f"[replay:init] generated robot USD: {generated_path}", flush=True)
     return prim_path
 
