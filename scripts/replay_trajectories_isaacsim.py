@@ -793,9 +793,14 @@ def main() -> None:
             "renderer": args.renderer,
             "width": args.width,
             "height": args.height,
+            "multi_gpu": False,
+            "max_gpu_count": 1,
         }
     )
 
+    rep = None
+    render_product = None
+    attached_writer = None
     try:
         try:
             from isaacsim.core.api import World
@@ -883,6 +888,7 @@ def main() -> None:
             writer = rep.WriterRegistry.get("BasicWriter")
             writer.initialize(output_dir=str(png_dir), rgb=True)
             writer.attach([render_product])
+            attached_writer = writer
             for frame_index, waypoint in enumerate(trajectory):
                 apply_waypoint(robot, dof_indices, waypoint)
                 world.step(render=True)
@@ -895,6 +901,7 @@ def main() -> None:
                 )
             rep.orchestrator.wait_until_complete()
             writer.detach()
+            attached_writer = None
 
             frames = finalize_episode_outputs(
                 episode_dir,
@@ -917,7 +924,29 @@ def main() -> None:
                 flush=True,
             )
     finally:
-        simulation_app.close()
+        # Replicator writes asynchronously.  Complete and detach it before
+        # destroying the Hydra render product; otherwise RTX resources can
+        # still be in use while Kit is shutting down.
+        if rep is not None:
+            try:
+                rep.orchestrator.wait_until_complete()
+            except Exception as exc:
+                print(f"[cleanup] Replicator wait failed: {exc}", flush=True)
+        if attached_writer is not None:
+            try:
+                attached_writer.detach()
+            except Exception as exc:
+                print(f"[cleanup] Writer detach failed: {exc}", flush=True)
+        if render_product is not None:
+            try:
+                render_product.destroy()
+            except Exception as exc:
+                print(f"[cleanup] Render product destroy failed: {exc}", flush=True)
+        try:
+            simulation_app.close(wait_for_replicator=True)
+        except TypeError:
+            # Compatibility with older Isaac Sim releases.
+            simulation_app.close()
 
 
 if __name__ == "__main__":
