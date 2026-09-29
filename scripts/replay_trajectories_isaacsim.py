@@ -918,14 +918,22 @@ def log_pose_check(
     )
 
 
-def step_replicator(rep: Any, *, rt_subframes: int, fps: float) -> None:
-    try:
-        rep.orchestrator.step(rt_subframes=rt_subframes, delta_time=1.0 / fps)
-    except TypeError:
-        try:
-            rep.orchestrator.step(rt_subframes=rt_subframes)
-        except TypeError:
-            rep.orchestrator.step()
+def step_replicator(rep: Any, *, rt_subframes: int) -> None:
+    # A replay frame is a static joint configuration. Never advance physics
+    # while capturing it, including retries. Do not fall back to a timed step.
+    rep.orchestrator.step(
+        rt_subframes=rt_subframes, delta_time=0.0, pause_timeline=True
+    )
+
+
+def verify_capture_pose(robot: Any, dof_indices: list[int], waypoint: np.ndarray) -> None:
+    actual = np.asarray(robot.get_joint_positions(), dtype=np.float64).reshape(-1)[dof_indices]
+    error = actual - np.asarray(waypoint, dtype=np.float64)
+    if not np.all(np.isfinite(error)) or np.max(np.abs(error)) > 1e-4:
+        raise RuntimeError(
+            "Robot moved during static capture: "
+            f"max joint error={np.max(np.abs(np.rad2deg(error))):.6f} deg"
+        )
 
 
 def prepare_episode_dir(path: pathlib.Path, overwrite: bool) -> pathlib.Path:
@@ -1283,12 +1291,15 @@ def main() -> None:
             png_dir = episode_dir / "png"
             png_dir.mkdir(parents=True, exist_ok=True)
 
-            # Settle the first pose before the writer is attached, so warm-up
-            # renders never appear among the requested 32 output frames.
+            # Keep the timeline paused for ALL warm-up and capture updates.
+            # render() synchronizes articulation/link transforms for rendering
+            # without integrating gravity or joint drives with a physics step.
+            world.pause()
             apply_waypoint(robot, dof_indices, trajectory[0])
             print(f"[{episode_name}] warming up renderer", flush=True)
             for _ in range(3):
-                world.step(render=True)
+                world.render()
+                step_replicator(rep, rt_subframes=args.rt_subframes)
 
             print(f"[{episode_name}] RGB annotator ready: {png_dir}", flush=True)
             for frame_index, waypoint in enumerate(trajectory):
@@ -1298,18 +1309,18 @@ def main() -> None:
                     episode_name=episode_name, frame_index=frame_index,
                     label="after_set",
                 )
-                # Propagate the commanded pose without an extra raster pass;
-                # Replicator performs the one render needed for this frame.
-                world.step(render=False)
+                # Explicitly synchronize physics link poses to the rendering
+                # scene before capture; a joint readback alone cannot do this.
+                world.render()
                 log_pose_check(
                     robot, dof_indices, waypoint,
                     episode_name=episode_name, frame_index=frame_index,
-                    label="after_physics",
+                    label="after_render_sync",
                 )
                 output_path = png_dir / f"frame_{frame_index:03d}.png"
                 for capture_attempt in range(1, 9):
                     step_replicator(
-                        rep, rt_subframes=args.rt_subframes, fps=args.fps
+                        rep, rt_subframes=args.rt_subframes
                     )
                     log_pose_check(
                         robot, dof_indices, waypoint,
@@ -1318,14 +1329,15 @@ def main() -> None:
                     )
                     rgb_data = np.asarray(rgb_annotator.get_data())
                     if rgb_data.size > 0:
-                        write_image(path=str(output_path), data=rgb_data)
+                        verify_capture_pose(robot, dof_indices, waypoint)
+                        write_image(path=str(output_path), data=rgb_data.copy())
                         break
                     print(
                         f"[{episode_name}] frame {frame_index + 1:02d} has no "
                         f"RGB data yet; retry {capture_attempt}/8",
                         flush=True,
                     )
-                    world.step(render=False)
+                    world.render()
                 else:
                     raise RuntimeError(
                         f"RGB annotator returned no data for frame "
