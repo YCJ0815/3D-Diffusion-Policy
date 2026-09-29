@@ -23,6 +23,7 @@ import pathlib
 import shutil
 import struct
 import tempfile
+import traceback
 import xml.etree.ElementTree as ET
 from typing import Any
 
@@ -95,6 +96,77 @@ def acquire_urdf_module() -> Any:
 
 
 def import_robot_from_urdf(
+    urdf_path: pathlib.Path, prim_path: str, fix_base: bool
+) -> str:
+    try:
+        from isaacsim.asset.importer.urdf import URDFImporter, URDFImporterConfig
+    except ImportError:
+        # Isaac Sim 5.x compatibility path.
+        return import_robot_from_urdf_legacy(urdf_path, prim_path, fix_base)
+
+    # Isaac Sim 6.x removed acquire_urdf_interface/ImportConfig.  Convert the
+    # URDF to a standalone USD asset with the new importer, then reference its
+    # default prim into the already-open replay stage.
+    output_dir = pathlib.Path(tempfile.mkdtemp(prefix="ur5e_pen_usd_"))
+    config = URDFImporterConfig(
+        urdf_path=str(urdf_path),
+        usd_path=str(output_dir),
+        fix_base=fix_base,
+        merge_fixed_joints=False,
+        merge_mesh=False,
+        collision_from_visuals=False,
+        allow_self_collision=False,
+        robot_type="Manipulator",
+        joint_drive_type="force",
+        joint_target_type="position",
+        override_joint_stiffness=400.0,
+        override_joint_damping=40.0,
+    )
+    generated_path = pathlib.Path(URDFImporter(config).import_urdf())
+    if generated_path.is_dir():
+        candidates = sorted(generated_path.rglob("*.usd"))
+        if not candidates:
+            raise RuntimeError(
+                f"URDF importer created no USD file under: {generated_path}"
+            )
+        generated_path = candidates[0]
+    if not generated_path.is_file():
+        raise RuntimeError(
+            f"URDF importer returned a missing USD asset: {generated_path}"
+        )
+
+    from omni.usd import get_context
+    from pxr import Usd
+
+    stage = get_context().get_stage()
+    parent_path = str(pathlib.PurePosixPath(prim_path).parent)
+    if parent_path != ".":
+        ensure_xform(stage, parent_path)
+    if stage.GetPrimAtPath(prim_path).IsValid():
+        stage.RemovePrim(prim_path)
+    robot_prim = stage.DefinePrim(prim_path, "Xform")
+
+    asset_stage = Usd.Stage.Open(str(generated_path))
+    default_prim = asset_stage.GetDefaultPrim() if asset_stage else None
+    if default_prim and default_prim.IsValid():
+        added = robot_prim.GetReferences().AddReference(str(generated_path))
+    else:
+        root_prims = list(asset_stage.GetPseudoRoot().GetChildren()) if asset_stage else []
+        if len(root_prims) != 1:
+            raise RuntimeError(
+                f"Generated USD has no default prim and {len(root_prims)} root prims: "
+                f"{generated_path}"
+            )
+        added = robot_prim.GetReferences().AddReference(
+            str(generated_path), root_prims[0].GetPath()
+        )
+    if not added:
+        raise RuntimeError(f"Failed to reference robot USD: {generated_path}")
+    print(f"[replay:init] generated robot USD: {generated_path}", flush=True)
+    return prim_path
+
+
+def import_robot_from_urdf_legacy(
     urdf_path: pathlib.Path, prim_path: str, fix_base: bool
 ) -> str:
     _urdf = acquire_urdf_module()
@@ -947,6 +1019,11 @@ def main() -> None:
                 f"[{episode_name}] completed: {len(frames)} PNG frames in {episode_dir}",
                 flush=True,
             )
+    except Exception:
+        # Print the original failure before Kit shutdown; native shutdown can
+        # otherwise time out and obscure the actionable Python traceback.
+        traceback.print_exc()
+        raise
     finally:
         # Replicator writes asynchronously.  Complete and detach it before
         # destroying the Hydra render product; otherwise RTX resources can
