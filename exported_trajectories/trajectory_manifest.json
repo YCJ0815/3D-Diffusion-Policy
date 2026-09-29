@@ -13,8 +13,28 @@
   "precision_note": "Trajectories were reconstructed from normalized control points serialized as decimal text by validate_all_trajectories.py.",
   "episodes": [
     {
-      "episode_idx": 26301,
-      "validation_subset_index": 485,
+      "episode_idx": 26588,
+      "validation_subset_index": 644,
+      "workpiece_id": 9,
+      "selected_candidate_index": 5,
+      "shape": [
+        32,
+        6
+      ],
+      "dt_sec": null,
+      "source_joint_path_length_rad": 1.2758013010025024,
+      "reconstructed_joint_path_length_rad": 1.2759203910827637,
+      "source_joint_smoothness": 0.0006880332948639989,
+      "reconstructed_joint_smoothness": 0.0006905219051986933,
+      "files": {
+        "npz": "episode_26588_trajectory.npz",
+        "csv": "episode_26588_trajectory.csv",
+        "json": "episode_26588_trajectory.json"
+      }
+    },
+    {
+      "episode_idx": 25650,
+      "validation_subset_index": 130,
       "workpiece_id": 9,
       "selected_candidate_index": 0,
       "shape": [
@@ -22,74 +42,34 @@
         6
       ],
       "dt_sec": null,
-      "source_joint_path_length_rad": 2.9336578845977783,
-      "reconstructed_joint_path_length_rad": 2.933684825897217,
-      "source_joint_smoothness": 0.00039429482421837747,
-      "reconstructed_joint_smoothness": 0.00039539262070320547,
+      "source_joint_path_length_rad": 2.2705395221710205,
+      "reconstructed_joint_path_length_rad": 2.2706282138824463,
+      "source_joint_smoothness": 0.0008007552241906524,
+      "reconstructed_joint_smoothness": 0.0008034493657760322,
       "files": {
-        "npz": "episode_26301_trajectory.npz",
-        "csv": "episode_26301_trajectory.csv",
-        "json": "episode_26301_trajectory.json"
+        "npz": "episode_25650_trajectory.npz",
+        "csv": "episode_25650_trajectory.csv",
+        "json": "episode_25650_trajectory.json"
       }
     },
     {
-      "episode_idx": 26297,
-      "validation_subset_index": 481,
+      "episode_idx": 25657,
+      "validation_subset_index": 137,
       "workpiece_id": 9,
-      "selected_candidate_index": 1,
+      "selected_candidate_index": 4,
       "shape": [
         32,
         6
       ],
       "dt_sec": null,
-      "source_joint_path_length_rad": 2.932199001312256,
-      "reconstructed_joint_path_length_rad": 2.932224988937378,
-      "source_joint_smoothness": 0.00039599265437573195,
-      "reconstructed_joint_smoothness": 0.0003970830875914544,
+      "source_joint_path_length_rad": 2.5000462532043457,
+      "reconstructed_joint_path_length_rad": 2.5001449584960938,
+      "source_joint_smoothness": 0.0007471085409633815,
+      "reconstructed_joint_smoothness": 0.0007496863836422563,
       "files": {
-        "npz": "episode_26297_trajectory.npz",
-        "csv": "episode_26297_trajectory.csv",
-        "json": "episode_26297_trajectory.json"
-      }
-    },
-    {
-      "episode_idx": 26120,
-      "validation_subset_index": 376,
-      "workpiece_id": 9,
-      "selected_candidate_index": 3,
-      "shape": [
-        32,
-        6
-      ],
-      "dt_sec": null,
-      "source_joint_path_length_rad": 1.51924467086792,
-      "reconstructed_joint_path_length_rad": 1.5193556547164917,
-      "source_joint_smoothness": 0.0004285172326490283,
-      "reconstructed_joint_smoothness": 0.0004295634862501174,
-      "files": {
-        "npz": "episode_26120_trajectory.npz",
-        "csv": "episode_26120_trajectory.csv",
-        "json": "episode_26120_trajectory.json"
-      }
-    },
-    {
-      "episode_idx": 26303,
-      "validation_subset_index": 487,
-      "workpiece_id": 9,
-      "selected_candidate_index": 2,
-      "shape": [
-        32,
-        6
-      ],
-      "dt_sec": null,
-      "source_joint_path_length_rad": 2.9509711265563965,
-      "reconstructed_joint_path_length_rad": 2.951002597808838,
-      "source_joint_smoothness": 0.0004287785559426993,
-      "reconstructed_joint_smoothness": 0.0004299597057979554,
-      "files": {
-        "npz": "episode_26303_trajectory.npz",
-        "csv": "episode_26303_trajectory.csv",
-        "json": "episode_26303_trajectory.json"
+        "npz": "episode_25657_trajectory.npz",
+        "csv": "episode_25657_trajectory.csv",
+        "json": "episode_25657_trajectory.json"
       }
     }
   ]

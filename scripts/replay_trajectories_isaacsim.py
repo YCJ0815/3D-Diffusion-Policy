@@ -31,7 +31,7 @@ import numpy as np
 
 
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[1]
-DEFAULT_EPISODES = (26301, 26297, 26120, 26303)
+DEFAULT_EPISODES = (26588, 25650, 25657)
 DEFAULT_TRAJECTORY_DIR = PROJECT_ROOT / "exported_trajectories"
 DEFAULT_URDF = PROJECT_ROOT / "config" / "robot-model" / "ur5e_with_pen.urdf"
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "isaacsim_replay_frames"
