@@ -892,6 +892,32 @@ def apply_waypoint(robot: Any, dof_indices: list[int], waypoint: np.ndarray) -> 
         pass
 
 
+def log_pose_check(
+    robot: Any,
+    dof_indices: list[int],
+    waypoint: np.ndarray,
+    *,
+    episode_name: str,
+    frame_index: int,
+    label: str,
+) -> None:
+    """Read back the first two captured poses without advancing simulation."""
+    if frame_index >= 2:
+        return
+    actual = np.asarray(
+        robot.get_joint_positions(), dtype=np.float64
+    ).reshape(-1)[dof_indices].copy()
+    target = np.asarray(waypoint, dtype=np.float64)
+    error_deg = np.rad2deg(actual - target)
+    print(
+        f"[pose-check] episode={episode_name} frame={frame_index} {label} "
+        f"max_error_deg={np.max(np.abs(error_deg)):.6f}\n"
+        f"  target_rad={np.array2string(target, precision=6, max_line_width=200)}\n"
+        f"  actual_rad={np.array2string(actual, precision=6, max_line_width=200)}",
+        flush=True,
+    )
+
+
 def step_replicator(rep: Any, *, rt_subframes: int, fps: float) -> None:
     try:
         rep.orchestrator.step(rt_subframes=rt_subframes, delta_time=1.0 / fps)
@@ -1267,13 +1293,28 @@ def main() -> None:
             print(f"[{episode_name}] RGB annotator ready: {png_dir}", flush=True)
             for frame_index, waypoint in enumerate(trajectory):
                 apply_waypoint(robot, dof_indices, waypoint)
+                log_pose_check(
+                    robot, dof_indices, waypoint,
+                    episode_name=episode_name, frame_index=frame_index,
+                    label="after_set",
+                )
                 # Propagate the commanded pose without an extra raster pass;
                 # Replicator performs the one render needed for this frame.
                 world.step(render=False)
+                log_pose_check(
+                    robot, dof_indices, waypoint,
+                    episode_name=episode_name, frame_index=frame_index,
+                    label="after_physics",
+                )
                 output_path = png_dir / f"frame_{frame_index:03d}.png"
                 for capture_attempt in range(1, 9):
                     step_replicator(
                         rep, rt_subframes=args.rt_subframes, fps=args.fps
+                    )
+                    log_pose_check(
+                        robot, dof_indices, waypoint,
+                        episode_name=episode_name, frame_index=frame_index,
+                        label=f"after_capture_attempt_{capture_attempt}",
                     )
                     rgb_data = np.asarray(rgb_annotator.get_data())
                     if rgb_data.size > 0:
