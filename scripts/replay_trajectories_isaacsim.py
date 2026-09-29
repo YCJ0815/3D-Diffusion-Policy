@@ -1052,9 +1052,30 @@ def main() -> None:
             for frame_index, waypoint in enumerate(trajectory):
                 apply_waypoint(robot, dof_indices, waypoint)
                 world.step(render=True)
-                step_replicator(
-                    rep, rt_subframes=args.rt_subframes, fps=args.fps
-                )
+                expected_count = frame_index + 1
+                for capture_attempt in range(1, 17):
+                    step_replicator(
+                        rep, rt_subframes=args.rt_subframes, fps=args.fps
+                    )
+                    # BasicWriter becomes ready asynchronously in some Isaac
+                    # Sim versions.  Do not advance to the next waypoint until
+                    # this frame is confirmed on disk; retrying preserves the
+                    # same robot pose during writer warm-up.
+                    rep.orchestrator.wait_until_complete()
+                    written_count = len(png_files_under(png_dir))
+                    if written_count >= expected_count:
+                        break
+                    print(
+                        f"[{episode_name}] frame {expected_count:02d} not yet "
+                        f"written; retry {capture_attempt}/16",
+                        flush=True,
+                    )
+                    world.step(render=True)
+                else:
+                    raise RuntimeError(
+                        f"Replicator did not write frame {expected_count} after "
+                        f"16 attempts; found {written_count} PNG files in {png_dir}"
+                    )
                 print(
                     f"[{episode_name}] captured frame {frame_index + 1:02d}/{args.num_frames}",
                     flush=True,
