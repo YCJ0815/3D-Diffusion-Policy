@@ -779,6 +779,11 @@ def write_episode_metadata(
 def main() -> None:
     args = build_parser().parse_args()
     validate_args(args)
+    print(
+        f"[replay:init] arguments validated; trajectories={len(args.trajectories)}, "
+        f"urdf={args.urdf}",
+        flush=True,
+    )
 
     # SimulationApp must be created before importing any Isaac/Omniverse APIs.
     try:
@@ -786,6 +791,7 @@ def main() -> None:
     except ImportError:
         from omni.isaac.kit import SimulationApp
 
+    print("[replay:init] creating SimulationApp", flush=True)
     simulation_app = SimulationApp(
         {
             "headless": bool(args.headless),
@@ -797,23 +803,27 @@ def main() -> None:
             "max_gpu_count": 1,
         }
     )
+    print("[replay:init] SimulationApp ready", flush=True)
 
     rep = None
     render_product = None
     attached_writer = None
     try:
+        print("[replay:init] importing Isaac Sim runtime APIs", flush=True)
         try:
             from isaacsim.core.api import World
         except ImportError:
             from omni.isaac.core import World
         import omni.replicator.core as rep
         from omni.usd import get_context
+        print("[replay:init] runtime APIs imported", flush=True)
 
         try:
             rep.orchestrator.set_capture_on_play(False)
         except Exception:
             pass
 
+        print("[replay:init] creating World", flush=True)
         world = World(
             physics_dt=args.physics_dt,
             rendering_dt=1.0 / args.fps,
@@ -824,9 +834,12 @@ def main() -> None:
         stage = get_context().get_stage()
         ensure_xform(stage, "/World")
         create_lighting(stage, args)
+        print("[replay:init] World and lighting ready", flush=True)
 
         resolved_urdf = make_resolved_urdf(args.urdf)
+        print(f"[replay:init] importing URDF: {resolved_urdf}", flush=True)
         robot_path = import_robot(stage, resolved_urdf, args.robot_position)
+        print(f"[replay:init] robot imported: {robot_path}", flush=True)
         if args.workpiece_stl is not None:
             import_stl_as_mesh(
                 stage=stage,
@@ -846,9 +859,12 @@ def main() -> None:
                 flush=True,
             )
 
+        print("[replay:init] resetting World", flush=True)
         world.reset()
         world.step(render=False)
+        print("[replay:init] initializing robot articulation", flush=True)
         robot = create_articulation(robot_path)
+        print(f"[replay:init] articulation ready; dofs={list(robot.dof_names)}", flush=True)
 
         camera_position = orbit_camera_position(
             args.camera_position, args.camera_target, args.camera_orbit_deg
@@ -863,8 +879,14 @@ def main() -> None:
         render_product = rep.create.render_product(
             camera, resolution=(args.width, args.height)
         )
+        print(
+            f"[replay:init] camera/render product ready; "
+            f"resolution={args.width}x{args.height}",
+            flush=True,
+        )
 
         for trajectory_path in args.trajectories:
+            print(f"[replay] loading trajectory: {trajectory_path}", flush=True)
             trajectory, joint_names, episode_idx = load_trajectory(trajectory_path)
             trajectory = resample_trajectory(trajectory, args.num_frames)
             dof_indices = resolve_dof_indices(robot, joint_names)
@@ -882,6 +904,7 @@ def main() -> None:
             # Settle the first pose before the writer is attached, so warm-up
             # renders never appear among the requested 32 output frames.
             apply_waypoint(robot, dof_indices, trajectory[0])
+            print(f"[{episode_name}] warming up renderer", flush=True)
             for _ in range(3):
                 world.step(render=True)
 
@@ -889,6 +912,7 @@ def main() -> None:
             writer.initialize(output_dir=str(png_dir), rgb=True)
             writer.attach([render_product])
             attached_writer = writer
+            print(f"[{episode_name}] writer attached: {png_dir}", flush=True)
             for frame_index, waypoint in enumerate(trajectory):
                 apply_waypoint(robot, dof_indices, waypoint)
                 world.step(render=True)
