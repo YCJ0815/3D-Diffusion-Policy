@@ -926,6 +926,31 @@ def step_replicator(rep: Any, *, rt_subframes: int) -> None:
     )
 
 
+def get_replay_physics_view(world: Any) -> Any:
+    """Reuse the attached view owned by Isaac Sim; never create a second one."""
+    try:
+        from isaacsim.core.simulation_manager import SimulationManager
+    except ImportError:
+        view = getattr(world, "physics_sim_view", None)
+    else:
+        getter = getattr(SimulationManager, "get_physics_simulation_view", None)
+        if getter is None:
+            getter = getattr(SimulationManager, "get_physics_sim_view", None)
+        view = getter() if getter is not None else None
+        if view is None:
+            view = getattr(world, "physics_sim_view", None)
+    if view is None or not callable(getattr(view, "update_articulations_kinematic", None)):
+        raise RuntimeError(
+            "Isaac Sim has no initialized simulation view supporting "
+            "update_articulations_kinematic after robot initialization"
+        )
+    print(
+        f"[replay:init] reusing simulation view: {type(view).__module__}.{type(view).__name__}",
+        flush=True,
+    )
+    return view
+
+
 def sync_replay_pose(world: Any, physics_view: Any, physx: Any) -> None:
     """Publish explicitly while paused; render callbacks may skip this work."""
     physics_view.update_articulations_kinematic()
@@ -1219,10 +1244,9 @@ def main() -> None:
         print("[replay:init] initializing robot articulation", flush=True)
         robot = create_articulation(robot_path)
         print(f"[replay:init] articulation ready; dofs={list(robot.dof_names)}", flush=True)
-        import omni.physics.tensors as physics_tensors
         from omni.physx import get_physx_interface
 
-        replay_physics_view = physics_tensors.create_simulation_view("numpy")
+        replay_physics_view = get_replay_physics_view(world)
         replay_physx = get_physx_interface()
         print("[replay:init] explicit articulation/USD pose sync enabled", flush=True)
 
