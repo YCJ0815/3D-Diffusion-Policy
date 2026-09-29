@@ -943,7 +943,7 @@ def main() -> None:
 
     rep = None
     render_product = None
-    attached_writer = None
+    rgb_annotator = None
     try:
         print("[replay:init] importing Isaac Sim runtime APIs", flush=True)
         try:
@@ -951,6 +951,7 @@ def main() -> None:
         except ImportError:
             from omni.isaac.core import World
         import omni.replicator.core as rep
+        from omni.replicator.core.functional import write_image
         from omni.usd import get_context
         print("[replay:init] runtime APIs imported", flush=True)
 
@@ -1015,6 +1016,11 @@ def main() -> None:
         render_product = rep.create.render_product(
             camera, resolution=(args.width, args.height)
         )
+        try:
+            rgb_annotator = rep.annotators.get("rgb")
+        except AttributeError:
+            rgb_annotator = rep.AnnotatorRegistry.get_annotator("rgb")
+        rgb_annotator.attach(render_product)
         print(
             f"[replay:init] camera/render product ready; "
             f"resolution={args.width}x{args.height}",
@@ -1044,45 +1050,36 @@ def main() -> None:
             for _ in range(3):
                 world.step(render=True)
 
-            writer = rep.WriterRegistry.get("BasicWriter")
-            writer.initialize(output_dir=str(png_dir), rgb=True)
-            writer.attach([render_product])
-            attached_writer = writer
-            print(f"[{episode_name}] writer attached: {png_dir}", flush=True)
+            print(f"[{episode_name}] RGB annotator ready: {png_dir}", flush=True)
             for frame_index, waypoint in enumerate(trajectory):
                 apply_waypoint(robot, dof_indices, waypoint)
-                world.step(render=True)
-                expected_count = frame_index + 1
-                for capture_attempt in range(1, 17):
+                # Propagate the commanded pose without an extra raster pass;
+                # Replicator performs the one render needed for this frame.
+                world.step(render=False)
+                output_path = png_dir / f"frame_{frame_index:03d}.png"
+                for capture_attempt in range(1, 9):
                     step_replicator(
                         rep, rt_subframes=args.rt_subframes, fps=args.fps
                     )
-                    # BasicWriter becomes ready asynchronously in some Isaac
-                    # Sim versions.  Do not advance to the next waypoint until
-                    # this frame is confirmed on disk; retrying preserves the
-                    # same robot pose during writer warm-up.
-                    rep.orchestrator.wait_until_complete()
-                    written_count = len(png_files_under(png_dir))
-                    if written_count >= expected_count:
+                    rgb_data = np.asarray(rgb_annotator.get_data())
+                    if rgb_data.size > 0:
+                        write_image(path=str(output_path), data=rgb_data)
                         break
                     print(
-                        f"[{episode_name}] frame {expected_count:02d} not yet "
-                        f"written; retry {capture_attempt}/16",
+                        f"[{episode_name}] frame {frame_index + 1:02d} has no "
+                        f"RGB data yet; retry {capture_attempt}/8",
                         flush=True,
                     )
-                    world.step(render=True)
+                    world.step(render=False)
                 else:
                     raise RuntimeError(
-                        f"Replicator did not write frame {expected_count} after "
-                        f"16 attempts; found {written_count} PNG files in {png_dir}"
+                        f"RGB annotator returned no data for frame "
+                        f"{frame_index + 1} after 8 attempts"
                     )
                 print(
                     f"[{episode_name}] captured frame {frame_index + 1:02d}/{args.num_frames}",
                     flush=True,
                 )
-            rep.orchestrator.wait_until_complete()
-            writer.detach()
-            attached_writer = None
 
             frames = finalize_episode_outputs(
                 episode_dir,
@@ -1110,19 +1107,13 @@ def main() -> None:
         traceback.print_exc()
         raise
     finally:
-        # Replicator writes asynchronously.  Complete and detach it before
-        # destroying the Hydra render product; otherwise RTX resources can
-        # still be in use while Kit is shutting down.
-        if rep is not None:
+        # RGB data is pulled and saved synchronously, so there is no writer
+        # queue to drain during shutdown.
+        if rgb_annotator is not None:
             try:
-                rep.orchestrator.wait_until_complete()
+                rgb_annotator.detach()
             except Exception as exc:
-                print(f"[cleanup] Replicator wait failed: {exc}", flush=True)
-        if attached_writer is not None:
-            try:
-                attached_writer.detach()
-            except Exception as exc:
-                print(f"[cleanup] Writer detach failed: {exc}", flush=True)
+                print(f"[cleanup] RGB annotator detach failed: {exc}", flush=True)
         if render_product is not None:
             try:
                 render_product.destroy()
