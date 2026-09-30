@@ -1721,7 +1721,7 @@ def run_mode_inference(
         args=args,
         cspace_feature_provider=cspace_feature_provider,
     )
-    if not getattr(process_sample, "_printed_device_report", False):
+    if not getattr(run_mode_inference, "_printed_device_report", False):
         _print_runtime_device_report(
             prefix="runtime-device",
             requested_device=device,
@@ -1729,7 +1729,7 @@ def run_mode_inference(
             obs_dict=obs_dict,
             planner_mode=str(getattr(args, "planner_mode", "baseline")),
         )
-        process_sample._printed_device_report = True
+        run_mode_inference._printed_device_report = True
     output_dir = build_summary_output_dir(base_output_dir=base_output_dir, mode=mode, compare_mode=compare_mode)
     workpiece_id = prepared_workpiece_id
     candidate_scores: list[dict] | None = None
