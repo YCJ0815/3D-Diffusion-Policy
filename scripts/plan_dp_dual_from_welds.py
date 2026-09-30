@@ -445,8 +445,9 @@ def prepare_pipeline(args: argparse.Namespace) -> dict[str, Any]:
     jobs_root = output_dir / "jobs"
     job_dir = jobs_root / "job_000"
     input_dir = output_dir / "transition_inputs"
+    transition_job_dir = input_dir / "job_000"
     job_dir.mkdir(parents=True, exist_ok=True)
-    input_dir.mkdir(parents=True, exist_ok=True)
+    transition_job_dir.mkdir(parents=True, exist_ok=True)
 
     vector_path = job_dir / "weld_vectors.json"
     shutil.copy2(args.workpiece_stl, job_dir / "workpiece.stl")
@@ -502,7 +503,9 @@ def prepare_pipeline(args: argparse.Namespace) -> dict[str, Any]:
     if np.linalg.norm(transition_delta) <= 1e-8:
         raise ValueError("Start and goal resolve to the same TCP position; no transition can be planned")
     seed_path = np.linspace(q_start, q_goal, args.target_steps, dtype=np.float32)
-    transition_path = input_dir / "transition_0000_0001.npz"
+    # The batch planner resolves both the STL and the C-space workpiece ID from
+    # a ``job_NNN`` parent directory in the NPZ path.
+    transition_path = transition_job_dir / "transition_0000_0001.npz"
     np.savez_compressed(
         transition_path,
         q_start=q_start.astype(np.float32),
