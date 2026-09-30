@@ -32,7 +32,7 @@ import numpy as np
 SCRIPT_DIR = Path(__file__).resolve().parent
 DP_ROOT = SCRIPT_DIR.parent
 WORKSPACE_ROOT = DP_ROOT.parents[1]
-WELD_ROOT = "/root/autodl-tmp/3D-Diffusion-Policy/"  # WORKSPACE_ROOT / "weld-robot"
+WELD_ROOT = "/root/autodl-tmp/3D-Diffusion-Policy"  # WORKSPACE_ROOT / "weld-robot"
 WELD_SCRIPTS = WELD_ROOT / "scripts"
 SEAM_WORKER = WELD_ROOT / "data_generation" / "src" / "main.py"
 DP_BATCH_SCRIPT = SCRIPT_DIR / "infer_bspline_trajectories_batch.py"
