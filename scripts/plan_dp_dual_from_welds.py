@@ -3,16 +3,16 @@
 
 The command intentionally reuses the repository's existing implementations:
 
-1. ``weld-robot/data_generation/seam_extract`` (through its maintained worker)
-   extracts weld segments and endpoint surface normals from STEP/STP CAD.
+1. A pre-extracted weld-vector JSON provides weld segments and endpoint
+   surface normals.  Extraction can be performed locally before this command.
 2. ``weld-robot/scripts/workpiece_sdf.py`` voxelizes the placed STL into SDF.
 3. ``weld-robot/scripts/rrt_welding_planning_demo.py`` supplies TCP-frame and
    UR5e inverse-kinematics conventions.
 4. ``infer_bspline_trajectories_batch.py`` runs DP-Dual mode
    (guided diffusion plus the final QP repair).
 
-STL is used for SDF/collision geometry.  STEP/STP is required separately for
-automatic seam extraction because STL does not preserve CAD face topology.
+STL is used for SDF/collision geometry.  The seam JSON must use the source
+geometry coordinate system and unit selected by ``--geometry-unit-scale``.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 DP_ROOT = SCRIPT_DIR.parent
 WORKSPACE_ROOT = DP_ROOT.parents[1]
 WELD_ROOT = Path("/root/weld-robot")  # WORKSPACE_ROOT / "weld-robot"
-SEAM_WORKER = Path("/root/weld-robot/data_generation/src/main.py")
+WELD_SCRIPTS = WELD_ROOT / "scripts"
 DP_BATCH_SCRIPT = Path("/root/autodl-tmp/3D-Diffusion-Policy/scripts/infer_bspline_trajectories_batch.py")
 CSPACE_BUILD_SCRIPT = Path("/root/autodl-tmp/3D-Diffusion-Policy/scripts/build_workpiece_key_config_collision_features.py")
 DEFAULT_STATS = Path("/root/autodl-tmp/3D-Diffusion-Policy/data/raw_data/realdex_bspline_stats_free10.npz")
@@ -53,16 +53,20 @@ def _env_path(name: str, fallback: Path | None = None) -> Path | None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Extract welds, build a placed-workpiece SDF, infer endpoint poses/IK, "
+            "Load welds, build a placed-workpiece SDF, infer endpoint poses/IK, "
             "and run DP-Dual trajectory planning."
         )
     )
     parser.add_argument("--workpiece-stl", type=_path, required=True, help="STL used for SDF and collision checks.")
     parser.add_argument(
-        "--cad-step",
+        "--seam-file",
         type=_path,
         required=True,
-        help="STEP/STP model passed directly to data_generation/seam_extract for weld extraction.",
+        help=(
+            "Pre-extracted weld-vector JSON. Expected format: "
+            "{'welds': [{'start': {'xyz': [...], 'pose': [...]}, "
+            "'end': {'xyz': [...], 'pose': [...]}}]}."
+        ),
     )
     parser.add_argument("--start", type=float, nargs=3, required=True, metavar=("X", "Y", "Z"))
     parser.add_argument("--goal", type=float, nargs=3, required=True, metavar=("X", "Y", "Z"))
@@ -97,14 +101,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=_env_path("DP_DUAL_CSPACE_PYTHON"),
         help="Python environment containing pybullet. Defaults to --dp-python.",
     )
-    parser.add_argument(
-        "--extract-python",
-        type=_path,
-        default=_env_path("WELD_EXTRACT_PYTHON", _path(sys.executable)),
-        help="Python environment containing pythonocc-core for seam_extract.",
-    )
     parser.add_argument("--urdf-path", type=_path, default=DEFAULT_URDF.resolve())
-    parser.add_argument("--pose-normal-tol", type=float, default=1e-2)
     parser.add_argument("--max-seam-distance", type=float, default=5.0, help="Maximum start/goal-to-seam distance in CAD units.")
     parser.add_argument(
         "--keep-input-points",
@@ -151,7 +148,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--prepare-only",
         action="store_true",
-        help="Stop after seam extraction, SDF, pose/IK, and DP-Dual input preparation.",
+        help="Stop after seam loading, SDF, pose/IK, and DP-Dual input preparation.",
     )
     return parser
 
@@ -167,30 +164,6 @@ def _require_file(path: Path | None, label: str) -> Path:
 def _run(command: list[str], cwd: Path, label: str) -> None:
     print(f"\n[{label}] {' '.join(command)}", flush=True)
     subprocess.run(command, cwd=cwd, check=True)
-
-
-def run_seam_extract(args: argparse.Namespace, seam_root: Path) -> Path:
-    """Invoke the existing seam_extract pipeline through its subprocess worker."""
-    extract_dir = seam_root / "intermediate"
-    final_dir = seam_root / "final"
-    vector_dir = seam_root / "vectors"
-    command = [
-        str(_require_file(args.extract_python, "seam_extract Python")),
-        str(_require_file(SEAM_WORKER, "seam_extract worker")),
-        "--extract-worker",
-        "--step-file",
-        str(args.cad_step),
-        "--extract-dir",
-        str(extract_dir),
-        "--final-dir",
-        str(final_dir),
-        "--vector-dir",
-        str(vector_dir),
-        "--pose-normal-tol",
-        str(args.pose_normal_tol),
-    ]
-    _run(command, WELD_ROOT / "data_generation", "seam_extract")
-    return _require_file(vector_dir / f"{args.cad_step.stem}_weld_vectors.json", "weld vector output")
 
 
 def normalize(vector: np.ndarray) -> np.ndarray:
@@ -453,7 +426,7 @@ def build_cspace_features(
 
 def prepare_pipeline(args: argparse.Namespace) -> dict[str, Any]:
     _require_file(args.workpiece_stl, "workpiece STL")
-    _require_file(args.cad_step, "CAD STEP/STP")
+    source_vector_path = _require_file(args.seam_file, "seam file")
     _require_file(args.urdf_path, "robot URDF")
     if args.geometry_unit_scale <= 0.0:
         raise ValueError("--geometry-unit-scale must be positive")
@@ -469,16 +442,16 @@ def prepare_pipeline(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("--cspace-robot-points-per-link must be positive")
 
     output_dir = args.output_dir
-    seam_root = output_dir / "seam_extract"
     jobs_root = output_dir / "jobs"
     job_dir = jobs_root / "job_000"
     input_dir = output_dir / "transition_inputs"
     job_dir.mkdir(parents=True, exist_ok=True)
     input_dir.mkdir(parents=True, exist_ok=True)
 
-    vector_path = run_seam_extract(args, seam_root)
+    vector_path = job_dir / "weld_vectors.json"
     shutil.copy2(args.workpiece_stl, job_dir / "workpiece.stl")
-    shutil.copy2(vector_path, job_dir / "weld_vectors.json")
+    if source_vector_path != vector_path:
+        shutil.copy2(source_vector_path, vector_path)
     welds, start_match, goal_match = load_and_match_endpoints(args, vector_path)
 
     welding_demo, sdf_trajopt, sim_welding_arm, workpiece_sdf = import_weld_planning_modules()
@@ -547,7 +520,7 @@ def prepare_pipeline(args: argparse.Namespace) -> dict[str, Any]:
     manifest = {
         "inputs": {
             "workpiece_stl": args.workpiece_stl,
-            "cad_step": args.cad_step,
+            "seam_file": args.seam_file,
             "start": args.start,
             "goal": args.goal,
             "point_frame": args.point_frame,
