@@ -421,6 +421,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--physics-dt", type=float, default=1.0 / 60.0)
     parser.add_argument("--rt-subframes", type=int, default=8)
     parser.add_argument(
+        "--pt-spp", type=int, default=32,
+        help="PathTracing samples per pixel per rendering iteration (1-32).",
+    )
+    parser.add_argument(
+        "--pt-total-spp", type=int, default=512,
+        help="PathTracing accumulated sample limit per pixel.",
+    )
+    parser.add_argument(
+        "--pt-denoiser", action=argparse.BooleanOptionalAction, default=True,
+        help="Enable OptiX denoising for PathTracing output.",
+    )
+    parser.add_argument(
         "--renderer",
         choices=("RayTracedLighting", "PathTracing"),
         default="RayTracedLighting",
@@ -592,6 +604,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--fps and --physics-dt must be positive")
     if args.rt_subframes < 1:
         raise ValueError("--rt-subframes must be at least 1")
+    if not 1 <= args.pt_spp <= 32 or args.pt_total_spp < args.pt_spp:
+        raise ValueError("--pt-spp must be in [1, 32]; --pt-total-spp must be >= --pt-spp")
     if args.near_clip_m <= 0.0 or args.far_clip_m <= args.near_clip_m:
         raise ValueError("camera clipping range is invalid")
     if args.marker_radius_m <= 0.0:
@@ -1103,6 +1117,13 @@ def write_episode_metadata(
         "resolution": [args.width, args.height],
         "fps": args.fps,
         "renderer": args.renderer,
+        "render_quality": {
+            "rt_subframes": args.rt_subframes,
+            "pt_spp": args.pt_spp,
+            "pt_total_spp": args.pt_total_spp,
+            "pt_denoiser": args.pt_denoiser,
+            "settings_readback": getattr(args, "render_quality_readback", {}),
+        },
         "camera": {
             "position": list(camera_position),
             "target": list(args.camera_target),
@@ -1152,6 +1173,30 @@ def write_episode_metadata(
     )
 
 
+def configure_render_quality(args: argparse.Namespace) -> dict[str, Any]:
+    """Set and report capture quality explicitly after scene/camera creation."""
+    import carb.settings
+
+    settings = carb.settings.get_settings()
+    values = {"/rtx/post/dlss/execMode": 2}
+    if args.renderer == "PathTracing":
+        values.update({
+            "/rtx/pathtracing/spp": args.pt_spp,
+            "/rtx/pathtracing/totalSpp": args.pt_total_spp,
+            "/rtx/pathtracing/optixDenoiser/enabled": bool(args.pt_denoiser),
+            # 0 = denoised output; 1 = original noisy radiance.
+            "/rtx/pathtracing/optixDenoiser/blendFactor": 0.0 if args.pt_denoiser else 1.0,
+            "/rtx/pathtracing/optixDenoiser/temporalMode/enabled": False,
+            "/rtx/resetPtAccumOnAnimTimeChange": False,
+        })
+    for key, value in values.items():
+        settings.set(key, value)
+    readback = {key: settings.get(key) for key in values}
+    readback["/rtx/rendermode"] = settings.get("/rtx/rendermode")
+    print(f"[render-quality] {json.dumps(readback, sort_keys=True)}", flush=True)
+    return readback
+
+
 def main() -> None:
     args = build_parser().parse_args()
     validate_args(args)
@@ -1173,6 +1218,8 @@ def main() -> None:
             "headless": bool(args.headless),
             "enable_cameras": True,
             "renderer": args.renderer,
+            "samples_per_pixel_per_frame": args.pt_spp,
+            "denoiser": bool(args.pt_denoiser),
             "width": args.width,
             "height": args.height,
             "multi_gpu": False,
@@ -1267,6 +1314,7 @@ def main() -> None:
         except AttributeError:
             rgb_annotator = rep.AnnotatorRegistry.get_annotator("rgb")
         rgb_annotator.attach(render_product)
+        args.render_quality_readback = configure_render_quality(args)
         print(
             f"[replay:init] camera/render product ready; "
             f"resolution={args.width}x{args.height}",
