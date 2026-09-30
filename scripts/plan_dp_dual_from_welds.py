@@ -32,14 +32,14 @@ import numpy as np
 SCRIPT_DIR = Path(__file__).resolve().parent
 DP_ROOT = SCRIPT_DIR.parent
 WORKSPACE_ROOT = DP_ROOT.parents[1]
-WELD_ROOT = WORKSPACE_ROOT / "code" / "weld-robot"
+WELD_ROOT = "/root/autodl-tmp/3D-Diffusion-Policy/"  # WORKSPACE_ROOT / "weld-robot"
 WELD_SCRIPTS = WELD_ROOT / "scripts"
 SEAM_WORKER = WELD_ROOT / "data_generation" / "src" / "main.py"
 DP_BATCH_SCRIPT = SCRIPT_DIR / "infer_bspline_trajectories_batch.py"
 CSPACE_BUILD_SCRIPT = SCRIPT_DIR / "build_workpiece_key_config_collision_features.py"
 DEFAULT_STATS = DP_ROOT / "data" / "raw_data" / "realdex_bspline_stats_free10.npz"
 DEFAULT_KEY_CONFIG_DIR = DP_ROOT / "analysis_outputs" / "key_joint_configurations_fps"
-DEFAULT_URDF = WELD_ROOT / "source/weldRobot/weldRobot/assets/robot-model/ur5e_with_pen.urdf"
+DEFAULT_URDF = WELD_ROOT / "config/robot-model/ur5e_with_pen.urdf"
 
 
 def _path(value: str) -> Path:
