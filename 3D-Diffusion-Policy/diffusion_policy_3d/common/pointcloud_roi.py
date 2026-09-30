@@ -539,7 +539,7 @@ def extract_normalized_xy_radius_height_roi_from_stl_and_npz(
             )
     raw_mesh_points_world_m = (
         raw_mesh_points_mm * float(stl_scale_to_m)
-        + convert_points_mm_to_m(resolved_stl_offset_mm)
+        + convert_point_mm_to_m(resolved_stl_offset_mm)
     )
     start_tcp_transform_m = canonicalize_axis_symmetric_tcp_transform(
         transition["start_tf"].astype(np.float32)
