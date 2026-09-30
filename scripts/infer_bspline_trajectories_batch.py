@@ -33,6 +33,19 @@ from guidance_config import (
 )
 
 
+def _json_default(value):
+    """Serialize numerical diagnostics without dropping their values."""
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, pathlib.Path):
+        return str(value)
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().tolist()
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
 def qp_guided_surface_points_per_link(args) -> dict[str, int]:
     return {
         "pen_link": int(args.guidance_pen_link_points),
@@ -1597,10 +1610,10 @@ def save_prediction_artifacts(
     }
     if candidate_scores is not None:
         with open(output_dir / "candidate_scores.json", "w", encoding="utf-8") as f:
-            json.dump(candidate_scores, f, indent=2)
+            json.dump(candidate_scores, f, indent=2, default=_json_default)
         summary["candidate_scores_path"] = str(output_dir / "candidate_scores.json")
     with open(output_dir / "summary.json", "w", encoding="utf-8") as f:
-        json.dump(summary, f, indent=2)
+        json.dump(summary, f, indent=2, default=_json_default)
     return summary
 
 
@@ -2109,7 +2122,7 @@ def main() -> None:
         "val_split_seed": int(args.val_split_seed) if val_split_enabled else None,
     }
     with open(output_root / "sampled_npz_manifest.json", "w", encoding="utf-8") as f:
-        json.dump(sampled_manifest, f, indent=2)
+        json.dump(sampled_manifest, f, indent=2, default=_json_default)
 
     device = torch.device(args.device)
     workspace = TrainDP3Workspace.create_from_checkpoint(str(checkpoint_path))
@@ -2220,7 +2233,7 @@ def main() -> None:
                     )
                     compare_dir = ensure_dir(base_output_dir / "compare")
                     with open(compare_dir / "summary.json", "w", encoding="utf-8") as f:
-                        json.dump(compare_summary, f, indent=2)
+                        json.dump(compare_summary, f, indent=2, default=_json_default)
                     manifest["processed"].append({
                         "npz_path": str(npz_path),
                         "output_dir": str(base_output_dir),
@@ -2279,14 +2292,14 @@ def main() -> None:
             compare_summary_payload["mean_min_sdf_gain_m"] = float(np.mean(np.asarray(min_sdf_gains, dtype=np.float32)))
             compare_summary_payload["median_min_sdf_gain_m"] = float(np.median(np.asarray(min_sdf_gains, dtype=np.float32)))
         with open(output_root / "compare_summary.json", "w", encoding="utf-8") as f:
-            json.dump(compare_summary_payload, f, indent=2)
+            json.dump(compare_summary_payload, f, indent=2, default=_json_default)
 
     total_inference_time_sec = time.perf_counter() - inference_start_time
     manifest["total_inference_time_sec"] = float(total_inference_time_sec)
 
     manifest_path = output_root / "batch_inference_manifest.json"
     with open(manifest_path, "w", encoding="utf-8") as f:
-        json.dump(manifest, f, indent=2)
+        json.dump(manifest, f, indent=2, default=_json_default)
     print(f"sampled manifest: {output_root / 'sampled_npz_manifest.json'}")
     if compare_mode:
         print(f"compare summary: {output_root / 'compare_summary.json'}")
@@ -2294,6 +2307,8 @@ def main() -> None:
     print(f"processed: {len(manifest['processed'])}")
     print(f"failed: {len(manifest['failed'])}")
     print(f"total inference time (sec): {total_inference_time_sec:.3f}")
+    if manifest["failed"]:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

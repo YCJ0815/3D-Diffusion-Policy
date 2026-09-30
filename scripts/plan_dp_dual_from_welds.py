@@ -599,10 +599,18 @@ def run_dp_dual(args: argparse.Namespace, prepared: dict[str, Any]) -> dict[str,
         command.extend(["--cspace-feature-dir", str(cspace_feature_dir)])
     _run(command, DP_ROOT, "DP-Dual")
 
-    predictions = sorted(dp_output.rglob("pred_joint_horizon.npy"))
-    if len(predictions) != 1:
-        raise RuntimeError(f"Expected one DP-Dual prediction under {dp_output}, found {len(predictions)}")
-    joint_path = predictions[0]
+    manifest_path = _require_file(dp_output / "batch_inference_manifest.json", "DP-Dual manifest")
+    with manifest_path.open("r", encoding="utf-8") as stream:
+        batch_manifest = json.load(stream)
+    processed = batch_manifest.get("processed", [])
+    if batch_manifest.get("failed") or len(processed) != 1:
+        raise RuntimeError(f"DP-Dual did not complete one sample successfully; see {manifest_path}")
+    sample = processed[0]
+    if Path(sample.get("npz_path", "")).resolve() != transition_path.resolve():
+        raise RuntimeError(f"DP-Dual manifest does not match the requested transition: {manifest_path}")
+    if sample.get("planning_success") is not True:
+        raise RuntimeError(f"DP-Dual did not report planning success; see {manifest_path}")
+    joint_path = _require_file(Path(sample["output_dir"]) / "pred_joint_horizon.npy", "DP-Dual prediction")
     joints = np.asarray(np.load(joint_path), dtype=float)
     kinematics = prepared["kinematics"]
     tcp_transforms = np.stack([kinematics.forward(q) for q in joints], axis=0)
