@@ -114,7 +114,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--stl-x-offset-m",
         type=float,
         default=0.5,
-        help="Translation applied to workpiece STL bodies in PyBullet.",
+        help="Legacy X-only translation applied to workpiece STL bodies in PyBullet.",
+    )
+    parser.add_argument(
+        "--stl-offset-m",
+        type=float,
+        nargs=3,
+        default=None,
+        metavar=("X", "Y", "Z"),
+        help="Full XYZ workpiece translation in meters; overrides --stl-x-offset-m.",
+    )
+    parser.add_argument(
+        "--workpiece-mesh-scale-m",
+        type=float,
+        default=0.001,
+        help="Scale from STL vertex units to meters.",
     )
     parser.add_argument(
         "--robot-surface-points-per-link",
@@ -446,6 +460,10 @@ def build_validator(args: argparse.Namespace) -> WorkpieceKeyConfigEvaluator:
         urdf_package_roots=tuple(args.urdf_package_roots),
         tcp_link_name=str(args.tcp_link_name),
         stl_x_offset_m=float(args.stl_x_offset_m),
+        stl_offset_m=None
+        if args.stl_offset_m is None
+        else tuple(float(value) for value in args.stl_offset_m),
+        workpiece_mesh_scale_m=float(args.workpiece_mesh_scale_m),
         collision_distance_threshold=0.0,
         interpolate_for_collision=False,
         max_joint_step_rad=0.01,
@@ -496,6 +514,12 @@ def build_manifest(
         ),
         "simple_sdf_root": str(pathlib.Path(args.simple_sdf_root).expanduser().resolve()),
         "d_safe_m": float(args.d_safe),
+        "stl_offset_m": (
+            [float(args.stl_x_offset_m), 0.0, 0.0]
+            if args.stl_offset_m is None
+            else [float(value) for value in args.stl_offset_m]
+        ),
+        "workpiece_mesh_scale_m": float(args.workpiece_mesh_scale_m),
         "sdf_out_of_bounds_value_m": float(args.sdf_out_of_bounds_value_m),
         "sdf_query_link_names": (
             "all_collision_links"

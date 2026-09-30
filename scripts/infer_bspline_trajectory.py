@@ -82,6 +82,8 @@ def build_obs_dict(
     use_poisson_disk: bool,
     n_obs_steps: int,
     device: torch.device,
+    stl_offset_mm: np.ndarray | None = None,
+    stl_scale_to_m: float = 0.001,
 ) -> tuple[dict[str, torch.Tensor], dict[str, np.ndarray]]:
     pointcloud_result = extract_normalized_xy_radius_height_roi_from_stl_and_npz(
         stl_path=stl_path,
@@ -93,6 +95,8 @@ def build_obs_dict(
         num_mesh_sample_points=num_mesh_sample_points,
         use_poisson_disk=use_poisson_disk,
         stl_x_offset_mm=stl_x_offset_mm,
+        stl_offset_mm=stl_offset_mm,
+        stl_scale_to_m=stl_scale_to_m,
     )
     planning_result = load_bspline_planning_input_data(
         npz_path=npz_path,
@@ -180,6 +184,10 @@ def main() -> None:
         num_output_points=args.num_output_points,
         num_mesh_sample_points=args.num_mesh_sample_points,
         stl_x_offset_mm=args.stl_x_offset_mm,
+        stl_offset_mm=getattr(args, "stl_offset_m", None) * 1000.0
+        if getattr(args, "stl_offset_m", None) is not None
+        else None,
+        stl_scale_to_m=getattr(args, "stl_scale_to_m", 0.001),
         urdf_path=args.urdf_path,
         use_poisson_disk=args.use_poisson_disk,
         n_obs_steps=workspace.cfg.n_obs_steps,

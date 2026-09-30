@@ -264,6 +264,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-output-points", type=int, default=512)
     parser.add_argument("--num-mesh-sample-points", type=int, default=100000)
     parser.add_argument("--stl-x-offset-mm", type=float, default=500.0)
+    parser.add_argument(
+        "--stl-scale-to-m",
+        type=float,
+        default=0.001,
+        help="Scale applied to STL vertex units before placing the workpiece in world coordinates.",
+    )
+    parser.add_argument(
+        "--stl-offset-m",
+        type=float,
+        nargs=3,
+        default=None,
+        metavar=("X", "Y", "Z"),
+        help=(
+            "Full workpiece translation in world meters. When provided it overrides "
+            "--stl-x-offset-mm and is used consistently by point-cloud extraction and PyBullet."
+        ),
+    )
     parser.add_argument("--urdf-path", type=str, default=None)
     parser.add_argument("--trajectory-key", type=str, default="q_plan")
     parser.add_argument("--target-steps", type=int, default=64)
@@ -710,6 +727,10 @@ def prepare_obs_inputs(
         num_output_points=args.num_output_points,
         num_mesh_sample_points=args.num_mesh_sample_points,
         stl_x_offset_mm=args.stl_x_offset_mm,
+        stl_offset_mm=np.asarray(args.stl_offset_m, dtype=np.float32) * 1000.0
+        if getattr(args, "stl_offset_m", None) is not None
+        else None,
+        stl_scale_to_m=float(getattr(args, "stl_scale_to_m", 0.001)),
         urdf_path=args.urdf_path,
         use_poisson_disk=args.use_poisson_disk,
         n_obs_steps=workspace.cfg.n_obs_steps,
@@ -931,6 +952,10 @@ class CandidateValidatorWrapper:
             simple_workpiece_id_offset=int(args.simple_workpiece_id_offset),
             urdf_path=args.urdf_path,
             stl_x_offset_m=float(args.stl_x_offset_mm) / 1000.0,
+            stl_offset_m=None
+            if getattr(args, "stl_offset_m", None) is None
+            else tuple(float(value) for value in args.stl_offset_m),
+            workpiece_mesh_scale_m=float(getattr(args, "stl_scale_to_m", 0.001)),
             num_control_points=int(args.num_control_points),
             spline_degree=int(args.spline_degree),
             target_steps=int(args.target_steps),

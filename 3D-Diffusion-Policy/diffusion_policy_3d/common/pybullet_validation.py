@@ -393,6 +393,8 @@ class PyBulletValidationConfig:
     urdf_package_roots: tuple[str, ...] = ("config/robot-model",)
     tcp_link_name: str = "tool0"
     stl_x_offset_m: float = 0.5
+    stl_offset_m: tuple[float, float, float] | None = None
+    workpiece_mesh_scale_m: float = 0.001
     collision_distance_threshold: float = 0.0
     interpolate_for_collision: bool = False
     max_joint_step_rad: float = 0.01
@@ -449,6 +451,12 @@ class PyBulletValidationConfig:
             urdf_package_roots=tuple(cfg.get("urdf_package_roots", ["config/robot-model"])),
             tcp_link_name=str(cfg.get("tcp_link_name", "tool0")),
             stl_x_offset_m=float(cfg.get("stl_x_offset_m", 0.5)),
+            stl_offset_m=(
+                None
+                if cfg.get("stl_offset_m") is None
+                else tuple(float(value) for value in cfg.get("stl_offset_m"))
+            ),
+            workpiece_mesh_scale_m=float(cfg.get("workpiece_mesh_scale_m", 0.001)),
             collision_distance_threshold=float(cfg.get("collision_distance_threshold", 0.0)),
             interpolate_for_collision=bool(cfg.get("interpolate_for_collision", False)),
             max_joint_step_rad=float(cfg.get("max_joint_step_rad", 0.01)),
@@ -674,14 +682,18 @@ class PyBulletCollisionValidator:
         collision_shape = self.pb.createCollisionShape(
             shapeType=self.pb.GEOM_MESH,
             fileName=str(stl_path),
-            meshScale=[0.001, 0.001, 0.001],
+            meshScale=[self.cfg.workpiece_mesh_scale_m] * 3,
             flags=self.pb.GEOM_FORCE_CONCAVE_TRIMESH,
             physicsClientId=self.client_id,
         )
         body_id = self.pb.createMultiBody(
             baseMass=0.0,
             baseCollisionShapeIndex=collision_shape,
-            basePosition=[self.cfg.stl_x_offset_m, 0.0, 0.0],
+            basePosition=(
+                [self.cfg.stl_x_offset_m, 0.0, 0.0]
+                if self.cfg.stl_offset_m is None
+                else list(self.cfg.stl_offset_m)
+            ),
             baseOrientation=[0.0, 0.0, 0.0, 1.0],
             physicsClientId=self.client_id,
         )

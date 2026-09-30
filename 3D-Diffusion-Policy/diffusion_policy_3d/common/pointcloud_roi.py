@@ -509,6 +509,8 @@ def extract_normalized_xy_radius_height_roi_from_stl_and_npz(
     num_mesh_sample_points: int = 100000,
     use_poisson_disk: bool = False,
     stl_x_offset_mm: float = 500.0,
+    stl_offset_mm: Optional[np.ndarray] = None,
+    stl_scale_to_m: float = 0.001,
 ) -> NormalizedNPZROIResult:
     if radius_m <= 0:
         raise ValueError(f"radius_m must be positive, got {radius_m}")
@@ -516,6 +518,8 @@ def extract_normalized_xy_radius_height_roi_from_stl_and_npz(
         raise ValueError(f"height_m must be positive, got {height_m}")
     if norm_m is None or norm_m <= 0:
         raise ValueError(f"norm_m must be provided by the caller and be positive, got {norm_m}")
+    if stl_scale_to_m <= 0:
+        raise ValueError(f"stl_scale_to_m must be positive, got {stl_scale_to_m}")
 
     transition = load_transition_data_from_npz(npz_path)
     mesh = load_stl_mesh(stl_path)
@@ -525,10 +529,18 @@ def extract_normalized_xy_radius_height_roi_from_stl_and_npz(
         use_poisson_disk=use_poisson_disk,
     )
 
-    stl_offset_mm = np.array([stl_x_offset_mm, 0.0, 0.0], dtype=np.float32)
-    raw_mesh_points_mm = offset_points(raw_mesh_points_mm, stl_offset_mm)
-
-    raw_mesh_points_world_m = convert_points_mm_to_m(raw_mesh_points_mm)
+    if stl_offset_mm is None:
+        resolved_stl_offset_mm = np.array([stl_x_offset_mm, 0.0, 0.0], dtype=np.float32)
+    else:
+        resolved_stl_offset_mm = np.asarray(stl_offset_mm, dtype=np.float32).reshape(-1)
+        if resolved_stl_offset_mm.shape != (3,):
+            raise ValueError(
+                f"stl_offset_mm must have shape (3,), got {resolved_stl_offset_mm.shape}"
+            )
+    raw_mesh_points_world_m = (
+        raw_mesh_points_mm * float(stl_scale_to_m)
+        + convert_points_mm_to_m(resolved_stl_offset_mm)
+    )
     start_tcp_transform_m = canonicalize_axis_symmetric_tcp_transform(
         transition["start_tf"].astype(np.float32)
     )
