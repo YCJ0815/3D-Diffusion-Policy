@@ -408,7 +408,7 @@ def build_cspace_features(
         "--simple-sdf-root",
         str(empty_simple_root),
         "--sdf-filename",
-        "sdf.npz",
+        "workpiece_sdf.npz",
         "--urdf-path",
         str(args.urdf_path),
         "--stl-offset-m",
@@ -462,7 +462,7 @@ def prepare_pipeline(args: argparse.Namespace) -> dict[str, Any]:
         bottom_margin=args.sdf_bottom_margin,
         top_margin=args.sdf_top_margin,
     )
-    sdf_path = job_dir / "sdf.npz"
+    sdf_path = job_dir / "workpiece_sdf.npz"
     sdf_layer, _ = workpiece_sdf.load_or_build_workpiece_sdf(
         stl_path=job_dir / "workpiece.stl",
         scale=args.geometry_unit_scale,
