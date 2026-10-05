@@ -68,8 +68,10 @@ def build_parser() -> argparse.ArgumentParser:
             "'end': {'xyz': [...], 'pose': [...]}}]}."
         ),
     )
-    parser.add_argument("--start", type=float, nargs=3, required=True, metavar=("X", "Y", "Z"))
-    parser.add_argument("--goal", type=float, nargs=3, required=True, metavar=("X", "Y", "Z"))
+    parser.add_argument("--start", type=float, nargs=3, metavar=("X", "Y", "Z"))
+    parser.add_argument("--goal", type=float, nargs=3, metavar=("X", "Y", "Z"))
+    parser.add_argument("--requests-file", type=_path,
+                        help='Batch JSON: {"requests": [{"id": "pair_0", "start": [x,y,z], "goal": [x,y,z]}]}. All pairs share this workpiece and coordinate frame.')
     parser.add_argument(
         "--point-frame",
         choices=("workpiece", "world"),
@@ -424,7 +426,9 @@ def build_cspace_features(
     return validate_cspace_feature_dir(cspace_output)
 
 
-def prepare_pipeline(args: argparse.Namespace) -> dict[str, Any]:
+def prepare_pipeline(args: argparse.Namespace, shared=None, transition_name="transition_0000_0001",
+                     request_name="planning_request") -> dict[str, Any]:
+    shared = {} if shared is None else shared
     _require_file(args.workpiece_stl, "workpiece STL")
     source_vector_path = _require_file(args.seam_file, "seam file")
     _require_file(args.urdf_path, "robot URDF")
@@ -455,6 +459,17 @@ def prepare_pipeline(args: argparse.Namespace) -> dict[str, Any]:
         shutil.copy2(source_vector_path, vector_path)
     welds, start_match, goal_match = load_and_match_endpoints(args, vector_path)
 
+    if shared:
+        welding_demo, kinematics, evaluator, sdf_path, cspace_feature_dir = shared["geometry"]
+    else:
+        build_shared_geometry(args, jobs_root, output_dir, job_dir, shared)
+        welding_demo, kinematics, evaluator, sdf_path, cspace_feature_dir = shared["geometry"]
+    return prepare_transition(args, welds, start_match, goal_match, welding_demo, kinematics,
+                              evaluator, sdf_path, cspace_feature_dir, vector_path, jobs_root,
+                              transition_job_dir, transition_name, request_name)
+
+
+def build_shared_geometry(args, jobs_root, output_dir, job_dir, shared):
     welding_demo, sdf_trajopt, sim_welding_arm, workpiece_sdf = import_weld_planning_modules()
     sdf_config = workpiece_sdf.SDFBuildConfig(
         voxel_pitch=args.sdf_voxel_pitch,
@@ -478,6 +493,12 @@ def prepare_pipeline(args: argparse.Namespace) -> dict[str, Any]:
     kinematics = welding_demo.URDFKinematics(resolved_urdf)
     collision_config = sdf_trajopt.SDFTrajOptConfig(penetration_tol=args.sdf_penetration_tol)
     evaluator = sdf_trajopt.KinematicSDFCollisionEvaluator(kinematics, sdf_layer, collision_config)
+    shared["geometry"] = (welding_demo, kinematics, evaluator, sdf_path, cspace_feature_dir)
+
+
+def prepare_transition(args, welds, start_match, goal_match, welding_demo, kinematics,
+                       evaluator, sdf_path, cspace_feature_dir, vector_path, jobs_root,
+                       transition_job_dir, transition_name, request_name):
     rng = np.random.default_rng(args.random_seed)
     q_start, start_tf, start_info = solve_endpoint(
         label="start",
@@ -505,7 +526,7 @@ def prepare_pipeline(args: argparse.Namespace) -> dict[str, Any]:
     seed_path = np.linspace(q_start, q_goal, args.target_steps, dtype=np.float32)
     # The batch planner resolves both the STL and the C-space workpiece ID from
     # a ``job_NNN`` parent directory in the NPZ path.
-    transition_path = transition_job_dir / "transition_0000_0001.npz"
+    transition_path = transition_job_dir / f"{transition_name}.npz"
     np.savez_compressed(
         transition_path,
         q_start=q_start.astype(np.float32),
@@ -543,17 +564,22 @@ def prepare_pipeline(args: argparse.Namespace) -> dict[str, Any]:
         "start_solution": start_info,
         "goal_solution": goal_info,
     }
-    manifest_path = output_dir / "planning_request.json"
+    manifest_path = args.output_dir / f"{request_name}.json"
     write_json(manifest_path, manifest)
     manifest["outputs"]["request_manifest"] = manifest_path
     manifest["kinematics"] = kinematics
     return manifest
 
 
-def run_dp_dual(args: argparse.Namespace, prepared: dict[str, Any]) -> dict[str, Any]:
+def run_dp_dual(args: argparse.Namespace, prepared: dict[str, Any], batch=None) -> dict[str, Any]:
     checkpoint = _require_file(args.checkpoint_path, "DP-Dual checkpoint (--checkpoint-path or DP_DUAL_CHECKPOINT)")
     stats = _require_file(args.stats_path, "DP-Dual statistics")
     transition_path = Path(prepared["outputs"]["transition_npz"])
+    if batch is not None:
+        expected = {Path(item["prepared"]["outputs"]["transition_npz"]).resolve() for item in batch}
+        actual = {path.resolve() for path in transition_path.parent.rglob("transition_*.npz")}
+        if actual != expected:
+            raise RuntimeError("Batch input directory does not match the successfully prepared requests")
     jobs_root = Path(prepared["outputs"]["jobs_root"])
     dp_output = args.output_dir / "dp_dual"
     command = [
@@ -574,7 +600,7 @@ def run_dp_dual(args: argparse.Namespace, prepared: dict[str, Any]) -> dict[str,
         "--sample-source",
         "regular",
         "--sample-count",
-        "1",
+        str(len(batch)) if batch is not None else "1",
         "--sampling-mode",
         "baseline",
         "--planner-mode",
@@ -597,12 +623,19 @@ def run_dp_dual(args: argparse.Namespace, prepared: dict[str, Any]) -> dict[str,
     cspace_feature_dir = prepared["outputs"].get("cspace_feature_dir")
     if cspace_feature_dir is not None:
         command.extend(["--cspace-feature-dir", str(cspace_feature_dir)])
-    _run(command, DP_ROOT, "DP-Dual")
+    try:
+        _run(command, DP_ROOT, "DP-Dual")
+    except subprocess.CalledProcessError:
+        # Batch inference writes partial successes and failures before exiting nonzero.
+        if batch is None or not (dp_output / "batch_inference_manifest.json").is_file():
+            raise
 
     manifest_path = _require_file(dp_output / "batch_inference_manifest.json", "DP-Dual manifest")
     with manifest_path.open("r", encoding="utf-8") as stream:
         batch_manifest = json.load(stream)
     processed = batch_manifest.get("processed", [])
+    if batch is not None:
+        return collect_batch_results(batch, batch_manifest)
     if batch_manifest.get("failed") or len(processed) != 1:
         raise RuntimeError(f"DP-Dual did not complete one sample successfully; see {manifest_path}")
     sample = processed[0]
@@ -625,9 +658,116 @@ def run_dp_dual(args: argparse.Namespace, prepared: dict[str, Any]) -> dict[str,
     return result
 
 
+def collect_batch_results(batch, manifest):
+    expected = {str(Path(item["prepared"]["outputs"]["transition_npz"]).resolve()) for item in batch}
+    records = {}
+    for category in ("processed", "failed"):
+        for record in manifest.get(category, []):
+            path = str(Path(record.get("npz_path", "")).resolve())
+            if path not in expected or path in records:
+                raise RuntimeError(f"Unexpected or duplicate batch manifest entry: {path}")
+            records[path] = (category, record)
+    results = []
+    for item in batch:
+        prepared = item["prepared"]
+        path = str(Path(prepared["outputs"]["transition_npz"]).resolve())
+        category, sample = records.get(path, ("failed", {"error": "Missing inference result"}))
+        result = {"id": item["id"], "transition_npz": path, "start": item["start"], "goal": item["goal"]}
+        if category != "processed" or sample.get("planning_success") is not True:
+            result.update(status="failed", stage="inference", error=sample.get("error", "Planning certificate failed"))
+        else:
+            try:
+                joint_path = _require_file(Path(sample["output_dir"]) / "pred_joint_horizon.npy", "prediction")
+                q = np.asarray(np.load(joint_path), dtype=float)
+                if q.ndim != 2 or q.shape[1] != 6 or len(q) < 2 or not np.isfinite(q).all():
+                    raise ValueError("Invalid prediction shape or non-finite joint angles")
+                tcp_path = joint_path.with_name("pred_tcp_transforms.npy")
+                np.save(tcp_path, np.stack([prepared["kinematics"].forward(row) for row in q]))
+                result.update(status="success", joint_trajectory=joint_path, tcp_transforms=tcp_path,
+                              summary=joint_path.with_name("summary.json"))
+            except (OSError, ValueError, RuntimeError, KeyError) as exc:
+                result.update(status="failed", stage="result_collection", error=str(exc))
+        results.append(result)
+    return {"results": results}
+
+
+def load_requests(args):
+    if args.requests_file is None:
+        if args.start is None or args.goal is None:
+            raise ValueError("Provide both --start and --goal, or --requests-file")
+        return None
+    if args.start is not None or args.goal is not None:
+        raise ValueError("--requests-file cannot be combined with --start/--goal")
+    with args.requests_file.open(encoding="utf-8") as stream:
+        payload = json.load(stream)
+    requests = payload.get("requests") if isinstance(payload, dict) else payload
+    if not isinstance(requests, list) or not requests:
+        raise ValueError("Batch JSON must contain a nonempty requests list")
+    ids = set()
+    normalized = []
+    for index, request in enumerate(requests):
+        if not isinstance(request, dict):
+            raise ValueError(f"Request {index} must be an object")
+        identifier = request.get("id", f"pair_{index:04d}")
+        if not isinstance(identifier, str) or not identifier.strip() or identifier in ids:
+            raise ValueError(f"Invalid or duplicate request id: {identifier!r}")
+        ids.add(identifier)
+        item = {"id": identifier}
+        for key in ("start", "goal"):
+            try:
+                point = np.asarray(request.get(key), dtype=float)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"Request {identifier}: {key} must contain three finite coordinates") from exc
+            if point.shape != (3,) or not np.isfinite(point).all():
+                raise ValueError(f"Request {identifier}: {key} must contain three finite coordinates")
+            item[key] = point.tolist()
+        normalized.append(item)
+    return normalized
+
+
+def plan_batch(args, requests):
+    # Fresh directories prevent stale NPZs being sampled or an old manifest being accepted.
+    if args.output_dir.exists() and any(args.output_dir.iterdir()):
+        raise ValueError("Batch planning requires an empty/new --output-dir; existing results are preserved")
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    shared, batch, results = {}, [], []
+    for index, request in enumerate(requests):
+        pair_args = argparse.Namespace(**vars(args))
+        pair_args.start, pair_args.goal = request["start"], request["goal"]
+        print(f"[prepare {index+1}/{len(requests)}] {request['id']}", flush=True)
+        try:
+            prepared = prepare_pipeline(pair_args, shared,
+                                        f"transition_{2*index:04d}_{2*index+1:04d}",
+                                        f"planning_request_{index:04d}")
+            batch.append({**request, "prepared": prepared})
+            results.append({**request, "status": "prepared", "transition_npz": prepared["outputs"]["transition_npz"]})
+        except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
+            results.append({**request, "status": "failed", "stage": "preparation", "error": str(exc)})
+    report_path = args.output_dir / "batch_result.json"
+    report = {"requested_count": len(requests), "results": results}
+    write_json(report_path, report)
+    if batch and not args.prepare_only:
+        try:
+            inferred = run_dp_dual(args, batch[0]["prepared"], batch=batch)["results"]
+        except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
+            inferred = [{"id": item["id"], "status": "failed", "stage": "inference", "error": str(exc)} for item in batch]
+        by_id = {item["id"]: item for item in inferred}
+        results = [{**item, **by_id.get(item["id"], {})} for item in results]
+    report.update(results=results, successful_count=sum(r["status"] == "success" for r in results),
+                  prepared_count=len(batch), failed_count=sum(r["status"] == "failed" for r in results))
+    write_json(report_path, report)
+    print(f"[batch] prepared={len(batch)}, success={report['successful_count']}, failed={report['failed_count']}; {report_path}")
+    if report["failed_count"]:
+        raise RuntimeError(f"Some batch requests failed; see {report_path}")
+
+
 def main() -> None:
     args = build_parser().parse_args()
     try:
+        requests = load_requests(args)
+        if requests is not None:
+            plan_batch(args, requests)
+            return
         prepared = prepare_pipeline(args)
         print(f"\n[prepared] transition input: {prepared['outputs']['transition_npz']}")
         print(f"[prepared] SDF: {prepared['outputs']['sdf']}")
