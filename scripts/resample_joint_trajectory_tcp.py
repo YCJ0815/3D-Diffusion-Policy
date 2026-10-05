@@ -16,7 +16,7 @@ from replay_predicted_trajectory_pybullet import (
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 WORKSPACE_ROOT = PROJECT_ROOT.parents[1]
-DEFAULT_RUN_DIR = WORKSPACE_ROOT / "experiments" / "real-experiment" / "sdf_0001"
+DEFAULT_RUN_DIR = WORKSPACE_ROOT / "experiments" / "real-experiment" / "transition_0000_0001_bspline_inference"
 DEFAULT_SOURCE_TRAJECTORY = DEFAULT_RUN_DIR / "pred_joint_horizon.npy"
 DEFAULT_OUTPUT_DIR = DEFAULT_RUN_DIR / "resampled_tcp_2mm"
 

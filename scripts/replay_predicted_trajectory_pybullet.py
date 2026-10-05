@@ -11,12 +11,13 @@ import time
 import xml.etree.ElementTree as ET
 
 import numpy as np
+from rrt_joint_approach import add_rrt_arguments, edge_durations, plan_pybullet_approach
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 WORKSPACE_ROOT = PROJECT_ROOT.parents[1]
 DEFAULT_EXPERIMENT_DIR = WORKSPACE_ROOT / "experiments" / "real-experiment"
-DEFAULT_PREDICTION_DIR = DEFAULT_EXPERIMENT_DIR / "sdf_0001" / "resampled_tcp_2mm"
+DEFAULT_PREDICTION_DIR = DEFAULT_EXPERIMENT_DIR / "transition_0002_0003_bspline_inference" / "resampled_tcp_2mm"
 DEFAULT_TRAJECTORY = DEFAULT_PREDICTION_DIR / "pred_joint_horizon.npy"
 DEFAULT_TCP_TRANSFORMS = DEFAULT_PREDICTION_DIR / "pred_tcp_transforms.npy"
 # The resampled trajectory has its own shape and therefore must not be checked
@@ -101,6 +102,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--target-hold-seconds", type=float, default=1.0)
     parser.add_argument("--trajectory-entry-seconds", type=float, default=5.0)
     parser.add_argument(
+        "--lift-height",
+        type=float,
+        default=0.2,
+        help="Vertical lift in metres above the workpiece marker before moving over the start point.",
+    )
+    parser.add_argument("--lift-seconds", type=float, default=2.0)
+    parser.add_argument("--horizontal-seconds", type=float, default=3.0)
+    parser.add_argument(
         "--vertical-yaw-deg",
         type=float,
         default=0.0,
@@ -108,6 +117,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--headless", action="store_true", help="Validate one replay without opening a window.")
     parser.add_argument("--no-tcp-trail", action="store_true")
+    add_rrt_arguments(parser)
     return parser
 
 
@@ -324,6 +334,9 @@ def main() -> None:
         "approach-seconds": args.approach_seconds,
         "target-hold-seconds": args.target_hold_seconds,
         "trajectory-entry-seconds": args.trajectory_entry_seconds,
+        "lift-height": args.lift_height,
+        "lift-seconds": args.lift_seconds,
+        "horizontal-seconds": args.horizontal_seconds,
     }
     invalid = [name for name, value in positive_values.items() if value <= 0.0]
     if invalid:
@@ -411,21 +424,60 @@ def main() -> None:
                     max(1, int(round(args.fps * args.target_hold_seconds))),
                     axis=0,
                 )
-                inbound = smooth_joint_segment(
-                    q_origin, default_joints, args.fps, args.approach_seconds
+
+                set_joint_configuration(
+                    pb, robot_id, joint_indices, trajectory_playback[0], client_id
                 )
-                trajectory_entry = smooth_joint_segment(
-                    default_joints,
-                    trajectory_playback[0],
-                    args.fps,
-                    args.trajectory_entry_seconds,
+                start_tcp = tcp_position(pb, robot_id, tcp_link_index, client_id)
+                lift_target = origin_target + np.array([0.0, 0.0, args.lift_height])
+                above_start_target = np.array(
+                    [start_tcp[0], start_tcp[1], lift_target[2]], dtype=np.float64
                 )
+                q_lift, _, _ = solve_vertical_down_ik(
+                    pb,
+                    robot_id,
+                    joint_indices,
+                    tcp_link_index,
+                    lift_target,
+                    args.vertical_yaw_deg,
+                    q_origin,
+                    client_id,
+                )
+                q_above_start, _, _ = solve_vertical_down_ik(
+                    pb,
+                    robot_id,
+                    joint_indices,
+                    tcp_link_index,
+                    above_start_target,
+                    args.vertical_yaw_deg,
+                    q_lift,
+                    client_id,
+                )
+                lift_segment = smooth_joint_segment(
+                    q_origin, q_lift, args.fps, args.lift_seconds
+                )
+                horizontal_segment = smooth_joint_segment(
+                    q_lift, q_above_start, args.fps, args.horizontal_seconds
+                )
+                approach_path, approach_report = plan_pybullet_approach(
+                    pb, robot_id, joint_indices, workpiece_id, q_above_start,
+                    trajectory_playback[0], client_id, args,
+                )
+                descend_parts = []
+                for index, (start, goal, duration) in enumerate(zip(
+                        approach_path[:-1], approach_path[1:],
+                        edge_durations(approach_path, args.trajectory_entry_seconds))):
+                    segment = smooth_joint_segment(start, goal, args.fps, float(duration))
+                    descend_parts.append(segment if index == 0 else segment[1:])
+                descend_segment = np.concatenate(descend_parts)
+                print("Approach RRT: " + json.dumps(approach_report))
                 # Drop duplicated boundary frames while preserving each named phase.
                 phase_arrays = (
                     ("default_to_workpiece_origin", outbound[:-1]),
                     ("hold_at_workpiece_origin", target_hold),
-                    ("workpiece_origin_to_default", inbound[1:]),
-                    ("default_to_trajectory_start", trajectory_entry[1:-1]),
+                    ("workpiece_origin_lift", lift_segment[1:]),
+                    ("lift_to_above_start", horizontal_segment[1:]),
+                    ("above_start_to_start", descend_segment[1:-1]),
                     ("predicted_trajectory", trajectory_playback),
                 )
                 playback = np.concatenate([values for _, values in phase_arrays], axis=0)
@@ -438,7 +490,12 @@ def main() -> None:
                     f"IK_position_error={ik_position_error:.3e} m, "
                     f"tool_Z_down_error={ik_down_angle:.3e} deg"
                 )
-                print(f"Vertical-down joint target: {q_origin.tolist()}")
+                print(f"Start TCP position: {start_tcp.tolist()} m")
+                print(
+                    f"Lift target: {lift_target.tolist()} m; "
+                    f"above-start target: {above_start_target.tolist()} m"
+                )
+                print(f"Vertical-down joint target (origin): {q_origin.tolist()}")
 
             tcp_points = []
             for waypoint in trajectory:
